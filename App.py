@@ -17,28 +17,24 @@ def telegram_bildir(mesaj):
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    sinyal = request.json
-    action = sinyal.get("action")
-    symbol = sinyal.get("symbol")
-    price = sinyal.get("price")
+    try:
+        sinyal = request.json
+        action = sinyal.get("action", "")
+        symbol = sinyal.get("symbol", "")
+        price = sinyal.get("price", "")
 
-    if action == "LONG":
-        emoji = "🟢"
-    else:
-        emoji = "🔴"
+        emoji = "🟢" if action == "LONG" else "🔴"
 
-    mesaj = f"""{emoji} <b>{action} SİNYALİ</b>
-📊 Sembol: {symbol}
-💰 Fiyat: {price}
-📈 Strateji: RSI + Bollinger Bands"""
-
-    telegram_bildir(mesaj)
-    print(mesaj)
-    return {"status": "ok"}
+        mesaj = f"{emoji} <b>{action} SİNYALİ</b>\n📊 {symbol}\n💰 {price}"
+        telegram_bildir(mesaj)
+        return {"status": "ok"}, 200
+    except Exception as e:
+        print(f"Hata: {e}")
+        return {"status": "error"}, 500
 
 @app.route("/")
 def index():
-    return "Bot çalışıyor ✅"
+    return "Bot calisiyor", 200
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
