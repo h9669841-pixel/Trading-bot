@@ -11,10 +11,8 @@ BB_MULT = 4.0
 RSI_LEN = 14
 RSI_OB = 55
 RSI_OS = 40
-VOL_LOOKBACK = 15
-VOL_ADV = 29
-SYMBOL = "XBTUSD"  # Kraken'de BTC/USD
-INTERVAL = 5  # 5 dakikalık mumlar
+SYMBOL = "XBTUSD"
+INTERVAL = 5
 
 def telegram_bildir(mesaj):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -33,13 +31,12 @@ def get_candles():
 
     if data.get("error"):
         print(f"Kraken hata: {data['error']}")
-        return None, None, None
+        return None, None
 
     result = list(data["result"].values())[0]
     closes = [float(d[4]) for d in result]
     opens  = [float(d[1]) for d in result]
-    vols   = [float(d[6]) for d in result]
-    return closes, opens, vols
+    return closes, opens
 
 def sma(data, period):
     return np.mean(data[-period:])
@@ -59,7 +56,7 @@ def calc_rsi(closes, period):
     return 100 - (100 / (1 + rs))
 
 def analiz():
-    closes, opens, vols = get_candles()
+    closes, opens = get_candles()
 
     if closes is None:
         print("Veri alınamadı, atlanıyor...")
@@ -82,29 +79,14 @@ def analiz():
     buy_signal  = (prev_close <= bb_lower) and (close > bb_lower) and (rsi_val < RSI_OS)
     sell_signal = (prev_close >= bb_upper) and (close < bb_upper) and (rsi_val > RSI_OB)
 
-    buy_vols  = [vols[i] if closes[i] > opens[i] else 0.0 for i in range(-VOL_LOOKBACK, 0)]
-    sell_vols = [vols[i] if closes[i] < opens[i] else 0.0 for i in range(-VOL_LOOKBACK, 0)]
-    avg_buy   = np.mean(buy_vols)
-    avg_sell  = np.mean(sell_vols)
-    multiplier = 1.0 + VOL_ADV / 100.0
-
-    bull_dom = buy_signal and avg_buy > avg_sell * multiplier
-    bear_dom = sell_signal and avg_sell > avg_buy * multiplier
-
     print(f"Fiyat: {close:.2f} | RSI: {rsi_val:.1f} | BB_U: {bb_upper:.2f} | BB_L: {bb_lower:.2f}")
 
     if buy_signal:
-        if bull_dom:
-            mesaj = f"🟢⭐ <b>GÜÇLÜ BUY SİNYALİ</b>\n📊 BTC/USD\n💰 Fiyat: {close:.2f}\n📈 RSI: {rsi_val:.1f}\n🔥 Bull Dominance ★"
-        else:
-            mesaj = f"🟢 <b>BUY SİNYALİ</b>\n📊 BTC/USD\n💰 Fiyat: {close:.2f}\n📈 RSI: {rsi_val:.1f}"
+        mesaj = f"🟢 <b>BUY SİNYALİ</b>\n📊 BTC/USD\n💰 Fiyat: {close:.2f}\n📈 RSI: {rsi_val:.1f}"
         telegram_bildir(mesaj)
 
     elif sell_signal:
-        if bear_dom:
-            mesaj = f"🔴⭐ <b>GÜÇLÜ SELL SİNYALİ</b>\n📊 BTC/USD\n💰 Fiyat: {close:.2f}\n📈 RSI: {rsi_val:.1f}\n🔥 Bear Dominance ★"
-        else:
-            mesaj = f"🔴 <b>SELL SİNYALİ</b>\n📊 BTC/USD\n💰 Fiyat: {close:.2f}\n📈 RSI: {rsi_val:.1f}"
+        mesaj = f"🔴 <b>SELL SİNYALİ</b>\n📊 BTC/USD\n💰 Fiyat: {close:.2f}\n📈 RSI: {rsi_val:.1f}"
         telegram_bildir(mesaj)
 
 if __name__ == "__main__":
