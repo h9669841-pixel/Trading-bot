@@ -21,6 +21,18 @@ INTERVAL = 5
 QUANTITY = 0.001
 TESTNET_URL = "https://testnet.binance.vision"
 
+TP_YUZDE = 1.0   # %1 kar
+SL_YUZDE = 5.0   # %5 zarar
+
+# Açık pozisyon takibi
+pozisyon = {
+    "var": False,
+    "yon": None,       # BUY veya SELL
+    "giris": None,     # Giriş fiyatı
+    "tp": None,        # Take profit fiyatı
+    "sl": None         # Stop loss fiyatı
+}
+
 def telegram_bildir(mesaj):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     r = requests.post(url, json={
@@ -85,7 +97,46 @@ def calc_rsi(closes, period):
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
+def pozisyon_kontrol(close):
+    global pozisyon
+
+    if not pozisyon["var"]:
+        return
+
+    giris = pozisyon["giris"]
+    yon = pozisyon["yon"]
+    tp = pozisyon["tp"]
+    sl = pozisyon["sl"]
+
+    if yon == "BUY":
+        kar = ((close - giris) / giris) * 100
+        if close >= tp:
+            sonuc = islem_ac("SELL")
+            mesaj = f"✅ <b>TAKE PROFIT!</b>\n📊 BTC/USD\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📈 Kar: +%{kar:.2f}\n🧪 TESTNET"
+            telegram_bildir(mesaj)
+            pozisyon["var"] = False
+        elif close <= sl:
+            sonuc = islem_ac("SELL")
+            mesaj = f"🛑 <b>STOP LOSS!</b>\n📊 BTC/USD\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📉 Zarar: %{kar:.2f}\n🧪 TESTNET"
+            telegram_bildir(mesaj)
+            pozisyon["var"] = False
+
+    elif yon == "SELL":
+        kar = ((giris - close) / giris) * 100
+        if close <= tp:
+            sonuc = islem_ac("BUY")
+            mesaj = f"✅ <b>TAKE PROFIT!</b>\n📊 BTC/USD\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📈 Kar: +%{kar:.2f}\n🧪 TESTNET"
+            telegram_bildir(mesaj)
+            pozisyon["var"] = False
+        elif close >= sl:
+            sonuc = islem_ac("BUY")
+            mesaj = f"🛑 <b>STOP LOSS!</b>\n📊 BTC/USD\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📉 Zarar: %{kar:.2f}\n🧪 TESTNET"
+            telegram_bildir(mesaj)
+            pozisyon["var"] = False
+
 def analiz():
+    global pozisyon
+
     closes, opens = get_candles()
 
     if closes is None:
@@ -106,30 +157,53 @@ def analiz():
     close      = closes[-1]
     prev_close = closes[-2]
 
-    buy_signal  = (prev_close <= bb_lower) and (close > bb_lower) and (rsi_val < RSI_OS)
-    sell_signal = (prev_close >= bb_upper) and (close < bb_upper) and (rsi_val > RSI_OB)
+    print(f"Fiyat: {close:.2f} | RSI: {rsi_val:.1f} | BB_U: {bb_upper:.2f} | BB_L: {bb_lower:.2f} | Pozisyon: {pozisyon['yon'] if pozisyon['var'] else 'Yok'}")
 
-    print(f"Fiyat: {close:.2f} | RSI: {rsi_val:.1f} | BB_U: {bb_upper:.2f} | BB_L: {bb_lower:.2f}")
+    # Önce açık pozisyon TP/SL kontrolü
+    pozisyon_kontrol(close)
 
-    if buy_signal:
-        sonuc = islem_ac("BUY")
-        if "orderId" in sonuc:
-            mesaj = f"🟢 <b>BUY SİNYALİ + İŞLEM AÇILDI</b>\n📊 BTC/USD\n💰 Fiyat: {close:.2f}\n📈 RSI: {rsi_val:.1f}\n🔢 Miktar: {QUANTITY} BTC\n🧪 TESTNET"
-        else:
-            mesaj = f"🟢 <b>BUY SİNYALİ</b>\n📊 BTC/USD\n💰 Fiyat: {close:.2f}\n📈 RSI: {rsi_val:.1f}\n⚠️ İşlem açılamadı: {sonuc.get('msg', '')}"
-        telegram_bildir(mesaj)
+    # Pozisyon yoksa yeni sinyal ara
+    if not pozisyon["var"]:
+        buy_signal  = (prev_close <= bb_lower) and (close > bb_lower) and (rsi_val < RSI_OS)
+        sell_signal = (prev_close >= bb_upper) and (close < bb_upper) and (rsi_val > RSI_OB)
 
-    elif sell_signal:
-        sonuc = islem_ac("SELL")
-        if "orderId" in sonuc:
-            mesaj = f"🔴 <b>SELL SİNYALİ + İŞLEM AÇILDI</b>\n📊 BTC/USD\n💰 Fiyat: {close:.2f}\n📈 RSI: {rsi_val:.1f}\n🔢 Miktar: {QUANTITY} BTC\n🧪 TESTNET"
-        else:
-            mesaj = f"🔴 <b>SELL SİNYALİ</b>\n📊 BTC/USD\n💰 Fiyat: {close:.2f}\n📈 RSI: {rsi_val:.1f}\n⚠️ İşlem açılamadı: {sonuc.get('msg', '')}"
-        telegram_bildir(mesaj)
+        if buy_signal:
+            sonuc = islem_ac("BUY")
+            if "orderId" in sonuc:
+                tp_fiyat = close * (1 + TP_YUZDE / 100)
+                sl_fiyat = close * (1 - SL_YUZDE / 100)
+                pozisyon.update({
+                    "var": True,
+                    "yon": "BUY",
+                    "giris": close,
+                    "tp": tp_fiyat,
+                    "sl": sl_fiyat
+                })
+                mesaj = f"🟢 <b>BUY İŞLEMİ AÇILDI</b>\n📊 BTC/USD\n💰 Fiyat: {close:.2f}\n📈 RSI: {rsi_val:.1f}\n🎯 TP: {tp_fiyat:.2f} (+%{TP_YUZDE})\n🛑 SL: {sl_fiyat:.2f} (-%{SL_YUZDE})\n🧪 TESTNET"
+            else:
+                mesaj = f"🟢 <b>BUY SİNYALİ</b>\n📊 BTC/USD\n💰 Fiyat: {close:.2f}\n⚠️ İşlem açılamadı: {sonuc.get('msg', '')}"
+            telegram_bildir(mesaj)
+
+        elif sell_signal:
+            sonuc = islem_ac("SELL")
+            if "orderId" in sonuc:
+                tp_fiyat = close * (1 - TP_YUZDE / 100)
+                sl_fiyat = close * (1 + SL_YUZDE / 100)
+                pozisyon.update({
+                    "var": True,
+                    "yon": "SELL",
+                    "giris": close,
+                    "tp": tp_fiyat,
+                    "sl": sl_fiyat
+                })
+                mesaj = f"🔴 <b>SELL İŞLEMİ AÇILDI</b>\n📊 BTC/USD\n💰 Fiyat: {close:.2f}\n📈 RSI: {rsi_val:.1f}\n🎯 TP: {tp_fiyat:.2f} (-%{TP_YUZDE})\n🛑 SL: {sl_fiyat:.2f} (+%{SL_YUZDE})\n🧪 TESTNET"
+            else:
+                mesaj = f"🔴 <b>SELL SİNYALİ</b>\n📊 BTC/USD\n💰 Fiyat: {close:.2f}\n⚠️ İşlem açılamadı: {sonuc.get('msg', '')}"
+            telegram_bildir(mesaj)
 
 if __name__ == "__main__":
     print("Bot başladı...")
-    telegram_bildir("🤖 <b>Bot Başladı!</b>\n📊 Sinyal + Al-Sat modu\n🧪 Testnet aktif")
+    telegram_bildir("🤖 <b>Bot Başladı!</b>\n📊 Sinyal + Al-Sat modu\n🎯 TP: %1 | 🛑 SL: %5\n🧪 Testnet aktif")
     while True:
         try:
             analiz()
