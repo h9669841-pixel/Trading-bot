@@ -13,8 +13,6 @@ RSI_OB = 61
 RSI_OS = 27
 VOL_LOOKBACK = 15
 VOL_ADV = 20.0
-SYMBOL = "BTCUSDT"
-INTERVAL = "1h"
 
 def telegram_bildir(mesaj):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -26,18 +24,18 @@ def telegram_bildir(mesaj):
     print(f"Telegram yanıt: {r.status_code}")
 
 def get_candles():
-    url = f"https://api.binance.com/api/v3/klines"
-    params = {"symbol": SYMBOL, "interval": INTERVAL, "limit": 100}
+    url = "https://api.coingecko.com/api/v3/coins/bitcoin/ohlc"
+    params = {"vs_currency": "usd", "days": "7"}
     r = requests.get(url, params=params)
     data = r.json()
-    
+
     if not isinstance(data, list):
-        print(f"Binance hata: {data}")
+        print(f"CoinGecko hata: {data}")
         return None, None, None
-    
+
     closes = [float(d[4]) for d in data]
     opens  = [float(d[1]) for d in data]
-    vols   = [float(d[5]) for d in data]
+    vols   = [1.0] * len(closes)
     return closes, opens, vols
 
 def sma(data, period):
@@ -59,9 +57,13 @@ def calc_rsi(closes, period):
 
 def analiz():
     closes, opens, vols = get_candles()
-    
+
     if closes is None:
         print("Veri alınamadı, atlanıyor...")
+        return
+
+    if len(closes) < BB_LEN + 1:
+        print(f"Yeterli veri yok: {len(closes)} mum")
         return
 
     basis = sma(closes, BB_LEN)
@@ -70,8 +72,8 @@ def analiz():
     bb_upper = basis + dev * mult
     bb_lower = basis - dev * mult
 
-    rsi_val = calc_rsi(closes, RSI_LEN)
-    close   = closes[-1]
+    rsi_val    = calc_rsi(closes, RSI_LEN)
+    close      = closes[-1]
     prev_close = closes[-2]
 
     buy_signal  = (prev_close <= bb_lower) and (close > bb_lower) and (rsi_val < RSI_OS)
@@ -79,8 +81,8 @@ def analiz():
 
     buy_vols  = [vols[i] if closes[i] > opens[i] else 0.0 for i in range(-VOL_LOOKBACK, 0)]
     sell_vols = [vols[i] if closes[i] < opens[i] else 0.0 for i in range(-VOL_LOOKBACK, 0)]
-    avg_buy  = np.mean(buy_vols)
-    avg_sell = np.mean(sell_vols)
+    avg_buy   = np.mean(buy_vols)
+    avg_sell  = np.mean(sell_vols)
     multiplier = 1.0 + VOL_ADV / 100.0
 
     bull_dom = buy_signal and avg_buy > avg_sell * multiplier
@@ -90,16 +92,16 @@ def analiz():
 
     if buy_signal:
         if bull_dom:
-            mesaj = f"🟢⭐ <b>GÜÇLÜ BUY SİNYALİ</b>\n📊 {SYMBOL}\n💰 Fiyat: {close:.2f}\n📈 RSI: {rsi_val:.1f}\n🔥 Bull Dominance ★"
+            mesaj = f"🟢⭐ <b>GÜÇLÜ BUY SİNYALİ</b>\n📊 BTC/USDT\n💰 Fiyat: {close:.2f}\n📈 RSI: {rsi_val:.1f}\n🔥 Bull Dominance ★"
         else:
-            mesaj = f"🟢 <b>BUY SİNYALİ</b>\n📊 {SYMBOL}\n💰 Fiyat: {close:.2f}\n📈 RSI: {rsi_val:.1f}"
+            mesaj = f"🟢 <b>BUY SİNYALİ</b>\n📊 BTC/USDT\n💰 Fiyat: {close:.2f}\n📈 RSI: {rsi_val:.1f}"
         telegram_bildir(mesaj)
 
     elif sell_signal:
         if bear_dom:
-            mesaj = f"🔴⭐ <b>GÜÇLÜ SELL SİNYALİ</b>\n📊 {SYMBOL}\n💰 Fiyat: {close:.2f}\n📈 RSI: {rsi_val:.1f}\n🔥 Bear Dominance ★"
+            mesaj = f"🔴⭐ <b>GÜÇLÜ SELL SİNYALİ</b>\n📊 BTC/USDT\n💰 Fiyat: {close:.2f}\n📈 RSI: {rsi_val:.1f}\n🔥 Bear Dominance ★"
         else:
-            mesaj = f"🔴 <b>SELL SİNYALİ</b>\n📊 {SYMBOL}\n💰 Fiyat: {close:.2f}\n📈 RSI: {rsi_val:.1f}"
+            mesaj = f"🔴 <b>SELL SİNYALİ</b>\n📊 BTC/USDT\n💰 Fiyat: {close:.2f}\n📈 RSI: {rsi_val:.1f}"
         telegram_bildir(mesaj)
 
 if __name__ == "__main__":
