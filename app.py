@@ -13,6 +13,8 @@ RSI_OB = 61
 RSI_OS = 27
 VOL_LOOKBACK = 15
 VOL_ADV = 20.0
+SYMBOL = "XBTUSD"  # Kraken'de BTC/USD
+INTERVAL = 5  # 5 dakikalık mumlar
 
 def telegram_bildir(mesaj):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -24,18 +26,19 @@ def telegram_bildir(mesaj):
     print(f"Telegram yanıt: {r.status_code}")
 
 def get_candles():
-    url = "https://api.coingecko.com/api/v3/coins/bitcoin/ohlc"
-    params = {"vs_currency": "usd", "days": "7"}
+    url = "https://api.kraken.com/0/public/OHLC"
+    params = {"pair": SYMBOL, "interval": INTERVAL}
     r = requests.get(url, params=params)
     data = r.json()
 
-    if not isinstance(data, list):
-        print(f"CoinGecko hata: {data}")
+    if data.get("error"):
+        print(f"Kraken hata: {data['error']}")
         return None, None, None
 
-    closes = [float(d[4]) for d in data]
-    opens  = [float(d[1]) for d in data]
-    vols   = [1.0] * len(closes)
+    result = list(data["result"].values())[0]
+    closes = [float(d[4]) for d in result]
+    opens  = [float(d[1]) for d in result]
+    vols   = [float(d[6]) for d in result]
     return closes, opens, vols
 
 def sma(data, period):
@@ -92,24 +95,24 @@ def analiz():
 
     if buy_signal:
         if bull_dom:
-            mesaj = f"🟢⭐ <b>GÜÇLÜ BUY SİNYALİ</b>\n📊 BTC/USDT\n💰 Fiyat: {close:.2f}\n📈 RSI: {rsi_val:.1f}\n🔥 Bull Dominance ★"
+            mesaj = f"🟢⭐ <b>GÜÇLÜ BUY SİNYALİ</b>\n📊 BTC/USD\n💰 Fiyat: {close:.2f}\n📈 RSI: {rsi_val:.1f}\n🔥 Bull Dominance ★"
         else:
-            mesaj = f"🟢 <b>BUY SİNYALİ</b>\n📊 BTC/USDT\n💰 Fiyat: {close:.2f}\n📈 RSI: {rsi_val:.1f}"
+            mesaj = f"🟢 <b>BUY SİNYALİ</b>\n📊 BTC/USD\n💰 Fiyat: {close:.2f}\n📈 RSI: {rsi_val:.1f}"
         telegram_bildir(mesaj)
 
     elif sell_signal:
         if bear_dom:
-            mesaj = f"🔴⭐ <b>GÜÇLÜ SELL SİNYALİ</b>\n📊 BTC/USDT\n💰 Fiyat: {close:.2f}\n📈 RSI: {rsi_val:.1f}\n🔥 Bear Dominance ★"
+            mesaj = f"🔴⭐ <b>GÜÇLÜ SELL SİNYALİ</b>\n📊 BTC/USD\n💰 Fiyat: {close:.2f}\n📈 RSI: {rsi_val:.1f}\n🔥 Bear Dominance ★"
         else:
-            mesaj = f"🔴 <b>SELL SİNYALİ</b>\n📊 BTC/USDT\n💰 Fiyat: {close:.2f}\n📈 RSI: {rsi_val:.1f}"
+            mesaj = f"🔴 <b>SELL SİNYALİ</b>\n📊 BTC/USD\n💰 Fiyat: {close:.2f}\n📈 RSI: {rsi_val:.1f}"
         telegram_bildir(mesaj)
 
 if __name__ == "__main__":
     print("Bot başladı...")
-    telegram_bildir("🤖 <b>Bot başladı!</b> Sinyaller izleniyor...")
+    telegram_bildir("🤖 <b>Bot başladı!</b> 5 dakikalık mumlar izleniyor...")
     while True:
         try:
             analiz()
         except Exception as e:
             print(f"Hata: {e}")
-        time.sleep(900)
+        time.sleep(300)
