@@ -112,4 +112,4 @@ if __name__ == "__main__":
             analiz()
         except Exception as e:
             print(f"Hata: {e}")
-        time.sleep(3600)
+        time.sleep(900)
