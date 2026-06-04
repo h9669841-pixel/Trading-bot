@@ -7,7 +7,7 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 BB_LEN = 30
-BB_MULT = 4.0
+BB_MULT = 2.0
 RSI_LEN = 14
 RSI_OB = 55
 RSI_OS = 40
