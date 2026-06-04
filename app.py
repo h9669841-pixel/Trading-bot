@@ -9,10 +9,10 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 BB_LEN = 30
 BB_MULT = 4.0
 RSI_LEN = 14
-RSI_OB = 61
-RSI_OS = 27
+RSI_OB = 50
+RSI_OS = 30
 VOL_LOOKBACK = 15
-VOL_ADV = 20.0
+VOL_ADV = 1
 SYMBOL = "XBTUSD"  # Kraken'de BTC/USD
 INTERVAL = 5  # 5 dakikalık mumlar
 
