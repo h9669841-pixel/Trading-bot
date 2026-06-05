@@ -21,15 +21,17 @@ INTERVAL = 5
 QUANTITY = "0.001"
 TESTNET_URL = "https://api-testnet.bybit.com"
 
-TP_YUZDE = 1.0
+TP_YUZDE = 3.0
 SL_YUZDE = 5.0
+BREAKEVEN_YUZDE = 1.0
 
 pozisyon = {
     "var": False,
     "yon": None,
     "giris": None,
     "tp": None,
-    "sl": None
+    "sl": None,
+    "breakeven": False
 }
 
 def telegram_bildir(mesaj):
@@ -114,33 +116,58 @@ def pozisyon_kontrol(close):
     giris = pozisyon["giris"]
     yon = pozisyon["yon"]
     tp = pozisyon["tp"]
-    sl = pozisyon["sl"]
 
     if yon == "BUY":
         kar = ((close - giris) / giris) * 100
+
+        if kar >= BREAKEVEN_YUZDE and not pozisyon["breakeven"]:
+            pozisyon["sl"] = giris
+            pozisyon["breakeven"] = True
+            mesaj = f"🔒 <b>BREAKEVEN AKTİF!</b>\n📊 BTC/USD\n💰 Giriş: {giris:.2f}\n💰 Şu an: {close:.2f}\n📈 Kar: +%{kar:.2f}\n🛑 SL giriş fiyatına çekildi: {giris:.2f}"
+            telegram_bildir(mesaj)
+
         if close >= tp:
             islem_ac("SELL")
             mesaj = f"✅ <b>TAKE PROFIT!</b>\n📊 BTC/USD\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📈 Kar: +%{kar:.2f}\n🧪 TESTNET"
             telegram_bildir(mesaj)
             pozisyon["var"] = False
-        elif close <= sl:
+            pozisyon["breakeven"] = False
+
+        elif close <= pozisyon["sl"]:
             islem_ac("SELL")
-            mesaj = f"🛑 <b>STOP LOSS!</b>\n📊 BTC/USD\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📉 Zarar: %{kar:.2f}\n🧪 TESTNET"
+            if pozisyon["breakeven"]:
+                mesaj = f"🔒 <b>BREAKEVEN ÇIKIŞI</b>\n📊 BTC/USD\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n➡️ Sıfır zarar\n🧪 TESTNET"
+            else:
+                mesaj = f"🛑 <b>STOP LOSS!</b>\n📊 BTC/USD\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📉 Zarar: %{kar:.2f}\n🧪 TESTNET"
             telegram_bildir(mesaj)
             pozisyon["var"] = False
+            pozisyon["breakeven"] = False
 
     elif yon == "SELL":
         kar = ((giris - close) / giris) * 100
+
+        if kar >= BREAKEVEN_YUZDE and not pozisyon["breakeven"]:
+            pozisyon["sl"] = giris
+            pozisyon["breakeven"] = True
+            mesaj = f"🔒 <b>BREAKEVEN AKTİF!</b>\n📊 BTC/USD\n💰 Giriş: {giris:.2f}\n💰 Şu an: {close:.2f}\n📈 Kar: +%{kar:.2f}\n🛑 SL giriş fiyatına çekildi: {giris:.2f}"
+            telegram_bildir(mesaj)
+
         if close <= tp:
             islem_ac("BUY")
             mesaj = f"✅ <b>TAKE PROFIT!</b>\n📊 BTC/USD\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📈 Kar: +%{kar:.2f}\n🧪 TESTNET"
             telegram_bildir(mesaj)
             pozisyon["var"] = False
-        elif close >= sl:
+            pozisyon["breakeven"] = False
+
+        elif close >= pozisyon["sl"]:
             islem_ac("BUY")
-            mesaj = f"🛑 <b>STOP LOSS!</b>\n📊 BTC/USD\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📉 Zarar: %{kar:.2f}\n🧪 TESTNET"
+            if pozisyon["breakeven"]:
+                mesaj = f"🔒 <b>BREAKEVEN ÇIKIŞI</b>\n📊 BTC/USD\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n➡️ Sıfır zarar\n🧪 TESTNET"
+            else:
+                mesaj = f"🛑 <b>STOP LOSS!</b>\n📊 BTC/USD\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📉 Zarar: %{kar:.2f}\n🧪 TESTNET"
             telegram_bildir(mesaj)
             pozisyon["var"] = False
+            pozisyon["breakeven"] = False
 
 def analiz():
     global pozisyon
@@ -165,7 +192,7 @@ def analiz():
     close      = closes[-1]
     prev_close = closes[-2]
 
-    print(f"Fiyat: {close:.2f} | RSI: {rsi_val:.1f} | BB_U: {bb_upper:.2f} | BB_L: {bb_lower:.2f} | Pozisyon: {pozisyon['yon'] if pozisyon['var'] else 'Yok'}")
+    print(f"Fiyat: {close:.2f} | RSI: {rsi_val:.1f} | BB_U: {bb_upper:.2f} | BB_L: {bb_lower:.2f} | Pozisyon: {pozisyon['yon'] if pozisyon['var'] else 'Yok'} | Breakeven: {pozisyon['breakeven']}")
 
     pozisyon_kontrol(close)
 
@@ -183,7 +210,8 @@ def analiz():
                     "yon": "BUY",
                     "giris": close,
                     "tp": tp_fiyat,
-                    "sl": sl_fiyat
+                    "sl": sl_fiyat,
+                    "breakeven": False
                 })
                 mesaj = f"🟢 <b>BUY İŞLEMİ AÇILDI</b>\n📊 BTC/USD\n💰 Fiyat: {close:.2f}\n📈 RSI: {rsi_val:.1f}\n🎯 TP: {tp_fiyat:.2f} (+%{TP_YUZDE})\n🛑 SL: {sl_fiyat:.2f} (-%{SL_YUZDE})\n🧪 TESTNET"
             else:
@@ -200,7 +228,8 @@ def analiz():
                     "yon": "SELL",
                     "giris": close,
                     "tp": tp_fiyat,
-                    "sl": sl_fiyat
+                    "sl": sl_fiyat,
+                    "breakeven": False
                 })
                 mesaj = f"🔴 <b>SELL İŞLEMİ AÇILDI</b>\n📊 BTC/USD\n💰 Fiyat: {close:.2f}\n📈 RSI: {rsi_val:.1f}\n🎯 TP: {tp_fiyat:.2f} (-%{TP_YUZDE})\n🛑 SL: {sl_fiyat:.2f} (+%{SL_YUZDE})\n🧪 TESTNET"
             else:
@@ -209,7 +238,7 @@ def analiz():
 
 if __name__ == "__main__":
     print("Bot başladı...")
-    telegram_bildir("🤖 <b>Bot Başladı!</b>\n📊 Sinyal + Al-Sat modu\n🎯 TP: %1 | 🛑 SL: %5\n🧪 Bybit Testnet aktif")
+    telegram_bildir("🤖 <b>Bot Başladı!</b>\n📊 Sinyal + Al-Sat modu\n🎯 TP: %3 | 🛑 SL: %5\n🔒 Breakeven: %1 karda aktif\n🧪 Bybit Testnet aktif")
     while True:
         try:
             analiz()
