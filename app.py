@@ -7,30 +7,29 @@ import numpy as np
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")
-BINANCE_SECRET = os.environ.get("BINANCE_SECRET")
+BYBIT_API_KEY = os.environ.get("BINANCE_API_KEY")
+BYBIT_SECRET = os.environ.get("BINANCE_SECRET")
 
 BB_LEN = 30
-BB_MULT = 2
+BB_MULT = 4.0
 RSI_LEN = 14
 RSI_OB = 55
 RSI_OS = 40
 SYMBOL = "XBTUSD"
-BINANCE_SYMBOL = "BTCUSDT"
+BYBIT_SYMBOL = "BTCUSDT"
 INTERVAL = 5
 QUANTITY = 0.001
-TESTNET_URL = "https://testnet.binance.vision"
+TESTNET_URL = "https://api-testnet.bybit.com"
 
-TP_YUZDE = 1.0   # %1 kar
-SL_YUZDE = 5.0   # %5 zarar
+TP_YUZDE = 1.0
+SL_YUZDE = 5.0
 
-# Açık pozisyon takibi
 pozisyon = {
     "var": False,
-    "yon": None,       # BUY veya SELL
-    "giris": None,     # Giriş fiyatı
-    "tp": None,        # Take profit fiyatı
-    "sl": None         # Stop loss fiyatı
+    "yon": None,
+    "giris": None,
+    "tp": None,
+    "sl": None
 }
 
 def telegram_bildir(mesaj):
@@ -58,26 +57,32 @@ def get_candles():
     return closes, opens
 
 def imza_olustur(params):
-    query = "&".join(f"{k}={v}" for k, v in params.items())
+    timestamp = str(int(time.time() * 1000))
+    param_str = timestamp + BYBIT_API_KEY + "5000" + "&".join(f"{k}={v}" for k, v in params.items())
     imza = hmac.new(
-        BINANCE_SECRET.encode(),
-        query.encode(),
+        BYBIT_SECRET.encode(),
+        param_str.encode(),
         hashlib.sha256
     ).hexdigest()
-    return query + f"&signature={imza}"
+    return timestamp, imza
 
 def islem_ac(action):
     params = {
-        "symbol": BINANCE_SYMBOL,
-        "side": action,
-        "type": "MARKET",
-        "quantity": QUANTITY,
-        "timestamp": int(time.time() * 1000)
+        "category": "spot",
+        "symbol": BYBIT_SYMBOL,
+        "side": "Buy" if action == "BUY" else "Sell",
+        "orderType": "Market",
+        "qty": str(QUANTITY),
     }
-    query = imza_olustur(params)
-    url = f"{TESTNET_URL}/api/v3/order?{query}"
-    headers = {"X-MBX-APIKEY": BINANCE_API_KEY}
-    r = requests.post(url, headers=headers)
+    timestamp, imza = imza_olustur(params)
+    headers = {
+        "X-BAPI-API-KEY": BYBIT_API_KEY,
+        "X-BAPI-SIGN": imza,
+        "X-BAPI-TIMESTAMP": timestamp,
+        "X-BAPI-RECV-WINDOW": "5000"
+    }
+    url = f"{TESTNET_URL}/v5/order/create"
+    r = requests.post(url, json=params, headers=headers)
     return r.json()
 
 def sma(data, period):
@@ -111,12 +116,12 @@ def pozisyon_kontrol(close):
     if yon == "BUY":
         kar = ((close - giris) / giris) * 100
         if close >= tp:
-            sonuc = islem_ac("SELL")
+            islem_ac("SELL")
             mesaj = f"✅ <b>TAKE PROFIT!</b>\n📊 BTC/USD\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📈 Kar: +%{kar:.2f}\n🧪 TESTNET"
             telegram_bildir(mesaj)
             pozisyon["var"] = False
         elif close <= sl:
-            sonuc = islem_ac("SELL")
+            islem_ac("SELL")
             mesaj = f"🛑 <b>STOP LOSS!</b>\n📊 BTC/USD\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📉 Zarar: %{kar:.2f}\n🧪 TESTNET"
             telegram_bildir(mesaj)
             pozisyon["var"] = False
@@ -124,12 +129,12 @@ def pozisyon_kontrol(close):
     elif yon == "SELL":
         kar = ((giris - close) / giris) * 100
         if close <= tp:
-            sonuc = islem_ac("BUY")
+            islem_ac("BUY")
             mesaj = f"✅ <b>TAKE PROFIT!</b>\n📊 BTC/USD\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📈 Kar: +%{kar:.2f}\n🧪 TESTNET"
             telegram_bildir(mesaj)
             pozisyon["var"] = False
         elif close >= sl:
-            sonuc = islem_ac("BUY")
+            islem_ac("BUY")
             mesaj = f"🛑 <b>STOP LOSS!</b>\n📊 BTC/USD\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📉 Zarar: %{kar:.2f}\n🧪 TESTNET"
             telegram_bildir(mesaj)
             pozisyon["var"] = False
@@ -159,17 +164,15 @@ def analiz():
 
     print(f"Fiyat: {close:.2f} | RSI: {rsi_val:.1f} | BB_U: {bb_upper:.2f} | BB_L: {bb_lower:.2f} | Pozisyon: {pozisyon['yon'] if pozisyon['var'] else 'Yok'}")
 
-    # Önce açık pozisyon TP/SL kontrolü
     pozisyon_kontrol(close)
 
-    # Pozisyon yoksa yeni sinyal ara
     if not pozisyon["var"]:
         buy_signal  = (prev_close <= bb_lower) and (close > bb_lower) and (rsi_val < RSI_OS)
         sell_signal = (prev_close >= bb_upper) and (close < bb_upper) and (rsi_val > RSI_OB)
 
         if buy_signal:
             sonuc = islem_ac("BUY")
-            if "orderId" in sonuc:
+            if sonuc.get("retCode") == 0:
                 tp_fiyat = close * (1 + TP_YUZDE / 100)
                 sl_fiyat = close * (1 - SL_YUZDE / 100)
                 pozisyon.update({
@@ -181,12 +184,12 @@ def analiz():
                 })
                 mesaj = f"🟢 <b>BUY İŞLEMİ AÇILDI</b>\n📊 BTC/USD\n💰 Fiyat: {close:.2f}\n📈 RSI: {rsi_val:.1f}\n🎯 TP: {tp_fiyat:.2f} (+%{TP_YUZDE})\n🛑 SL: {sl_fiyat:.2f} (-%{SL_YUZDE})\n🧪 TESTNET"
             else:
-                mesaj = f"🟢 <b>BUY SİNYALİ</b>\n📊 BTC/USD\n💰 Fiyat: {close:.2f}\n⚠️ İşlem açılamadı: {sonuc.get('msg', '')}"
+                mesaj = f"🟢 <b>BUY SİNYALİ</b>\n📊 BTC/USD\n💰 Fiyat: {close:.2f}\n⚠️ İşlem açılamadı: {sonuc.get('retMsg', '')}"
             telegram_bildir(mesaj)
 
         elif sell_signal:
             sonuc = islem_ac("SELL")
-            if "orderId" in sonuc:
+            if sonuc.get("retCode") == 0:
                 tp_fiyat = close * (1 - TP_YUZDE / 100)
                 sl_fiyat = close * (1 + SL_YUZDE / 100)
                 pozisyon.update({
@@ -198,12 +201,12 @@ def analiz():
                 })
                 mesaj = f"🔴 <b>SELL İŞLEMİ AÇILDI</b>\n📊 BTC/USD\n💰 Fiyat: {close:.2f}\n📈 RSI: {rsi_val:.1f}\n🎯 TP: {tp_fiyat:.2f} (-%{TP_YUZDE})\n🛑 SL: {sl_fiyat:.2f} (+%{SL_YUZDE})\n🧪 TESTNET"
             else:
-                mesaj = f"🔴 <b>SELL SİNYALİ</b>\n📊 BTC/USD\n💰 Fiyat: {close:.2f}\n⚠️ İşlem açılamadı: {sonuc.get('msg', '')}"
+                mesaj = f"🔴 <b>SELL SİNYALİ</b>\n📊 BTC/USD\n💰 Fiyat: {close:.2f}\n⚠️ İşlem açılamadı: {sonuc.get('retMsg', '')}"
             telegram_bildir(mesaj)
 
 if __name__ == "__main__":
     print("Bot başladı...")
-    telegram_bildir("🤖 <b>Bot Başladı!</b>\n📊 Sinyal + Al-Sat modu\n🎯 TP: %1 | 🛑 SL: %5\n🧪 Testnet aktif")
+    telegram_bildir("🤖 <b>Bot Başladı!</b>\n📊 Sinyal + Al-Sat modu\n🎯 TP: %1 | 🛑 SL: %5\n🧪 Bybit Testnet aktif")
     while True:
         try:
             analiz()
