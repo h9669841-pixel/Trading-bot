@@ -8,23 +8,26 @@ import json
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-BYBIT_API_KEY = os.environ.get("BINANCE_API_KEY")  # Orijinal değişken adınız korundu
+BYBIT_API_KEY = os.environ.get("BINANCE_API_KEY")  # Orijinal değişken adınız
 BYBIT_SECRET = os.environ.get("BINANCE_SECRET")
 
-BB_LEN = 30
-BB_MULT = 2.0
-RSI_LEN = 14
-RSI_OB = 55
-RSI_OS = 40
-SYMBOL = "XBTUSD"        # Kraken için sembol
-BYBIT_SYMBOL = "BTCUSDT"  # Bybit için sembol
-INTERVAL = 5
+# --- AGRESİF HIZLI AYARLAR ---
+BB_LEN = 14            # Mum periyodu 30'dan 14'e düştü (Daha hassas)
+BB_MULT = 1.3          # Çarpan 2.0'dan 1.3'e düştü (Bantlar daraldı, fiyata kolayca dışarı taşar)
+RSI_LEN = 7            # RSI periyodu 14'ten 7'ye düştü (Çok hızlı dalgalanır)
+RSI_OB = 50            # Aşırı alım sınırı 50 (50'nin üstü direkt SELL sinyaline hazır)
+RSI_OS = 50            # Aşırı satım sınırı 50 (50'nin altı direkt BUY sinyaline hazır)
+INTERVAL = 1           # Kraken'den 1 dakikalık mumlar çekilecek
+# -----------------------------
+
+SYMBOL = "XBTUSD"        
+BYBIT_SYMBOL = "BTCUSDT"  
 QUANTITY = "0.01"
 TESTNET_URL = "https://api-testnet.bybit.com"
 
-TP_YUZDE = 3.0
-SL_YUZDE = 5.0
-BREAKEVEN_YUZDE = 1.0
+TP_YUZDE = 1.0         # Kar al hedefi %3'ten %1'e düşürüldü (Hızlı kapansın diye)
+SL_YUZDE = 2.0         # Zarar durdur %5'ten %2'ye düşürüldü
+BREAKEVEN_YUZDE = 0.3  # %0.3 karda iz sürme başlar
 
 pozisyon = {
     "var": False,
@@ -76,8 +79,6 @@ def get_candles():
 def imza_olustur(json_body_str):
     timestamp = str(int(time.time() * 1000))
     recv_window = "5000"
-    
-    # Bybit V5 imza şeması: timestamp + API_KEY + recv_window + JSON_STRING
     sign_str = timestamp + BYBIT_API_KEY + recv_window + json_body_str
     
     imza = hmac.new(
@@ -94,12 +95,10 @@ def islem_ac(action):
         "side": "Buy" if action == "BUY" else "Sell",
         "orderType": "Market",
         "qty": QUANTITY,
-        "positionIdx": 0  # Tek yönlü mod için zorunlu parametre
+        "positionIdx": 0  
     }
     
-    # Boşluksuz ve temiz JSON string üreterek borsa tarafındaki tırnak/boşluk hatasını çözüyoruz
     clean_json_body = json.dumps(params, separators=(',', ':'))
-    
     timestamp, imza = imza_olustur(clean_json_body)
     
     headers = {
@@ -112,7 +111,6 @@ def islem_ac(action):
     
     url = f"{TESTNET_URL}/v5/order/create"
     try:
-        # Ham veriyi (data=) temizlenmiş string olarak doğrudan gönderiyoruz
         r = requests.post(url, data=clean_json_body, headers=headers)
         res_json = r.json()
         print(f"Bybit yanıt: {res_json}")
@@ -211,9 +209,10 @@ def analiz():
 
     basis = sma(closes, BB_LEN)
     dev = stdev(closes, BB_LEN)
-    mult = BB_MULT * 0.85
-    bb_upper = basis + dev * mult
-    bb_lower = basis - dev * mult
+    
+    # 0.85 freni kaldırıldı, doğrudan daraltılmış BB_MULT çarpanı devrede
+    bb_upper = basis + dev * BB_MULT
+    bb_lower = basis - dev * BB_MULT
 
     rsi_val    = calc_rsi(closes, RSI_LEN)
     close      = closes[-1]
@@ -221,14 +220,12 @@ def analiz():
 
     print(f"Fiyat: {close:.2f} | RSI: {rsi_val:.1f} | BB_U: {bb_upper:.2f} | BB_L: {bb_lower:.2f}")
 
-    # Önce mevcut bir pozisyon varsa durumunu güncelle/kapat
     if pozisyon["var"]:
         pozisyon_kontrol(close)
-    
-    # Pozisyon yoksa yeni bir sinyal tara
     else:
-        buy_signal  = (prev_close <= bb_lower) and (close > bb_lower) and (rsi_val < RSI_OS)
-        sell_signal = (prev_close >= bb_upper) and (close < bb_upper) and (rsi_val > RSI_OB)
+        # Şartlar aşırı esnetildi. Fiyat banda değdiği ve rsi 50 civarı olduğu an işleme dalar.
+        buy_signal  = (prev_close <= bb_lower or close <= bb_lower) and (rsi_val <= RSI_OS)
+        sell_signal = (prev_close >= bb_upper or close >= bb_upper) and (rsi_val >= RSI_OB)
 
         if buy_signal:
             sonuc = islem_ac("BUY")
@@ -243,7 +240,7 @@ def analiz():
                     "sl": sl_fiyat,
                     "breakeven": False
                 })
-                mesaj = f"🟢 <b>BUY İŞLEMİ AÇILDI</b>\n📊 BTC/USD\n💰 Fiyat: {close:.2f}\n🎯 TP: {tp_fiyat:.2f}\n🛑 SL: {sl_fiyat:.2f}\n🧪 TESTNET"
+                mesaj = f"🟢 <b>BUY İŞLEMİ AÇILDI</b>\n📊 BTC/USD\n💰 Fiyat: {close:.2f}\n🎯 TP: {tp_fiyat:.2f}\n🛑 SL: {sl_fiyat:.2f}"
             else:
                 mesaj = f"🟢 <b>BUY SİNYALİ</b>\n⚠️ İşlem açılamadı: {sonuc.get('retMsg', '')}"
             telegram_bildir(mesaj)
@@ -261,19 +258,18 @@ def analiz():
                     "sl": sl_fiyat,
                     "breakeven": False
                 })
-                mesaj = f"🔴 <b>SELL İŞLEMİ AÇILDI</b>\n📊 BTC/USD\n💰 Fiyat: {close:.2f}\n🎯 TP: {tp_fiyat:.2f}\n🛑 SL: {sl_fiyat:.2f}\n🧪 TESTNET"
+                mesaj = f"🔴 <b>SELL İŞLEMİ AÇILDI</b>\n📊 BTC/USD\n💰 Fiyat: {close:.2f}\n🎯 TP: {tp_fiyat:.2f}\n🛑 SL: {sl_fiyat:.2f}"
             else:
                 mesaj = f"🔴 <b>SELL SİNYALİ</b>\n⚠️ İşlem açılamadı: {sonuc.get('retMsg', '')}"
             telegram_bildir(mesaj)
 
 if __name__ == "__main__":
     print("Bot başladı...")
-    # Döngü öncesinde Telegram başlangıç bildirimi gönderiliyor
-    telegram_bildir("🤖 <b>Bot Başladı!</b>\n📊 Sinyal + Al-Sat modu\n🎯 TP: %3 | 🛑 SL: %5\n🔒 Breakeven: %1 karda aktif\n🧪 Bybit Testnet aktif")
+    telegram_bildir("🚀 <b>Hiper-Agresif Bot Başladı!</b>\n⏱️ Zaman Dilimi: 1 Dakika\n🎯 Hedefler küçültüldü, indikatör filtreleri kaldırıldı.")
     
     while True:
         try:
             analiz()
         except Exception as e:
             print(f"Hata: {e}")
-        time.sleep(300)
+        time.sleep(60)  # Bekleme süresi 5 dakikadan 1 dakikaya (60 saniye) düşürüldü.
