@@ -76,11 +76,9 @@ def get_candles():
         print(f"Veri ayrıştırma hatası: {e}")
         return None, None
 
-def imza_olustur(json_body_str):
-    timestamp = str(int(time.time() * 1000))
+def imza_olustur(timestamp, json_body_str):
     recv_window = "5000"
-    
-    # Bybit V5 imza şeması: timestamp + API_KEY + recv_window + JSON_STRING
+    # Bybit V5 POST İmza Formülü: timestamp + API_KEY + recv_window + JSON_STRING
     sign_str = timestamp + BYBIT_API_KEY + recv_window + json_body_str
     
     imza = hmac.new(
@@ -88,39 +86,37 @@ def imza_olustur(json_body_str):
         sign_str.encode(),
         hashlib.sha256
     ).hexdigest()
-    return timestamp, imza
+    return imza
 
 def islem_ac(action):
+    # Hatayı çözen 1. Adım: Parametreleri alfabetik (ASCII) sıraya göre dizdik
     params = {
         "category": "linear",
-        "symbol": BYBIT_SYMBOL,
-        "side": "Buy" if action == "BUY" else "Sell",
         "orderType": "Market",
+        "positionIdx": 0,
         "qty": QUANTITY,
-        "positionIdx": 0
+        "side": "Buy" if action == "BUY" else "Sell",
+        "symbol": BYBIT_SYMBOL
     }
     
-    # 1. Aşama: Boşluksuz saf JSON string üretiyoruz
-    clean_json_body = json.dumps(params, separators=(',', ':'))
+    # Hatayı çözen 2. Adım: json.dumps ile sıralamayı koru (sort_keys=True) ve boşlukları at
+    clean_json_body = json.dumps(params, separators=(',', ':'), sort_keys=True)
     
-    # 2. Aşama: Tırnak işaretlerinin bozulmasını önlemek için veriyi UTF-8 bayt dizisine çeviriyoruz
-    json_body_bytes = clean_json_body.encode('utf-8')
-    
-    # İmzayı saf string üzerinden üretiyoruz
-    timestamp, imza = imza_olustur(clean_json_body)
+    timestamp = str(int(time.time() * 1000))
+    imza = imza_olustur(timestamp, clean_json_body)
     
     headers = {
         "X-BAPI-API-KEY": BYBIT_API_KEY,
         "X-BAPI-SIGN": imza,
         "X-BAPI-TIMESTAMP": timestamp,
         "X-BAPI-RECV-WINDOW": "5000",
-        "Content-Type": "application/json; charset=utf-8"  # Kodlamayı header'da belirttik
+        "Content-Type": "application/json"
     }
     
     url = f"{TESTNET_URL}/v5/order/create"
     try:
-        # json=params yerine ham bayt akışını (data=) doğrudan yolluyoruz
-        r = requests.post(url, data=json_body_bytes, headers=headers)
+        # Hatayı çözen 3. Adım: requests'in iç algoritmalarına bırakmadan saf stringi byte olarak gönderiyoruz
+        r = requests.post(url, data=clean_json_body.encode('utf-8'), headers=headers)
         res_json = r.json()
         print(f"Bybit yanıt: {res_json}")
         return res_json
@@ -272,7 +268,7 @@ def analiz():
 
 if __name__ == "__main__":
     print("Bot başladı...")
-    telegram_bildir("🚀 <b>Hiper-Agresif Bot Başladı!</b>\n⏱️ Zaman Dilimi: 1 Dakika\n🎯 Hedefler küçültüldü, Bybit tırnak sorunu giderildi.")
+    telegram_bildir("🚀 <b>Hiper-Agresif Bot Başladı!</b>\n⏱️ Zaman Dilimi: 1 Dakika\n🎯 Bybit V5 ASCII sıralama ve ham veri çözümü entegre edildi.")
     
     while True:
         try:
