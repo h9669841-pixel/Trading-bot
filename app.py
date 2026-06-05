@@ -1,4 +1,4 @@
-import os
+def
 import time
 import hmac
 import hashlib
@@ -47,7 +47,12 @@ def get_candles():
     url = "https://api.kraken.com/0/public/OHLC"
     params = {"pair": SYMBOL, "interval": INTERVAL}
     r = requests.get(url, params=params)
-    data = r.json()
+    
+    try:
+        data = r.json()
+    except Exception as e:
+        print(f"JSON parse hatası: {e} | Yanıt: {r.text[:200]}")
+        return None, None
 
     if data.get("error"):
         print(f"Kraken hata: {data['error']}")
