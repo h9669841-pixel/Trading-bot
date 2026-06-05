@@ -4,10 +4,11 @@ import hmac
 import hashlib
 import requests
 import numpy as np
+import json
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-BYBIT_API_KEY = os.environ.get("BINANCE_API_KEY")  # İstediğiniz gibi orijinal isim kaldı
+BYBIT_API_KEY = os.environ.get("BINANCE_API_KEY")  # Orijinal değişken adınız korundu
 BYBIT_SECRET = os.environ.get("BINANCE_SECRET")
 
 BB_LEN = 30
@@ -72,14 +73,12 @@ def get_candles():
         print(f"Veri ayrıştırma hatası: {e}")
         return None, None
 
-def imza_olustur(params):
-    import json
+def imza_olustur(json_body_str):
     timestamp = str(int(time.time() * 1000))
     recv_window = "5000"
     
-    # Bybit V5 POST isteklerinde imza JSON string üzerinden üretilir
-    json_body = json.dumps(params)
-    sign_str = timestamp + BYBIT_API_KEY + recv_window + json_body
+    # Bybit V5 imza şeması: timestamp + API_KEY + recv_window + JSON_STRING
+    sign_str = timestamp + BYBIT_API_KEY + recv_window + json_body_str
     
     imza = hmac.new(
         BYBIT_SECRET.encode(),
@@ -89,17 +88,20 @@ def imza_olustur(params):
     return timestamp, imza
 
 def islem_ac(action):
-    import json
     params = {
         "category": "linear",
         "symbol": BYBIT_SYMBOL,
         "side": "Buy" if action == "BUY" else "Sell",
         "orderType": "Market",
         "qty": QUANTITY,
-        "positionIdx": 0  # Tek yönlü (One-way) mod için zorunlu parametre eklendi
+        "positionIdx": 0  # Tek yönlü mod için zorunlu parametre
     }
     
-    timestamp, imza = imza_olustur(params)
+    # Boşluksuz ve temiz JSON string üreterek borsa tarafındaki tırnak/boşluk hatasını çözüyoruz
+    clean_json_body = json.dumps(params, separators=(',', ':'))
+    
+    timestamp, imza = imza_olustur(clean_json_body)
+    
     headers = {
         "X-BAPI-API-KEY": BYBIT_API_KEY,
         "X-BAPI-SIGN": imza,
@@ -110,7 +112,8 @@ def islem_ac(action):
     
     url = f"{TESTNET_URL}/v5/order/create"
     try:
-        r = requests.post(url, json=params, headers=headers)
+        # Ham veriyi (data=) temizlenmiş string olarak doğrudan gönderiyoruz
+        r = requests.post(url, data=clean_json_body, headers=headers)
         res_json = r.json()
         print(f"Bybit yanıt: {res_json}")
         return res_json
@@ -222,7 +225,7 @@ def analiz():
     if pozisyon["var"]:
         pozisyon_kontrol(close)
     
-    # EĞER POZİSYON YOKSA yeni bir sinyal tara (Mantıksal çakışma engellendi)
+    # Pozisyon yoksa yeni bir sinyal tara
     else:
         buy_signal  = (prev_close <= bb_lower) and (close > bb_lower) and (rsi_val < RSI_OS)
         sell_signal = (prev_close >= bb_upper) and (close < bb_upper) and (rsi_val > RSI_OB)
@@ -265,7 +268,7 @@ def analiz():
 
 if __name__ == "__main__":
     print("Bot başladı...")
-    # Döngü başlamadan önce ana blokta Telegram mesajı gönderiliyor:
+    # Döngü öncesinde Telegram başlangıç bildirimi gönderiliyor
     telegram_bildir("🤖 <b>Bot Başladı!</b>\n📊 Sinyal + Al-Sat modu\n🎯 TP: %3 | 🛑 SL: %5\n🔒 Breakeven: %1 karda aktif\n🧪 Bybit Testnet aktif")
     
     while True:
