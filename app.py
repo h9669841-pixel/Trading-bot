@@ -8,16 +8,16 @@ import json
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-BYBIT_API_KEY = os.environ.get("BINANCE_API_KEY")  # Orijinal değişken adınız
+BYBIT_API_KEY = os.environ.get("BINANCE_API_KEY")  # Orijinal değişken adınız korundu
 BYBIT_SECRET = os.environ.get("BINANCE_SECRET")
 
 # --- AGRESİF HIZLI AYARLAR ---
-BB_LEN = 14            # Mum periyodu 30'dan 14'e düştü (Daha hassas)
-BB_MULT = 1.3          # Çarpan 2.0'dan 1.3'e düştü (Bantlar daraldı, fiyata kolayca dışarı taşar)
-RSI_LEN = 7            # RSI periyodu 14'ten 7'ye düştü (Çok hızlı dalgalanır)
-RSI_OB = 50            # Aşırı alım sınırı 50 (50'nin üstü direkt SELL sinyaline hazır)
-RSI_OS = 50            # Aşırı satım sınırı 50 (50'nin altı direkt BUY sinyaline hazır)
-INTERVAL = 1           # Kraken'den 1 dakikalık mumlar çekilecek
+BB_LEN = 14            
+BB_MULT = 1.3          
+RSI_LEN = 7            
+RSI_OB = 50            
+RSI_OS = 50            
+INTERVAL = 1           
 # -----------------------------
 
 SYMBOL = "XBTUSD"        
@@ -25,9 +25,9 @@ BYBIT_SYMBOL = "BTCUSDT"
 QUANTITY = "0.01"
 TESTNET_URL = "https://api-testnet.bybit.com"
 
-TP_YUZDE = 1.0         # Kar al hedefi %3'ten %1'e düşürüldü (Hızlı kapansın diye)
-SL_YUZDE = 2.0         # Zarar durdur %5'ten %2'ye düşürüldü
-BREAKEVEN_YUZDE = 0.3  # %0.3 karda iz sürme başlar
+TP_YUZDE = 1.0         
+SL_YUZDE = 2.0         
+BREAKEVEN_YUZDE = 0.3  
 
 pozisyon = {
     "var": False,
@@ -79,6 +79,8 @@ def get_candles():
 def imza_olustur(json_body_str):
     timestamp = str(int(time.time() * 1000))
     recv_window = "5000"
+    
+    # Bybit V5 imza şeması: timestamp + API_KEY + recv_window + JSON_STRING
     sign_str = timestamp + BYBIT_API_KEY + recv_window + json_body_str
     
     imza = hmac.new(
@@ -95,10 +97,16 @@ def islem_ac(action):
         "side": "Buy" if action == "BUY" else "Sell",
         "orderType": "Market",
         "qty": QUANTITY,
-        "positionIdx": 0  
+        "positionIdx": 0
     }
     
+    # 1. Aşama: Boşluksuz saf JSON string üretiyoruz
     clean_json_body = json.dumps(params, separators=(',', ':'))
+    
+    # 2. Aşama: Tırnak işaretlerinin bozulmasını önlemek için veriyi UTF-8 bayt dizisine çeviriyoruz
+    json_body_bytes = clean_json_body.encode('utf-8')
+    
+    # İmzayı saf string üzerinden üretiyoruz
     timestamp, imza = imza_olustur(clean_json_body)
     
     headers = {
@@ -106,12 +114,13 @@ def islem_ac(action):
         "X-BAPI-SIGN": imza,
         "X-BAPI-TIMESTAMP": timestamp,
         "X-BAPI-RECV-WINDOW": "5000",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json; charset=utf-8"  # Kodlamayı header'da belirttik
     }
     
     url = f"{TESTNET_URL}/v5/order/create"
     try:
-        r = requests.post(url, data=clean_json_body, headers=headers)
+        # json=params yerine ham bayt akışını (data=) doğrudan yolluyoruz
+        r = requests.post(url, data=json_body_bytes, headers=headers)
         res_json = r.json()
         print(f"Bybit yanıt: {res_json}")
         return res_json
@@ -210,7 +219,6 @@ def analiz():
     basis = sma(closes, BB_LEN)
     dev = stdev(closes, BB_LEN)
     
-    # 0.85 freni kaldırıldı, doğrudan daraltılmış BB_MULT çarpanı devrede
     bb_upper = basis + dev * BB_MULT
     bb_lower = basis - dev * BB_MULT
 
@@ -223,7 +231,6 @@ def analiz():
     if pozisyon["var"]:
         pozisyon_kontrol(close)
     else:
-        # Şartlar aşırı esnetildi. Fiyat banda değdiği ve rsi 50 civarı olduğu an işleme dalar.
         buy_signal  = (prev_close <= bb_lower or close <= bb_lower) and (rsi_val <= RSI_OS)
         sell_signal = (prev_close >= bb_upper or close >= bb_upper) and (rsi_val >= RSI_OB)
 
@@ -265,11 +272,11 @@ def analiz():
 
 if __name__ == "__main__":
     print("Bot başladı...")
-    telegram_bildir("🚀 <b>Hiper-Agresif Bot Başladı!</b>\n⏱️ Zaman Dilimi: 1 Dakika\n🎯 Hedefler küçültüldü, indikatör filtreleri kaldırıldı.")
+    telegram_bildir("🚀 <b>Hiper-Agresif Bot Başladı!</b>\n⏱️ Zaman Dilimi: 1 Dakika\n🎯 Hedefler küçültüldü, Bybit tırnak sorunu giderildi.")
     
     while True:
         try:
             analiz()
         except Exception as e:
             print(f"Hata: {e}")
-        time.sleep(60)  # Bekleme süresi 5 dakikadan 1 dakikaya (60 saniye) düşürüldü.
+        time.sleep(60)
