@@ -68,7 +68,7 @@ def imza_olustur(params):
 
 def islem_ac(action):
     params = {
-        "category": "spot",
+        "category": "linear",
         "symbol": BYBIT_SYMBOL,
         "side": "Buy" if action == "BUY" else "Sell",
         "orderType": "Market",
