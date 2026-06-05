@@ -7,7 +7,7 @@ import numpy as np
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-BYBIT_API_KEY = os.environ.get("BINANCE_API_KEY")  # Railway env adınız buysa dokunmayın
+BYBIT_API_KEY = os.environ.get("BINANCE_API_KEY")  # İstediğiniz gibi orijinal isim kaldı
 BYBIT_SECRET = os.environ.get("BINANCE_SECRET")
 
 BB_LEN = 30
@@ -15,8 +15,9 @@ BB_MULT = 2.0
 RSI_LEN = 14
 RSI_OB = 55
 RSI_OS = 40
-BYBIT_SYMBOL = "BTCUSDT"
-INTERVAL = "5"  # Bybit için string "5" olmalı
+SYMBOL = "XBTUSD"        # Kraken için sembol
+BYBIT_SYMBOL = "BTCUSDT"  # Bybit için sembol
+INTERVAL = 5
 QUANTITY = "0.01"
 TESTNET_URL = "https://api-testnet.bybit.com"
 
@@ -35,7 +36,7 @@ pozisyon = {
 
 def telegram_bildir(mesaj):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram itimatnameleri eksik!")
+        print("Telegram değişkenleri eksik!")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
@@ -46,47 +47,48 @@ def telegram_bildir(mesaj):
         })
         print(f"Telegram yanıt: {r.status_code}")
     except Exception as e:
-        print(f"Telegram gönderilemedi: {e}")
+        print(f"Telegram hatası: {e}")
 
-# VERİ KAYNAĞI BYBIT OLARAK DEĞİŞTİRİLDİ (Uyuşmazlık çözüldü)
 def get_candles():
-    url = f"{TESTNET_URL}/v5/market/klines"
-    params = {
-        "category": "linear",
-        "symbol": BYBIT_SYMBOL,
-        "interval": INTERVAL,
-        "limit": 50
-    }
+    url = "https://api.kraken.com/0/public/OHLC"
+    params = {"pair": SYMBOL, "interval": INTERVAL}
     try:
         r = requests.get(url, params=params)
         data = r.json()
-        if data.get("retCode") != 0:
-            print(f"Bybit Veri Hatası: {data.get('retMsg')}")
-            return None, None
-        
-        # Bybit listeyi yeniden eskiye döndürür [en yeni, ..., en eski]
-        # Bize eskiden yeniye lazım, o yüzden tersine çeviriyoruz [::-1]
-        listeler = data["result"]["list"][::-1]
-        closes = [float(d[4]) for d in listeler]
-        opens = [float(d[1]) for d in listeler]
-        return closes, opens
     except Exception as e:
-        print(f"Mum verisi çekme hatası: {e}")
+        print(f"JSON parse hatası: {e}")
         return None, None
 
-def imza_olustur(params_str, timestamp):
-    # V5 POST işlemlerinde imza: timestamp + API_KEY + recv_window + JSON_BODY_STRING
+    if data.get("error"):
+        print(f"Kraken hata: {data['error']}")
+        return None, None
+
+    try:
+        result = list(data["result"].values())[0]
+        closes = [float(d[4]) for d in result]
+        opens  = [float(d[1]) for d in result]
+        return closes, opens
+    except Exception as e:
+        print(f"Veri ayrıştırma hatası: {e}")
+        return None, None
+
+def imza_olustur(params):
+    import json
+    timestamp = str(int(time.time() * 1000))
     recv_window = "5000"
-    sign_str = timestamp + BYBIT_API_KEY + recv_window + params_str
+    
+    # Bybit V5 POST isteklerinde imza JSON string üzerinden üretilir
+    json_body = json.dumps(params)
+    sign_str = timestamp + BYBIT_API_KEY + recv_window + json_body
+    
     imza = hmac.new(
         BYBIT_SECRET.encode(),
         sign_str.encode(),
         hashlib.sha256
     ).hexdigest()
-    return imza
+    return timestamp, imza
 
 def islem_ac(action):
-    # Tek yönlü (One-way) mod için positionIdx: 0. Hedge mod ise Buy için 1, Sell için 2 yapın.
     import json
     params = {
         "category": "linear",
@@ -94,13 +96,10 @@ def islem_ac(action):
         "side": "Buy" if action == "BUY" else "Sell",
         "orderType": "Market",
         "qty": QUANTITY,
-        "positionIdx": 0 
+        "positionIdx": 0  # Tek yönlü (One-way) mod için zorunlu parametre eklendi
     }
     
-    timestamp = str(int(time.time() * 1000))
-    json_body = json.dumps(params)
-    imza = imza_olustur(json_body, timestamp)
-    
+    timestamp, imza = imza_olustur(params)
     headers = {
         "X-BAPI-API-KEY": BYBIT_API_KEY,
         "X-BAPI-SIGN": imza,
@@ -111,12 +110,12 @@ def islem_ac(action):
     
     url = f"{TESTNET_URL}/v5/order/create"
     try:
-        r = requests.post(url, data=json_body, headers=headers)
+        r = requests.post(url, json=params, headers=headers)
         res_json = r.json()
-        print(f"Bybit işlem yanıtı: {res_json}")
+        print(f"Bybit yanıt: {res_json}")
         return res_json
     except Exception as e:
-        print(f"API İstek Hatası: {e}")
+        print(f"Bybit istek hatası: {e}")
         return {"retCode": -1, "retMsg": str(e)}
 
 def sma(data, period):
@@ -147,49 +146,57 @@ def pozisyon_kontrol(close):
 
     if yon == "BUY":
         kar = ((close - giris) / giris) * 100
+
         if kar >= BREAKEVEN_YUZDE and not pozisyon["breakeven"]:
             pozisyon["sl"] = giris
             pozisyon["breakeven"] = True
-            mesaj = f"🔒 <b>BREAKEVEN AKTİF!</b>\n📊 BTC/USDT\n💰 Giriş: {giris:.2f}\n🛑 SL → {giris:.2f}"
+            mesaj = f"🔒 <b>BREAKEVEN AKTİF!</b>\n📊 BTC/USD\n💰 Giriş: {giris:.2f}\n📈 Kar: +%{kar:.2f}\n🛑 SL → {giris:.2f}"
             telegram_bildir(mesaj)
 
         if close >= tp:
-            sonuc = islem_ac("SELL")  # Pozisyonu kapatmak için ters işlem
+            sonuc = islem_ac("SELL")
             if sonuc.get("retCode") == 0:
-                mesaj = f"✅ <b>TAKE PROFIT!</b>\n📊 BTC/USDT\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📈 Kar: +%{kar:.2f}"
+                mesaj = f"✅ <b>TAKE PROFIT!</b>\n📊 BTC/USD\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📈 Kar: +%{kar:.2f}\n🧪 TESTNET"
+                telegram_bildir(mesaj)
                 pozisyon["var"] = False
                 pozisyon["breakeven"] = False
-                telegram_bildir(mesaj)
         elif close <= pozisyon["sl"]:
             sonuc = islem_ac("SELL")
             if sonuc.get("retCode") == 0:
-                mesaj = f"🛑 <b>STOP LOSS!</b>\n📊 BTC/USDT\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}"
+                if pozisyon["breakeven"]:
+                    mesaj = f"🔒 <b>BREAKEVEN ÇIKIŞI</b>\n📊 BTC/USD\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n➡️ Sıfır zarar\n🧪 TESTNET"
+                else:
+                    mesaj = f"🛑 <b>STOP LOSS!</b>\n📊 BTC/USD\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📉 Zarar: %{kar:.2f}\n🧪 TESTNET"
+                telegram_bildir(mesaj)
                 pozisyon["var"] = False
                 pozisyon["breakeven"] = False
-                telegram_bildir(mesaj)
 
     elif yon == "SELL":
         kar = ((giris - close) / giris) * 100
+
         if kar >= BREAKEVEN_YUZDE and not pozisyon["breakeven"]:
             pozisyon["sl"] = giris
             pozisyon["breakeven"] = True
-            mesaj = f"🔒 <b>BREAKEVEN AKTİF!</b>\n📊 BTC/USDT\n💰 Giriş: {giris:.2f}\n🛑 SL → {giris:.2f}"
+            mesaj = f"🔒 <b>BREAKEVEN AKTİF!</b>\n📊 BTC/USD\n💰 Giriş: {giris:.2f}\n📈 Kar: +%{kar:.2f}\n🛑 SL → {giris:.2f}"
             telegram_bildir(mesaj)
 
         if close <= tp:
             sonuc = islem_ac("BUY")
             if sonuc.get("retCode") == 0:
-                mesaj = f"✅ <b>TAKE PROFIT!</b>\n📊 BTC/USDT\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📈 Kar: +%{kar:.2f}"
+                mesaj = f"✅ <b>TAKE PROFIT!</b>\n📊 BTC/USD\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📈 Kar: +%{kar:.2f}\n🧪 TESTNET"
+                telegram_bildir(mesaj)
                 pozisyon["var"] = False
                 pozisyon["breakeven"] = False
-                telegram_bildir(mesaj)
         elif close >= pozisyon["sl"]:
             sonuc = islem_ac("BUY")
             if sonuc.get("retCode") == 0:
-                mesaj = f"🛑 <b>STOP LOSS!</b>\n📊 BTC/USDT\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}"
+                if pozisyon["breakeven"]:
+                    mesaj = f"🔒 <b>BREAKEVEN ÇIKIŞI</b>\n📊 BTC/USD\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n➡️ Sıfır zarar\n🧪 TESTNET"
+                else:
+                    mesaj = f"🛑 <b>STOP LOSS!</b>\n📊 BTC/USD\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📉 Zarar: %{kar:.2f}\n🧪 TESTNET"
+                telegram_bildir(mesaj)
                 pozisyon["var"] = False
                 pozisyon["breakeven"] = False
-                telegram_bildir(mesaj)
 
 def analiz():
     global pozisyon
@@ -211,10 +218,11 @@ def analiz():
 
     print(f"Fiyat: {close:.2f} | RSI: {rsi_val:.1f} | BB_U: {bb_upper:.2f} | BB_L: {bb_lower:.2f}")
 
-    # Önce mevcut pozisyonu kontrol et
+    # Önce mevcut bir pozisyon varsa durumunu güncelle/kapat
     if pozisyon["var"]:
         pozisyon_kontrol(close)
-    # Eğer pozisyon yoksa YENİ SİNYAL ara
+    
+    # EĞER POZİSYON YOKSA yeni bir sinyal tara (Mantıksal çakışma engellendi)
     else:
         buy_signal  = (prev_close <= bb_lower) and (close > bb_lower) and (rsi_val < RSI_OS)
         sell_signal = (prev_close >= bb_upper) and (close < bb_upper) and (rsi_val > RSI_OB)
@@ -232,8 +240,10 @@ def analiz():
                     "sl": sl_fiyat,
                     "breakeven": False
                 })
-                mesaj = f"🟢 <b>BUY İŞLEMİ AÇILDI</b>\n🎯 TP: {tp_fiyat:.2f}\n🛑 SL: {sl_fiyat:.2f}"
-                telegram_bildir(mesaj)
+                mesaj = f"🟢 <b>BUY İŞLEMİ AÇILDI</b>\n📊 BTC/USD\n💰 Fiyat: {close:.2f}\n🎯 TP: {tp_fiyat:.2f}\n🛑 SL: {sl_fiyat:.2f}\n🧪 TESTNET"
+            else:
+                mesaj = f"🟢 <b>BUY SİNYALİ</b>\n⚠️ İşlem açılamadı: {sonuc.get('retMsg', '')}"
+            telegram_bildir(mesaj)
 
         elif sell_signal:
             sonuc = islem_ac("SELL")
@@ -248,14 +258,19 @@ def analiz():
                     "sl": sl_fiyat,
                     "breakeven": False
                 })
-                mesaj = f"🔴 <b>SELL İŞLEMİ AÇILDI</b>\n🎯 TP: {tp_fiyat:.2f}\n🛑 SL: {sl_fiyat:.2f}"
-                telegram_bildir(mesaj)
+                mesaj = f"🔴 <b>SELL İŞLEMİ AÇILDI</b>\n📊 BTC/USD\n💰 Fiyat: {close:.2f}\n🎯 TP: {tp_fiyat:.2f}\n🛑 SL: {sl_fiyat:.2f}\n🧪 TESTNET"
+            else:
+                mesaj = f"🔴 <b>SELL SİNYALİ</b>\n⚠️ İşlem açılamadı: {sonuc.get('retMsg', '')}"
+            telegram_bildir(mesaj)
 
 if __name__ == "__main__":
     print("Bot başladı...")
+    # Döngü başlamadan önce ana blokta Telegram mesajı gönderiliyor:
+    telegram_bildir("🤖 <b>Bot Başladı!</b>\n📊 Sinyal + Al-Sat modu\n🎯 TP: %3 | 🛑 SL: %5\n🔒 Breakeven: %1 karda aktif\n🧪 Bybit Testnet aktif")
+    
     while True:
         try:
             analiz()
         except Exception as e:
-            print(f"Döngü Hatası: {e}")
+            print(f"Hata: {e}")
         time.sleep(300)
