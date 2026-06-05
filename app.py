@@ -14,7 +14,7 @@ BYBIT_SECRET = os.environ.get("BINANCE_SECRET")
 
 # ================= SETTINGS =================
 BB_LEN = 30
-BB_MULT = 4.0
+BB_MULT = 2.0
 RSI_LEN = 14
 
 RSI_OB = 55
