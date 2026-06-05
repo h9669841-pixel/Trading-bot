@@ -1,117 +1,149 @@
-def
+import os
 import time
 import hmac
 import hashlib
 import requests
 import numpy as np
 
+# ================= ENV =================
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+
 BYBIT_API_KEY = os.environ.get("BINANCE_API_KEY")
 BYBIT_SECRET = os.environ.get("BINANCE_SECRET")
 
+# ================= SETTINGS =================
 BB_LEN = 30
-BB_MULT = 2.0
+BB_MULT = 4.0
 RSI_LEN = 14
+
 RSI_OB = 55
 RSI_OS = 40
+
 SYMBOL = "XBTUSD"
 BYBIT_SYMBOL = "BTCUSDT"
 INTERVAL = 5
+
 QUANTITY = "0.001"
 TESTNET_URL = "https://api-testnet.bybit.com"
 
-TP_YUZDE = 3.0
+TP_YUZDE = 1.0
 SL_YUZDE = 5.0
-BREAKEVEN_YUZDE = 1.0
 
+# ================= POSITION =================
 pozisyon = {
     "var": False,
     "yon": None,
     "giris": None,
     "tp": None,
     "sl": None,
-    "breakeven": False
+    "breakeven": False,
+    "trailing": False,
+    "max_fiyat": None
 }
 
-def telegram_bildir(mesaj):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    r = requests.post(url, json={
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": mesaj,
-        "parse_mode": "HTML"
-    })
-    print(f"Telegram yanıt: {r.status_code}")
-
-def get_candles():
-    url = "https://api.kraken.com/0/public/OHLC"
-    params = {"pair": SYMBOL, "interval": INTERVAL}
-    r = requests.get(url, params=params)
-    
+# ================= TELEGRAM =================
+def telegram_bildir(msg):
     try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        requests.post(url, json={
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": msg,
+            "parse_mode": "HTML"
+        }, timeout=10)
+    except:
+        print("Telegram error")
+
+# ================= DATA =================
+def get_candles():
+    try:
+        url = "https://api.kraken.com/0/public/OHLC"
+        r = requests.get(url, params={"pair": SYMBOL, "interval": INTERVAL}, timeout=10)
         data = r.json()
-    except Exception as e:
-        print(f"JSON parse hatası: {e} | Yanıt: {r.text[:200]}")
+
+        if data.get("error"):
+            return None, None
+
+        key = [k for k in data["result"].keys() if k != "last"][0]
+        candles = data["result"][key]
+
+        closes = [float(x[4]) for x in candles]
+        opens = [float(x[1]) for x in candles]
+
+        return closes, opens
+
+    except:
         return None, None
 
-    if data.get("error"):
-        print(f"Kraken hata: {data['error']}")
-        return None, None
+# ================= INDICATORS =================
+def sma(data, n):
+    return np.mean(data[-n:])
 
-    result = list(data["result"].values())[0]
-    closes = [float(d[4]) for d in result]
-    opens  = [float(d[1]) for d in result]
-    return closes, opens
+def stdev(data, n):
+    return np.std(data[-n:])
 
-def imza_olustur(params):
-    timestamp = str(int(time.time() * 1000))
-    recv_window = "5000"
-    param_str = "&".join(f"{k}={v}" for k, v in params.items())
-    sign_str = timestamp + BYBIT_API_KEY + recv_window + param_str
-    imza = hmac.new(
-        BYBIT_SECRET.encode(),
-        sign_str.encode(),
-        hashlib.sha256
-    ).hexdigest()
-    return timestamp, imza
+def rsi(closes, n):
+    diff = np.diff(closes)
+    gain = np.where(diff > 0, diff, 0)
+    loss = np.where(diff < 0, -diff, 0)
 
-def islem_ac(action):
-    params = {
-        "category": "linear",
-        "symbol": BYBIT_SYMBOL,
-        "side": "Buy" if action == "BUY" else "Sell",
-        "orderType": "Market",
-        "qty": QUANTITY,
-    }
-    timestamp, imza = imza_olustur(params)
-    headers = {
-        "X-BAPI-API-KEY": BYBIT_API_KEY,
-        "X-BAPI-SIGN": imza,
-        "X-BAPI-TIMESTAMP": timestamp,
-        "X-BAPI-RECV-WINDOW": "5000"
-    }
-    url = f"{TESTNET_URL}/v5/order/create"
-    r = requests.post(url, json=params, headers=headers)
-    print(f"Bybit yanıt: {r.json()}")
-    return r.json()
+    ag = np.mean(gain[-n:])
+    al = np.mean(loss[-n:])
 
-def sma(data, period):
-    return np.mean(data[-period:])
-
-def stdev(data, period):
-    return np.std(data[-period:])
-
-def calc_rsi(closes, period):
-    deltas = np.diff(closes)
-    gains  = np.where(deltas > 0, deltas, 0)
-    losses = np.where(deltas < 0, -deltas, 0)
-    avg_gain = np.mean(gains[-period:])
-    avg_loss = np.mean(losses[-period:])
-    if avg_loss == 0:
+    if al == 0:
         return 100
-    rs = avg_gain / avg_loss
+
+    rs = ag / al
     return 100 - (100 / (1 + rs))
 
+# ================= BYBIT =================
+def sign(params):
+    ts = str(int(time.time() * 1000))
+    recv = "5000"
+
+    param_str = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+    payload = ts + BYBIT_API_KEY + recv + param_str
+
+    sig = hmac.new(
+        BYBIT_SECRET.encode(),
+        payload.encode(),
+        hashlib.sha256
+    ).hexdigest()
+
+    return ts, sig
+
+def order(side):
+    try:
+        params = {
+            "category": "linear",
+            "symbol": BYBIT_SYMBOL,
+            "side": "Buy" if side == "BUY" else "Sell",
+            "orderType": "Market",
+            "qty": QUANTITY
+        }
+
+        ts, sig = sign(params)
+
+        headers = {
+            "X-BAPI-API-KEY": BYBIT_API_KEY,
+            "X-BAPI-SIGN": sig,
+            "X-BAPI-TIMESTAMP": ts,
+            "X-BAPI-RECV-WINDOW": "5000"
+        }
+
+        r = requests.post(
+            f"{TESTNET_URL}/v5/order/create",
+            json=params,
+            headers=headers,
+            timeout=10
+        )
+
+        return r.json()
+
+    except Exception as e:
+        return {"retCode": -1, "retMsg": str(e)}
+
+# ================= POSITION =================
 def pozisyon_kontrol(close):
     global pozisyon
 
@@ -122,131 +154,140 @@ def pozisyon_kontrol(close):
     yon = pozisyon["yon"]
     tp = pozisyon["tp"]
 
+    # ================= BUY =================
     if yon == "BUY":
         kar = ((close - giris) / giris) * 100
 
-        if kar >= BREAKEVEN_YUZDE and not pozisyon["breakeven"]:
+        # BREAKEVEN
+        if kar >= 1.0 and not pozisyon["breakeven"]:
             pozisyon["sl"] = giris
             pozisyon["breakeven"] = True
-            mesaj = f"🔒 <b>BREAKEVEN AKTİF!</b>\n📊 BTC/USD\n💰 Giriş: {giris:.2f}\n💰 Şu an: {close:.2f}\n📈 Kar: +%{kar:.2f}\n🛑 SL giriş fiyatına çekildi: {giris:.2f}"
-            telegram_bildir(mesaj)
+            telegram_bildir("🔒 Breakeven BUY")
 
+        # TRAILING
+        if kar >= 2.5:
+            pozisyon["trailing"] = True
+
+            if pozisyon["max_fiyat"] is None:
+                pozisyon["max_fiyat"] = close
+
+            if close > pozisyon["max_fiyat"]:
+                pozisyon["max_fiyat"] = close
+
+            new_sl = pozisyon["max_fiyat"] * 0.99
+
+            if new_sl > pozisyon["sl"]:
+                pozisyon["sl"] = new_sl
+
+        # TP
         if close >= tp:
-            islem_ac("SELL")
-            mesaj = f"✅ <b>TAKE PROFIT!</b>\n📊 BTC/USD\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📈 Kar: +%{kar:.2f}\n🧪 TESTNET"
-            telegram_bildir(mesaj)
+            order("SELL")
+            telegram_bildir(f"TP BUY %+{kar:.2f}")
             pozisyon["var"] = False
-            pozisyon["breakeven"] = False
 
+        # SL
         elif close <= pozisyon["sl"]:
-            islem_ac("SELL")
-            if pozisyon["breakeven"]:
-                mesaj = f"🔒 <b>BREAKEVEN ÇIKIŞI</b>\n📊 BTC/USD\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n➡️ Sıfır zarar\n🧪 TESTNET"
-            else:
-                mesaj = f"🛑 <b>STOP LOSS!</b>\n📊 BTC/USD\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📉 Zarar: %{kar:.2f}\n🧪 TESTNET"
-            telegram_bildir(mesaj)
+            order("SELL")
+            telegram_bildir(f"SL BUY %{kar:.2f}")
             pozisyon["var"] = False
-            pozisyon["breakeven"] = False
 
+    # ================= SELL =================
     elif yon == "SELL":
         kar = ((giris - close) / giris) * 100
 
-        if kar >= BREAKEVEN_YUZDE and not pozisyon["breakeven"]:
+        if kar >= 1.0 and not pozisyon["breakeven"]:
             pozisyon["sl"] = giris
             pozisyon["breakeven"] = True
-            mesaj = f"🔒 <b>BREAKEVEN AKTİF!</b>\n📊 BTC/USD\n💰 Giriş: {giris:.2f}\n💰 Şu an: {close:.2f}\n📈 Kar: +%{kar:.2f}\n🛑 SL giriş fiyatına çekildi: {giris:.2f}"
-            telegram_bildir(mesaj)
+            telegram_bildir("🔒 Breakeven SELL")
+
+        if kar >= 2.5:
+            pozisyon["trailing"] = True
+
+            if pozisyon["max_fiyat"] is None:
+                pozisyon["max_fiyat"] = close
+
+            if close < pozisyon["max_fiyat"]:
+                pozisyon["max_fiyat"] = close
+
+            new_sl = pozisyon["max_fiyat"] * 1.01
+
+            if new_sl < pozisyon["sl"]:
+                pozisyon["sl"] = new_sl
 
         if close <= tp:
-            islem_ac("BUY")
-            mesaj = f"✅ <b>TAKE PROFIT!</b>\n📊 BTC/USD\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📈 Kar: +%{kar:.2f}\n🧪 TESTNET"
-            telegram_bildir(mesaj)
+            order("BUY")
+            telegram_bildir(f"TP SELL %+{kar:.2f}")
             pozisyon["var"] = False
-            pozisyon["breakeven"] = False
 
         elif close >= pozisyon["sl"]:
-            islem_ac("BUY")
-            if pozisyon["breakeven"]:
-                mesaj = f"🔒 <b>BREAKEVEN ÇIKIŞI</b>\n📊 BTC/USD\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n➡️ Sıfır zarar\n🧪 TESTNET"
-            else:
-                mesaj = f"🛑 <b>STOP LOSS!</b>\n📊 BTC/USD\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📉 Zarar: %{kar:.2f}\n🧪 TESTNET"
-            telegram_bildir(mesaj)
+            order("BUY")
+            telegram_bildir(f"SL SELL %{kar:.2f}")
             pozisyon["var"] = False
-            pozisyon["breakeven"] = False
 
+# ================= ANALYSIS =================
 def analiz():
     global pozisyon
 
     closes, opens = get_candles()
-
-    if closes is None:
-        print("Veri alınamadı, atlanıyor...")
-        return
-
-    if len(closes) < BB_LEN + 1:
-        print(f"Yeterli veri yok: {len(closes)} mum")
+    if closes is None or len(closes) < BB_LEN + 5:
         return
 
     basis = sma(closes, BB_LEN)
     dev = stdev(closes, BB_LEN)
-    mult = BB_MULT * 0.85
-    bb_upper = basis + dev * mult
-    bb_lower = basis - dev * mult
 
-    rsi_val    = calc_rsi(closes, RSI_LEN)
-    close      = closes[-1]
-    prev_close = closes[-2]
+    upper = basis + dev * BB_MULT
+    lower = basis - dev * BB_MULT
 
-    print(f"Fiyat: {close:.2f} | RSI: {rsi_val:.1f} | BB_U: {bb_upper:.2f} | BB_L: {bb_lower:.2f} | Pozisyon: {pozisyon['yon'] if pozisyon['var'] else 'Yok'} | Breakeven: {pozisyon['breakeven']}")
+    r = rsi(closes, RSI_LEN)
+
+    close = closes[-1]
+    prev = closes[-2]
 
     pozisyon_kontrol(close)
 
     if not pozisyon["var"]:
-        buy_signal  = (prev_close <= bb_lower) and (close > bb_lower) and (rsi_val < RSI_OS)
-        sell_signal = (prev_close >= bb_upper) and (close < bb_upper) and (rsi_val > RSI_OB)
+        buy = prev <= lower and close > lower and r < RSI_OS
+        sell = prev >= upper and close < upper and r > RSI_OB
 
-        if buy_signal:
-            sonuc = islem_ac("BUY")
-            if sonuc.get("retCode") == 0:
-                tp_fiyat = close * (1 + TP_YUZDE / 100)
-                sl_fiyat = close * (1 - SL_YUZDE / 100)
+        if buy:
+            res = order("BUY")
+            if res.get("retCode") == 0:
                 pozisyon.update({
                     "var": True,
                     "yon": "BUY",
                     "giris": close,
-                    "tp": tp_fiyat,
-                    "sl": sl_fiyat,
-                    "breakeven": False
+                    "tp": close * 1.01,
+                    "sl": close * 0.95,
+                    "breakeven": False,
+                    "trailing": False,
+                    "max_fiyat": None
                 })
-                mesaj = f"🟢 <b>BUY İŞLEMİ AÇILDI</b>\n📊 BTC/USD\n💰 Fiyat: {close:.2f}\n📈 RSI: {rsi_val:.1f}\n🎯 TP: {tp_fiyat:.2f} (+%{TP_YUZDE})\n🛑 SL: {sl_fiyat:.2f} (-%{SL_YUZDE})\n🧪 TESTNET"
-            else:
-                mesaj = f"🟢 <b>BUY SİNYALİ</b>\n📊 BTC/USD\n💰 Fiyat: {close:.2f}\n⚠️ İşlem açılamadı: {sonuc.get('retMsg', '')}"
-            telegram_bildir(mesaj)
+                telegram_bildir("🟢 BUY açıldı")
 
-        elif sell_signal:
-            sonuc = islem_ac("SELL")
-            if sonuc.get("retCode") == 0:
-                tp_fiyat = close * (1 - TP_YUZDE / 100)
-                sl_fiyat = close * (1 + SL_YUZDE / 100)
+        elif sell:
+            res = order("SELL")
+            if res.get("retCode") == 0:
                 pozisyon.update({
                     "var": True,
                     "yon": "SELL",
                     "giris": close,
-                    "tp": tp_fiyat,
-                    "sl": sl_fiyat,
-                    "breakeven": False
+                    "tp": close * 0.99,
+                    "sl": close * 1.05,
+                    "breakeven": False,
+                    "trailing": False,
+                    "max_fiyat": None
                 })
-                mesaj = f"🔴 <b>SELL İŞLEMİ AÇILDI</b>\n📊 BTC/USD\n💰 Fiyat: {close:.2f}\n📈 RSI: {rsi_val:.1f}\n🎯 TP: {tp_fiyat:.2f} (-%{TP_YUZDE})\n🛑 SL: {sl_fiyat:.2f} (+%{SL_YUZDE})\n🧪 TESTNET"
-            else:
-                mesaj = f"🔴 <b>SELL SİNYALİ</b>\n📊 BTC/USD\n💰 Fiyat: {close:.2f}\n⚠️ İşlem açılamadı: {sonuc.get('retMsg', '')}"
-            telegram_bildir(mesaj)
+                telegram_bildir("🔴 SELL açıldı")
 
+# ================= MAIN LOOP =================
 if __name__ == "__main__":
-    print("Bot başladı...")
-    telegram_bildir("🤖 <b>Bot Başladı!</b>\n📊 Sinyal + Al-Sat modu\n🎯 TP: %3 | 🛑 SL: %5\n🔒 Breakeven: %1 karda aktif\n🧪 Bybit Testnet aktif")
+    print("Bot başladı")
+    telegram_bildir("🤖 Bot aktif")
+
     while True:
         try:
             analiz()
         except Exception as e:
-            print(f"Hata: {e}")
+            print("Hata:", e)
+
         time.sleep(300)
