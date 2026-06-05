@@ -11,7 +11,7 @@ BYBIT_API_KEY = os.environ.get("BINANCE_API_KEY")
 BYBIT_SECRET = os.environ.get("BINANCE_SECRET")
 
 BB_LEN = 30
-BB_MULT = 4.0
+BB_MULT = 2.0
 RSI_LEN = 14
 RSI_OB = 55
 RSI_OS = 40
