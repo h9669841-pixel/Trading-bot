@@ -18,7 +18,7 @@ RSI_OS = 40
 SYMBOL = "XBTUSD"
 BYBIT_SYMBOL = "BTCUSDT"
 INTERVAL = 5
-QUANTITY = 0.001
+QUANTITY = "0.001"
 TESTNET_URL = "https://api-testnet.bybit.com"
 
 TP_YUZDE = 1.0
@@ -58,10 +58,12 @@ def get_candles():
 
 def imza_olustur(params):
     timestamp = str(int(time.time() * 1000))
-    param_str = timestamp + BYBIT_API_KEY + "5000" + "&".join(f"{k}={v}" for k, v in params.items())
+    recv_window = "5000"
+    param_str = "&".join(f"{k}={v}" for k, v in params.items())
+    sign_str = timestamp + BYBIT_API_KEY + recv_window + param_str
     imza = hmac.new(
         BYBIT_SECRET.encode(),
-        param_str.encode(),
+        sign_str.encode(),
         hashlib.sha256
     ).hexdigest()
     return timestamp, imza
@@ -72,7 +74,7 @@ def islem_ac(action):
         "symbol": BYBIT_SYMBOL,
         "side": "Buy" if action == "BUY" else "Sell",
         "orderType": "Market",
-        "qty": str(QUANTITY),
+        "qty": QUANTITY,
     }
     timestamp, imza = imza_olustur(params)
     headers = {
@@ -83,6 +85,7 @@ def islem_ac(action):
     }
     url = f"{TESTNET_URL}/v5/order/create"
     r = requests.post(url, json=params, headers=headers)
+    print(f"Bybit yanıt: {r.json()}")
     return r.json()
 
 def sma(data, period):
