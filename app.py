@@ -13,7 +13,7 @@ KRAKEN_API_KEY = os.environ.get("KRAKEN_API_KEY")
 KRAKEN_SECRET = os.environ.get("KRAKEN_SECRET")
 
 # --- AGRESİF HIZLI AYARLAR ---
-BB_LEN = 14            
+BB_LEN = 20            
 BB_MULT = 2          
 RSI_LEN = 7            
 RSI_OB = 70            
@@ -23,7 +23,7 @@ INTERVAL = 1
 
 SYMBOL = "XBTUSD"               
 KRAKEN_FUTURES_SYMBOL = "pi_xbtusd" 
-QUANTITY = "0.01"
+QUANTITY = "0.001"
 TESTNET_URL = "https://demo-futures.kraken.com"
 
 TP_YUZDE = 1.0         
