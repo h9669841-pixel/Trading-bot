@@ -8,25 +8,25 @@ import urllib.parse
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-# 🔑 GERÇEK BİNANCE ANAHTARLARINIZ (Railway'e bunları girin)
+# 🔑 GERÇEK BİNANCE ANAHTARLARINIZ (Railway Değişkenleri)
 BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")  
 BINANCE_SECRET = os.environ.get("BINANCE_SECRET")
 
-# --- STANDART VE KARARLI STRATEJİ AYARLARI ---
-BB_LEN = 20            
-BB_MULT = 2.0          
-RSI_LEN = 14           
-RSI_OB = 70            
-RSI_OS = 30            
-INTERVAL = 5           # 5 Dakikalık gerçek mumlar izlenir
+# --- ⚡ 1 DAKİKALIK AGRESİF STRATEJİ AYARLARI ---
+BB_LEN = 14            
+BB_MULT = 1.3          
+RSI_LEN = 7            
+RSI_OB = 50            
+RSI_OS = 50            
+INTERVAL = 1           # ⏳ Süre 1 dakikaya indirildi!
 # -----------------------------------------------
 
 SYMBOL = "BTCUSDT"               
-MAINNET_URL = "https://fapi.binance.com" # ✨ Gerçek Binance Vadeli İşlemler Adresi
+MAINNET_URL = "https://fapi.binance.com" 
 
-TP_YUZDE = 1.5         
-SL_YUZDE = 1.0         
-BREAKEVEN_YUZDE = 0.4  
+TP_YUZDE = 1.0         
+SL_YUZDE = 2.0         
+BREAKEVEN_YUZDE = 0.3  
 
 # Sanal pozisyon takip hafızası
 pozisyon = {
@@ -58,24 +58,41 @@ def get_candles():
     binance_interval = f"{INTERVAL}m" if INTERVAL < 60 else "1h"
     
     params = {
-        "symbol": SYMBOL,
+        "symbol": SYMBOL.upper(),
         "interval": binance_interval,
         "limit": 100
     }
     try:
-        r = requests.get(url, params=params)
+        r = requests.get(url, params=params, timeout=10)
+        
+        if r.status_code != 200:
+            print(f"Binance API Hatası (HTTP {r.status_code}): {r.text}")
+            return None, None
+            
         data = r.json()
-        closes = [float(candle[4]) for candle in data]
-        opens = [float(candle[1]) for candle in data]
+        
+        if not isinstance(data, list) or len(data) == 0:
+            print(f"Binance'ten geçersiz veri formatı döndü: {data}")
+            return None, None
+            
+        closes = []
+        opens = []
+        for candle in data:
+            if isinstance(candle, list) and len(candle) >= 5:
+                closes.append(float(candle[4])) # Kapanış fiyatı
+                opens.append(float(candle[1]))  # Açılış fiyatı
+                
+        if len(closes) < BB_LEN + 1:
+            print("İndikatör hesaplamak için yeterli mum sayısı yok.")
+            return None, None
+            
         return closes, opens
     except Exception as e:
-        print(f"Binance gerçek mum verisi çekme hatası: {e}")
+        print(f"Binance gerçek mum verisi çekme hatası (Detaylı): {e}")
         return None, None
 
 def islem_ac_PASIF(action):
-    # 🔒 GÜVENLİK DUVARI: Bu fonksiyon borsaya asla istek ATMAZ.
-    # Sadece kodun akışını bozmamak için her zaman başarılıymış gibi davranır.
-    print(f"🔒 [SİMÜLASYON] {action} emri borsa yerine simüle edildi. Gerçek işlem açılmadı.")
+    print(f"🔒 [SİMÜLASYON] {action} emri simüle edildi. Gerçek cüzdana dokunulmadı.")
     return {"retCode": 0, "retMsg": "Success"}
 
 def sma(data, period):
@@ -110,12 +127,12 @@ def pozisyon_kontrol(close):
         if kar >= BREAKEVEN_YUZDE and not pozisyon["breakeven"]:
             pozisyon["sl"] = giris
             pozisyon["breakeven"] = True
-            mesaj = f"🔒 <b>[Sanal] BREAKEVEN AKTİF!</b>\n📊 BTCUSDT (Binance)\n💰 Giriş: {giris:.2f}\n📈 Kar: +%{kar:.2f}\n🛑 Sanal SL → {giris:.2f} (Giriş Seviyesi)"
+            mesaj = f"🔒 <b>[Sanal] BREAKEVEN AKTİF!</b>\n📊 BTCUSDT (Binance)\n💰 Giriş: {giris:.2f}\n📈 Kar: +%{kar:.2f}\n🛑 Sanal SL → {giris:.2f}"
             telegram_bildir(mesaj)
 
         if close >= tp:
             islem_ac_PASIF("SELL")
-            mesaj = f"✅ <b>[Sanal] TAKE PROFIT HEDEFİNE ULAŞILDI!</b>\n📊 BTCUSDT (Binance)\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📈 Kar: +%{kar:.2f}\n⚠️ <i>Gerçek işlem açılmamıştır, bilgi amaçlıdır.</i>"
+            mesaj = f"✅ <b>[Sanal] TAKE PROFIT!</b>\n📊 BTCUSDT (Binance)\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📈 Kar: +%{kar:.2f}\n⚠️ <i>Sanal simülasyon kapanışı.</i>"
             telegram_bildir(mesaj)
             pozisyon["var"] = False
             pozisyon["breakeven"] = False
@@ -123,9 +140,9 @@ def pozisyon_kontrol(close):
         elif close <= pozisyon["sl"]:
             islem_ac_PASIF("SELL")
             if pozisyon["breakeven"]:
-                mesaj = f"🔒 <b>[Sanal] BREAKEVEN ÇIKIŞI Yapıldı</b>\n📊 BTCUSDT\n💰 Giriş/Çıkış: {close:.2f}\n➡️ Risk sıfırlandı."
+                mesaj = f"🔒 <b>[Sanal] BREAKEVEN ÇIKIŞI</b>\n📊 BTCUSDT\n💰 Giriş/Çıkış: {close:.2f}\n➡️ Risk sıfırlandı."
             else:
-                mesaj = f"🛑 <b>[Sanal] STOP LOSS SEVİYESİNE DEĞDİ!</b>\n📊 BTCUSDT (Binance)\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📉 Zarar: %{kar:.2f}"
+                mesaj = f"🛑 <b>[Sanal] STOP LOSS!</b>\n📊 BTCUSDT (Binance)\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📉 Zarar: %{kar:.2f}"
             telegram_bildir(mesaj)
             pozisyon["var"] = False
             pozisyon["breakeven"] = False
@@ -141,7 +158,7 @@ def pozisyon_kontrol(close):
 
         if close <= tp:
             islem_ac_PASIF("BUY")
-            mesaj = f"✅ <b>[Sanal] TAKE PROFIT HEDEFİNE ULAŞILDI!</b>\n📊 BTCUSDT (Binance)\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📈 Kar: +%{kar:.2f}\n⚠️ <i>Gerçek işlem açılmamıştır, bilgi amaçlıdır.</i>"
+            mesaj = f"✅ <b>[Sanal] TAKE PROFIT!</b>\n📊 BTCUSDT (Binance)\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📈 Kar: +%{kar:.2f}\n⚠️ <i>Sanal simülasyon kapanışı.</i>"
             telegram_bildir(mesaj)
             pozisyon["var"] = False
             pozisyon["breakeven"] = False
@@ -149,9 +166,9 @@ def pozisyon_kontrol(close):
         elif close >= pozisyon["sl"]:
             islem_ac_PASIF("BUY")
             if pozisyon["breakeven"]:
-                mesaj = f"🔒 <b>[Sanal] BREAKEVEN ÇIKIŞI Yapıldı</b>\n📊 BTCUSDT\n💰 Giriş/Çıkış: {close:.2f}\n➡️ Risk sıfırlandı."
+                mesaj = f"🔒 <b>[Sanal] BREAKEVEN ÇIKIŞI</b>\n📊 BTCUSDT\n💰 Giriş/Çıkış: {close:.2f}\n➡️ Risk sıfırlandı."
             else:
-                mesaj = f"🛑 <b>[Sanal] STOP LOSS SEVİYESİNE DEĞDİ!</b>\n📊 BTCUSDT (Binance)\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📉 Zarar: %{kar:.2f}"
+                mesaj = f"🛑 <b>[Sanal] STOP LOSS!</b>\n📊 BTCUSDT (Binance)\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📉 Zarar: %{kar:.2f}"
             telegram_bildir(mesaj)
             pozisyon["var"] = False
             pozisyon["breakeven"] = False
@@ -161,7 +178,7 @@ def analiz():
     closes, opens = get_candles()
 
     if closes is None or len(closes) < BB_LEN + 1:
-        print("Yeterli veri yok veya çekilemedi, atlanıyor...")
+        print("Yeterli veri yok, bu dakika atlanıyor...")
         return
 
     basis = sma(closes, BB_LEN)
@@ -174,7 +191,7 @@ def analiz():
     close      = closes[-1]
     prev_close = closes[-2]
 
-    print(f"Gerçek Fiyat: {close:.2f} | RSI: {rsi_val:.1f} | BB_U: {bb_upper:.2f} | BB_L: {bb_lower:.2f}")
+    print(f"Canlı Fiyat: {close:.2f} | RSI: {rsi_val:.1f} | BB_U: {bb_upper:.2f} | BB_L: {bb_lower:.2f}")
 
     if pozisyon["var"]:
         pozisyon_kontrol(close)
@@ -195,7 +212,7 @@ def analiz():
                     "sl": sl_fiyat,
                     "breakeven": False
                 })
-                mesaj = f"🔔 <b>[SİNYAL] BUY (LONG) ZAMANI</b>\n📊 BTCUSDT (Binance Gerçek Veri)\n💰 Mevcut Fiyat: {close:.2f}\n🎯 Hedef TP: {tp_fiyat:.2f}\n🛑 Güvenlik SL: {sl_fiyat:.2f}\n\n⚠️ <i>Bot otomatik işlem açmamıştır. Manuel açabilirsiniz.</i>"
+                mesaj = f"⚡ <b>[SİNYAL] BUY (LONG)</b>\n📊 BTCUSDT (Binance Canlı)\n💰 Fiyat: {close:.2f}\n🎯 Hedef TP: {tp_fiyat:.2f}\n🛑 Güvenlik SL: {sl_fiyat:.2f}\n\n⚠️ <i>Otomatik işlem kapalıdır. Manuel açabilirsiniz.</i>"
                 telegram_bildir(mesaj)
 
         elif sell_signal:
@@ -211,16 +228,16 @@ def analiz():
                     "sl": sl_fiyat,
                     "breakeven": False
                 })
-                mesaj = f"🔔 <b>[SİNYAL] SELL (SHORT) ZAMANI</b>\n📊 BTCUSDT (Binance Gerçek Veri)\n💰 Mevcut Fiyat: {close:.2f}\n🎯 Hedef TP: {tp_fiyat:.2f}\n🛑 Güvenlik SL: {sl_fiyat:.2f}\n\n⚠️ <i>Bot otomatik işlem açmamıştır. Manuel açabilirsiniz.</i>"
+                mesaj = f"⚡ <b>[SİNYAL] SELL (SHORT)</b>\n📊 BTCUSDT (Binance Canlı)\n💰 Fiyat: {close:.2f}\n🎯 Hedef TP: {tp_fiyat:.2f}\n🛑 Güvenlik SL: {sl_fiyat:.2f}\n\n⚠️ <i>Otomatik işlem kapalıdır. Manuel açabilirsiniz.</i>"
                 telegram_bildir(mesaj)
 
 if __name__ == "__main__":
-    print("Bot güvenli sinyal modunda başladı...")
-    telegram_bildir("🛡️ <b>Binance Canlı Veri - Sadece Sinyal & Simülasyon Motoru Aktif!</b>\nPara riske atılmadan piyasa 5m mumlarla taranıyor. Cüzdanınız %100 güvende.")
+    print("Bot 1m agresif modda başladı...")
+    telegram_bildir("🔥 <b>Binance Canlı Veri - 1 Dakikalık Agresif Sinyal Motoru Devrede!</b>\nİndikatörler en hassas ayarlarda taranıyor. İzleniyor...")
     
     while True:
         try:
             analiz()
         except Exception as e:
-            print(f"Hata döngüsü yakalandı: {e}")
-        time.sleep(60)
+            print(f"Döngü hatası: {e}")
+        time.sleep(60) # Her 60 saniyede bir (1 dakika) yeni mumu kontrol eder
