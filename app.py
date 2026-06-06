@@ -39,6 +39,8 @@ pozisyon = {
     "breakeven": False
 }
 
+son_nonce = int(time.time() * 1000)
+
 def telegram_bildir(mesaj):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print("Telegram değişkenleri eksik!")
@@ -82,7 +84,6 @@ def imza_olustur(endpoint, post_data_str, nonce):
         print("HATA: KRAKEN_SECRET bulunamadı!")
         return ""
     
-    # 1. Adım: Kraken Futures standart sıralaması: post_data + nonce + endpoint
     message = post_data_str + nonce + endpoint
     sha256_hash = hashlib.sha256(message.encode('utf-8')).digest()
     
@@ -93,10 +94,10 @@ def imza_olustur(endpoint, post_data_str, nonce):
     return base64.b64encode(mac.digest()).decode('utf-8')
 
 def islem_ac(action):
+    global son_nonce
     if not KRAKEN_API_KEY or not KRAKEN_SECRET:
         return {"retCode": -1, "retMsg": "Railway üzerinde Kraken API Anahtarları eksik!"}
 
-    # KRİTİK DÜZELTME: İmza için resmi API endpoint yolu /api/v3/... olmalıdır.
     imza_endpoint = "/api/v3/sendorder"
     url = f"{TESTNET_URL}/derivatives{imza_endpoint}"
     
@@ -104,14 +105,19 @@ def islem_ac(action):
     if closes:
         current_price = closes[-1]
         target_price = current_price * 1.002 if action == "BUY" else current_price * 0.998
-        target_price = round(target_price * 2) / 2
+        # KRİTİK DÜZELTME: limitPrice hatasını engellemek için fiyatı kesinlikle TAM SAYI yapıyoruz
+        target_price = int(round(target_price))
     else:
         return {"retCode": -1, "retMsg": "Fiyat alınamadı"}
 
-    nonce = str(int(time.time() * 1000))
+    current_nonce = int(time.time() * 1000)
+    if current_nonce <= son_nonce:
+        current_nonce = son_nonce + 1
+    son_nonce = current_nonce
+    nonce_str = str(current_nonce)
     
     post_params = {
-        "cliOrdId": f"bot_{nonce}",
+        "cliOrdId": f"bot_{nonce_str}",
         "orderType": "lmt",
         "price": str(target_price),
         "side": "buy" if action == "BUY" else "sell",
@@ -119,24 +125,22 @@ def islem_ac(action):
         "symbol": KRAKEN_FUTURES_SYMBOL
     }
     
-    # KRİTİK DÜZELTME 2: Parametrelerin alfabetik olarak sıralanması (doseq=True ve sorted)
     post_data_str = urllib.parse.urlencode(sorted(post_params.items()))
-    
-    imza = imza_olustur(imza_endpoint, post_data_str, nonce)
+    imza = imza_olustur(imza_endpoint, post_data_str, nonce_str)
     
     headers = {
         "APIKey": KRAKEN_API_KEY.strip(),
-        "Nonce": nonce,
+        "Nonce": nonce_str,
         "Authent": imza,
         "Content-Type": "application/x-www-form-urlencoded"
     }
     
     try:
         r = requests.post(url, data=post_data_str, headers=headers)
-        print(f"Kraken Status Code: {r.status_code}")
+        print(f"Kraken HTTP Status: {r.status_code}")
         
         if not r.text or r.status_code != 200:
-            print(f"Sunucu hatası: {r.text[:200]}")
+            print(f"Sunucu hatası detay: {r.text[:200]}")
             return {"retCode": -1, "retMsg": f"Borsa hatası (HTTP {r.status_code})"}
             
         res_json = r.json()
@@ -146,10 +150,12 @@ def islem_ac(action):
             return {"retCode": 0, "retMsg": "Success"}
         else:
             hata_mesaji = res_json.get("error", "Bilinmeyen Kraken Hatası")
+            if "sendStatus" in res_json and "status" in res_json["sendStatus"]:
+                hata_mesaji = res_json["sendStatus"]["status"]
             return {"retCode": -1, "retMsg": hata_mesaji}
             
     except Exception as e:
-        print(f"Kraken istek veya JSON parse hatası: {e}")
+        print(f"Kraken istek hatası: {e}")
         return {"retCode": -1, "retMsg": f"Sistem Hatası: {str(e)}"}
 
 def sma(data, period):
@@ -296,7 +302,7 @@ def analiz():
 
 if __name__ == "__main__":
     print("Bot başladı...")
-    telegram_bildir("⚙️ <b>Kraken V3 Alfabetik İmza Motoru Aktif!</b>\nSıralı URL yapısı ve endpoint yolu güncellendi. İlk sinyal bekleniyor...")
+    telegram_bildir("🎯 <b>Kraken Tam Sayı Fiyat Motoru Devreye Alındı!</b>\n`limitPrice` hatasına karşı koruma sağlandı. İzleniyor...")
     
     while True:
         try:
