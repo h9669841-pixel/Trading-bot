@@ -7,24 +7,22 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 # --- 📊 ARBİTRAJ STRATEJİ AYARLARI ---
 SYMBOL = "BTCUSDT"
-
-# Eşiği yine Railway panelindeki GIRIS_MAKAS_YUZDE değişkeninden okur. Yoksa %0.05 kabul eder.
-GIRIS_MAKAS_YUZDE = float(os.environ.get("GIRIS_MAKAS_YUZDE", 0.05))
-CIKIS_MAKAS_YUZDE = 0.01  
-
-# 🛑 IP ENGELİNİ AŞMAK İÇİN KRİTİK AYAR: 
-# Sorgu aralığını 4 saniyeye çıkararak Binance'in radarına takılmayı önlüyoruz.
-LOOP_INTERVAL = 4         
+GIRIS_MAKAS_YUZDE = 0.30  # Vadeli fiyat, Spottan %0.30 veya daha fazla uzaklaşırsa (+ veya -) sinyal ver
+CIKIS_MAKAS_YUZDE = 0.05  # Makas normale döndüğünde (%0.05 veya altına/üstüne gelince) çıkış sinyali ver
+LOOP_INTERVAL = 2         # Piyasayı kaç saniyede bir tarasın? (Canlı takip için 2 saniye idealdir)
 # -------------------------------------
 
-# 🌐 IP Engeline Karşı Alternatif Ağ Yedekli API Adresleri (api3 kullanımı daha stabildir)
-SPOT_URL = "https://api3.binance.com/api/v3/ticker/price"
+# Binance API Adresleri
+SPOT_URL = "https://api.binance.com/api/v3/ticker/price"
 FUTURES_URL = "https://fapi.binance.com/fapi/v1/ticker/price"
 
+# Sanal arbitraj pozisyon takip hafızası
 arbitraj_pozisyon = {
     "aktif": False,
-    "yon": None, 
-    "giris_makas": 0.0
+    "yon": None, # "ARTI" veya "EKSI" yön takibi için eklendi
+    "giris_makas": 0.0,
+    "spot_giris_fiyat": 0.0,
+    "futures_giris_fiyat": 0.0
 }
 
 def telegram_bildir(mesaj):
@@ -42,31 +40,25 @@ def telegram_bildir(mesaj):
         print(f"Telegram hatası: {e}")
 
 def get_live_prices():
+    """Hem Spot hem de Vadeli piyasadan anlık fiyatları çeker"""
     spot_price = None
     futures_price = None
     
-    # İstek başlıklarına (Headers) bot olmadığımızı belirten standart bir tarayıcı kimliği ekliyoruz
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    }
-    
+    # 1. Spot Fiyatını Çek
     try:
-        r_spot = requests.get(SPOT_URL, params={"symbol": SYMBOL.upper()}, headers=headers, timeout=5)
+        r_spot = requests.get(SPOT_URL, params={"symbol": SYMBOL.upper()}, timeout=5)
         if r_spot.status_code == 200:
             spot_price = float(r_spot.json().get("price", 0))
-        elif r_spot.status_code == 429:
-            print("🚨 Spot API: Binance çok sık istek attığımızı söylüyor (Rate Limit)!")
     except Exception as e:
-        print(f"Spot fiyat hatası: {e}")
+        print(f"Spot fiyat çekme hatası: {e}")
         
+    # 2. Vadeli (Futures) Fiyatını Çek
     try:
-        r_fut = requests.get(FUTURES_URL, params={"symbol": SYMBOL.upper()}, headers=headers, timeout=5)
+        r_fut = requests.get(FUTURES_URL, params={"symbol": SYMBOL.upper()}, timeout=5)
         if r_fut.status_code == 200:
             futures_price = float(r_fut.json().get("price", 0))
-        elif r_fut.status_code == 429:
-            print("🚨 Futures API: Binance çok sık istek attığımızı söylüyor (Rate Limit)!")
     except Exception as e:
-        print(f"Futures fiyat hatası: {e}")
+        print(f"Futures fiyat çekme hatası: {e}")
         
     return spot_price, futures_price
 
@@ -76,66 +68,94 @@ def arbitraj_tarama():
     spot_fiyat, futures_fiyat = get_live_prices()
     
     if not spot_fiyat or not futures_fiyat:
-        print("Fiyatlar çekilemedi, havuzun rahatlaması için bir sonraki döngü beklenecek...")
+        print("Fiyatlar çekilemedi, bir sonraki saniye tekrar denenecek...")
         return
 
+    # Vadeli işlem ile Spot arasındaki makas yüzdesini hesapla
     anlik_makas = ((futures_fiyat - spot_fiyat) / spot_fiyat) * 100
     
-    print(f"⏱️ Spot: {spot_fiyat:.2f} | Futures: {futures_fiyat:.2f} | Makas: %{anlik_makas:.4f} (Hedef Eşik: %{GIRIS_MAKAS_YUZDE:.3f})")
+    print(f"⏱️ Spot: {spot_fiyat:.2f} | Futures: {futures_fiyat:.2f} | Makas: %{anlik_makas:.4f}")
 
     if not arbitraj_pozisyon["aktif"]:
+        # 🟢 GİRİŞ KOŞULLARI KONTROLÜ
+        
+        # Durum A: Pozitif Makas (Vadeli Pahalı)
         if anlik_makas >= GIRIS_MAKAS_YUZDE:
             arbitraj_pozisyon.update({
                 "aktif": True,
                 "yon": "ARTI",
-                "giris_makas": anlik_makas
+                "giris_makas": anlik_makas,
+                "spot_giris_fiyat": spot_fiyat,
+                "futures_giris_fiyat": futures_fiyat
             })
+            
             mesaj = (
-                f"🚀 <b>💥 POZİTİF ARBİTRAJ FIRSATI!</b>\n\n"
+                f"🚀 <b>💥 POZİTİF ARBİTRAJ FIRSATI YAKALANDI!</b>\n\n"
                 f"📊 <b>Parite:</b> {SYMBOL}\n"
                 f"🟢 <b>Spot Fiyat:</b> {spot_fiyat:.2f} USDT\n"
                 f"🔴 <b>Futures Fiyat:</b> {futures_fiyat:.2f} USDT\n"
-                f"⚡ <b>Anlık Makas:</b> +%{anlik_makas:.4f}\n\n"
-                f"💡 <i>Öneri: Spot AL, Vadeli SHORT aç!</i>"
+                f"⚡ <b>Anlık Makas (Spread):</b> +%{anlik_makas:.3f}\n\n"
+                f"💡 <i>Manuel İşlem Önerisi: Spot piyasadan AL, Vadeli piyasada aynı miktarda SHORT aç!</i>"
             )
             telegram_bildir(mesaj)
             
+        # Durum B: Negatif Makas (Vadeli Ucuz)
         elif anlik_makas <= -GIRIS_MAKAS_YUZDE:
             arbitraj_pozisyon.update({
                 "aktif": True,
                 "yon": "EKSI",
-                "giris_makas": anlik_makas
+                "giris_makas": anlik_makas,
+                "spot_giris_fiyat": spot_fiyat,
+                "futures_giris_fiyat": futures_fiyat
             })
+            
             mesaj = (
-                f"📉 <b>💥 NEGATİF ARBİTRAJ FIRSATI!</b>\n\n"
+                f"📉 <b>💥 NEGATİF ARBİTRAJ FIRSATI YAKALANDI!</b>\n\n"
                 f"📊 <b>Parite:</b> {SYMBOL}\n"
                 f"🟢 <b>Spot Fiyat:</b> {spot_fiyat:.2f} USDT\n"
                 f"🔴 <b>Futures Fiyat:</b> {futures_fiyat:.2f} USDT\n"
-                f"⚡ <b>Anlık Makas:</b> %{anlik_makas:.4f}\n\n"
-                f"💡 <i>Öneri: Spot SAT, Vadeli LONG aç!</i>"
+                f"⚡ <b>Anlık Makas (Spread):</b> %{anlik_makas:.3f}\n\n"
+                f"💡 <i>Manuel İşlem Önerisi: Spot malları SAT, Vadeli piyasada aynı miktarda LONG aç!</i>"
             )
             telegram_bildir(mesaj)
             
     else:
+        # 🔴 ÇIŞIŞ KOŞULLARI KONTROLÜ
+        
+        # Pozitif makastan çıkış kontrolü (Sıfıra/Çıkış eşiğine düştü mü?)
         if arbitraj_pozisyon["yon"] == "ARTI" and anlik_makas <= CIKIS_MAKAS_YUZDE:
-            kar = arbitraj_pozisyon["giris_makas"] - anlik_makas
-            mesaj = f"🤝 <b>🔒 POZİTİF ARBİTRAJ KAPANDI</b>\n📊 {SYMBOL}\n📉 Makas daraldı: %{anlik_makas:.4f}\n💰 Tahmini Kazanç: %{kar:.3f}"
+            kar_orani = arbitraj_pozisyon["giris_makas"] - anlik_makas
+            mesaj = (
+                f"🤝 <b>🔒 POZİTİF ARBİTRAJ POZİSYONU KAPANDI</b>\n\n"
+                f"📊 <b>Parite:</b> {SYMBOL}\n"
+                f"📉 <b>Makas Daraldı:</b> %{anlik_makas:.3f}'e düştü.\n"
+                f"💰 <b>Tahmini Brüt Kazanç:</b> %{kar_orani:.3f}\n\n"
+                f"💡 <i>Manuel İşlem Önerisi: Spot malları SAT, Vadeli SHORT pozisyonunu KAPAT!</i>"
+            )
             telegram_bildir(mesaj)
             arbitraj_pozisyon["aktif"] = False
             
+        # Negatif makastan çıkış kontrolü (Sıfıra/Çıkış eşiğine doğru yukarı tırmandı mı?)
         elif arbitraj_pozisyon["yon"] == "EKSI" and anlik_makas >= -CIKIS_MAKAS_YUZDE:
-            kar = abs(arbitraj_pozisyon["giris_makas"]) - abs(anlik_makas)
-            mesaj = f"🤝 <b>🔒 NEGATİF ARBİTRAJ KAPANDI</b>\n📊 {SYMBOL}\n📈 Makas normale döndü: %{anlik_makas:.4f}\n💰 Tahmini Kazanç: %{kar:.3f}"
+            kar_orani = abs(arbitraj_pozisyon["giris_makas"]) - abs(anlik_makas)
+            mesaj = (
+                f"🤝 <b>🔒 NEGATİF ARBİTRAJ POZİSYONU KAPANDI</b>\n\n"
+                f"📊 <b>Parite:</b> {SYMBOL}\n"
+                f"📈 <b>Makas Normale Döndü:</b> %{anlik_makas:.3f}'e tırmandı.\n"
+                f"💰 <b>Tahmini Brüt Kazanç:</b> %{kar_orani:.3f}\n\n"
+                f"💡 <i>Manuel İşlem Önerisi: Spot piyasadan geri AL, Vadeli LONG pozisyonunu KAPAT!</i>"
+            )
             telegram_bildir(mesaj)
             arbitraj_pozisyon["aktif"] = False
 
 if __name__ == "__main__":
-    print("Binance Güvenli Çift Yönlü Arbitraj Gözlemcisi Başlatıldı...")
+    print("Binance Spot-Futures Arbitraj Gözlemcisi Başlatıldı...")
     telegram_bildir(
-        f"🛰️ <b>Yedekli Filtreli Arbitraj Botu Devrede!</b>\n"
-        f"Tarama Sıklığı: {LOOP_INTERVAL} saniyede bire çekildi.\n"
-        f"Eşik Değeri: ±%{GIRIS_MAKAS_YUZDE}\n"
-        f"Binance ban koruması ve tarayıcı kimlik maskesi (User-Agent) aktif edildi."
+        f"🛰️ <b>Binance Çift Yönlü Arbitraj Botu Yayında!</b>\n"
+        f"Piyasa: {SYMBOL}\n"
+        f"Giriş Eşiği: ±%{GIRIS_MAKAS_YUZDE}\n"
+        f"Çıkış Eşiği: ±%{CIKIS_MAKAS_YUZDE}\n"
+        f"Sistem 2 saniyede bir çift yönlü fiyatları tarıyor..."
     )
     
     while True:
