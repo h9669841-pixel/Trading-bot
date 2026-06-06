@@ -100,16 +100,7 @@ def islem_ac(action):
 
     imza_endpoint = "/api/v3/sendorder"
     url = f"{TESTNET_URL}/derivatives{imza_endpoint}"
-    
-    closes, _ = get_candles()
-    if closes:
-        current_price = closes[-1]
-        target_price = current_price * 1.002 if action == "BUY" else current_price * 0.998
-        clean_price_str = f"{int(round(target_price))}"
-    else:
-        return {"retCode": -1, "retMsg": "Fiyat alınamadı"}
 
-    # 🛠️ DÜZELTME: Anlık 502/503 sunucu kopmalarına karşı 3 kez üst üste otomatik deneme döngüsü
     for deneme in range(3):
         current_nonce = int(time.time() * 1000)
         if current_nonce <= son_nonce:
@@ -117,10 +108,11 @@ def islem_ac(action):
         son_nonce = current_nonce
         nonce_str = str(current_nonce)
         
+        # 🛠️ KRİTİK DÜZELTME: limitPrice hatasını aşmak için Market (mkt) emrine geçildi.
+        # Market emirlerinde fiyat (price) parametresi gönderilmez, borsa anlık fiyattan doldurur.
         post_params = {
             "cliOrdId": f"{int(current_nonce % 10000000)}",
-            "orderType": "lmt",
-            "price": clean_price_str,
+            "orderType": "mkt",
             "side": "buy" if action == "BUY" else "sell",
             "size": f"{float(QUANTITY):.2f}",
             "symbol": KRAKEN_FUTURES_SYMBOL
@@ -140,9 +132,8 @@ def islem_ac(action):
             r = requests.post(url, data=post_data_str, headers=headers)
             print(f"Kraken HTTP Status: {r.status_code} (Deneme: {deneme + 1})")
             
-            # Eğer borsa geçici olarak 502/503 verdiyse, döngüyü kırma, 2 saniye bekle ve tekrar dene
             if r.status_code in [502, 503, 504]:
-                print(f"Sunucu kaynaklı anlık kesinti (HTTP {r.status_code}). 2 sn sonra tekrar deneniyor...")
+                print(f"Sunucu kesintisi (HTTP {r.status_code}). Tekrar deneniyor...")
                 time.sleep(2)
                 continue
                 
@@ -165,7 +156,7 @@ def islem_ac(action):
             print(f"Kraken istek hatası (Deneme {deneme + 1}): {e}")
             time.sleep(2)
             
-    return {"retCode": -1, "retMsg": "Kraken Demo Sunucusu Yanıt Vermiyor (HTTP 502/503 Overload)"}
+    return {"retCode": -1, "retMsg": "Kraken Sunucu Hatası"}
 
 def sma(data, period):
     return np.mean(data[-period:])
@@ -311,7 +302,7 @@ def analiz():
 
 if __name__ == "__main__":
     print("Bot başladı...")
-    telegram_bildir("🛡️ <b>502 Sunucu Koruma ve Otomatik Retry Filtresi Yüklendi!</b>\nGeçici borsa kopmalarına karşı dayanıklılık sağlandı. İzleniyor...")
+    telegram_bildir("⚡ <b>Kraken Market Order (Piyasa Emri) Altyapısı Aktif!</b>\nFiyat doğrulama bariyerleri kaldırıldı, anlık eşleşme moduna geçildi. İzleniyor...")
     
     while True:
         try:
