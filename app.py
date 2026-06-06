@@ -20,8 +20,8 @@ RSI_OS = 50
 INTERVAL = 1           
 # -----------------------------
 
-SYMBOL = "XBTUSD"               # Spot veri çekimi için (Kraken Spot)
-KRAKEN_FUTURES_SYMBOL = "pi_xbtusd" # Vadeli işlem emri için (Kraken Futures Sürekli)
+SYMBOL = "XBTUSD"               
+KRAKEN_FUTURES_SYMBOL = "pi_xbtusd" 
 QUANTITY = "0.01"
 TESTNET_URL = "https://demo-futures.kraken.com"
 
@@ -76,48 +76,51 @@ def get_candles():
         print(f"Veri ayrıştırma hatası: {e}")
         return None, None
 
-def imza_olustur(endpoint, post_data):
-    # Kraken Futures V3 Kimlik Doğrulama Şeması
-    encoded_post_data = post_data.encode('utf-8')
-    hash_digest = hashlib.sha256(encoded_post_data).digest()
+def imza_olustur(endpoint, post_data, nonce):
+    # Kraken Futures V3 kimlik doğrulama algoritması düzeltildi
+    # Formül: SHA256(post_data + nonce) + endpoint -> HMAC_SHA512
+    message_to_hash = post_data + nonce + endpoint
+    sha256_hash = hashlib.sha256(message_to_hash.encode('utf-8')).digest()
     
-    endpoint_bytes = endpoint.encode('utf-8')
-    secret_bytes = base64.b64decode(KRAKEN_SECRET)
-    
-    message = endpoint_bytes + hash_digest
-    signature = hmac.new(secret_bytes, message, hashlib.sha512).digest()
+    # Secret anahtarını temizle ve byte dizisine çevir
+    secret_clean = KRAKEN_SECRET.strip()
+    try:
+        secret_bytes = base64.b64decode(secret_clean)
+    except Exception:
+        secret_bytes = secret_clean.encode('utf-8')
+        
+    signature = hmac.new(secret_bytes, sha256_hash, hashlib.sha512).digest()
     return base64.b64encode(signature).decode('utf-8')
 
 def islem_ac(action):
     endpoint = "/derivatives/api/v3/sendorder"
     url = f"{TESTNET_URL}{endpoint}"
     
-    # Kraken Futures için gerekli POST parametreleri
-    post_params = {
-        "orderType": "lmt", # Hızlı gerçekleşme için fiyata yakın limit veya piyasa taklidi
-        "symbol": KRAKEN_FUTURES_SYMBOL,
-        "side": "buy" if action == "BUY" else "sell",
-        "size": QUANTITY,
-        "cliOrdId": f"bot_{int(time.time())}"
-    }
-    
-    # Limit fiyat belirlemek için son fiyata yaklaşıyoruz (Market emri simülasyonu)
-    # Gerçek market emri için 'mkt' seçilebilir ancak Kraken sandbox limit emrini daha kararlı işler.
     closes, _ = get_candles()
     if closes:
         current_price = closes[-1]
-        # Alış için biraz yukarıdan, satış için biraz aşağıdan fiyat yazarak emrin anında eşleşmesini sağlıyoruz
-        post_params["price"] = str(current_price * 1.002 if action == "BUY" else current_price * 0.998)
+        target_price = current_price * 1.002 if action == "BUY" else current_price * 0.998
     else:
-        return {"result": "error", "error": "Fiyat alınamadı"}
+        return {"retCode": -1, "retMsg": "Fiyat alınamadı"}
 
-    # Parametreleri query string formatına çeviriyoruz
-    post_data_str = "&".join([f"{k}={v}" for k, v in post_params.items()])
+    nonce = str(int(time.time() * 1000))
     
-    imza = imza_olustur(endpoint, post_data_str)
+    # Kraken parametre yapısı string formatına tam olarak eşitlendi
+    post_params = {
+        "orderType": "lmt",
+        "symbol": KRAKEN_FUTURES_SYMBOL,
+        "side": "buy" if action == "BUY" else "sell",
+        "size": QUANTITY,
+        "price": f"{target_price:.1f}",
+        "cliOrdId": f"bot_{nonce}"
+    }
+    
+    post_data_str = "&".join([f"{k}={v}" for k, v in post_params.items()])
+    imza = imza_olustur(endpoint, post_data_str, nonce)
     
     headers = {
-        "APIKey": KRAKEN_API_KEY,
+        "APIKey": KRAKEN_API_KEY.strip(),
+        "Nonce": nonce,
         "Authent": imza,
         "Content-Type": "application/x-www-form-urlencoded"
     }
@@ -127,11 +130,14 @@ def islem_ac(action):
         res_json = r.json()
         print(f"Kraken Futures yanıt: {res_json}")
         
-        # Kraken başarılı emirde "result": "success" döndürür
         if res_json.get("result") == "success":
             return {"retCode": 0, "retMsg": "Success"}
         else:
-            return {"retCode": -1, "retMsg": res_json.get("error", "Bilinmeyen Kraken Hatası")}
+            # Kraken'in tam hata mesajını yakala
+            hata_mesaji = res_json.get("sendStatus", {}).get("status", "Bilinmeyen Hata")
+            if "error" in res_json:
+                hata_mesaji = res_json.get("error")
+            return {"retCode": -1, "retMsg": hata_mesaji}
     except Exception as e:
         print(f"Kraken istek hatası: {e}")
         return {"retCode": -1, "retMsg": str(e)}
@@ -280,7 +286,7 @@ def analiz():
 
 if __name__ == "__main__":
     print("Bot başladı...")
-    telegram_bildir("🚀 <b>Hiper-Agresif Bot Yeniden Başlatıldı!</b>\n⏱️ Zaman Dilimi: 1 Dakika\n🐙 Altyapı: Kraken Futures Sandbox sistemine geçiş yapıldı.")
+    telegram_bildir("🐙 <b>Kraken V3 Entegrasyonu Aktif!</b>\n⚙️ Kimlik doğrulama şeması optimize edildi, test ediliyor...")
     
     while True:
         try:
