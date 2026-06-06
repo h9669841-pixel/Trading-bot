@@ -1,41 +1,27 @@
 import os
 import time
-import hmac
-import hashlib
 import requests
-import numpy as np
-import urllib.parse
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-# 🔑 GERÇEK BİNANCE ANAHTARLARINIZ (Railway Değişkenleri)
-BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")  
-BINANCE_SECRET = os.environ.get("BINANCE_SECRET")
 
-# --- ⚡ 1 DAKİKALIK AGRESİF STRATEJİ AYARLARI ---
-BB_LEN = 14            
-BB_MULT = 1.3          
-RSI_LEN = 7            
-RSI_OB = 50            
-RSI_OS = 50            
-INTERVAL = 1           # ⏳ Süre 1 dakikaya indirildi!
-# -----------------------------------------------
+# --- 📊 ARBİTRAJ STRATEJİ AYARLARI ---
+SYMBOL = "BTCUSDT"
+GIRIS_MAKAS_YUZDE = 0.30  # Vadeli fiyat, Spottan %0.30 veya daha fazla pahalıysa sinyal ver
+CIKIS_MAKAS_YUZDE = 0.05  # Makas %0.05'e düştüğünde (kapandığında) karı al/çıkış sinyali ver
+LOOP_INTERVAL = 2         # Piyasayı kaç saniyede bir tarasın? (Canlı takip için 2 saniye idealdir)
+# -------------------------------------
 
-SYMBOL = "BTCUSDT"               
-MAINNET_URL = "https://fapi.binance.com" 
+# Binance API Adresleri
+SPOT_URL = "https://api.binance.com/api/v3/ticker/price"
+FUTURES_URL = "https://fapi.binance.com/fapi/v1/ticker/price"
 
-TP_YUZDE = 1.0         
-SL_YUZDE = 2.0         
-BREAKEVEN_YUZDE = 0.3  
-
-# Sanal pozisyon takip hafızası
-pozisyon = {
-    "var": False,
-    "yon": None,
-    "giris": None,
-    "tp": None,
-    "sl": None,
-    "breakeven": False
+# Sanal arbitraj pozisyon takip hafızası
+arbitraj_pozisyon = {
+    "aktif": False,
+    "giris_makas": 0.0,
+    "spot_giris_fiyat": 0.0,
+    "futures_giris_fiyat": 0.0
 }
 
 def telegram_bildir(mesaj):
@@ -44,200 +30,102 @@ def telegram_bildir(mesaj):
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        r = requests.post(url, json={
+        requests.post(url, json={
             "chat_id": TELEGRAM_CHAT_ID,
             "text": mesaj,
             "parse_mode": "HTML"
-        })
-        print(f"Telegram yanıt: {r.status_code}")
+        }, timeout=5)
     except Exception as e:
         print(f"Telegram hatası: {e}")
 
-def get_candles():
-    url = f"{MAINNET_URL}/fapi/v1/klines"
-    binance_interval = f"{INTERVAL}m" if INTERVAL < 60 else "1h"
+def get_live_prices():
+    """Hem Spot hem de Vadeli piyasadan anlık fiyatları çeker"""
+    spot_price = None
+    futures_price = None
     
-    params = {
-        "symbol": SYMBOL.upper(),
-        "interval": binance_interval,
-        "limit": 100
-    }
+    # 1. Spot Fiyatını Çek
     try:
-        r = requests.get(url, params=params, timeout=10)
-        
-        if r.status_code != 200:
-            print(f"Binance API Hatası (HTTP {r.status_code}): {r.text}")
-            return None, None
-            
-        data = r.json()
-        
-        if not isinstance(data, list) or len(data) == 0:
-            print(f"Binance'ten geçersiz veri formatı döndü: {data}")
-            return None, None
-            
-        closes = []
-        opens = []
-        for candle in data:
-            if isinstance(candle, list) and len(candle) >= 5:
-                closes.append(float(candle[4])) # Kapanış fiyatı
-                opens.append(float(candle[1]))  # Açılış fiyatı
-                
-        if len(closes) < BB_LEN + 1:
-            print("İndikatör hesaplamak için yeterli mum sayısı yok.")
-            return None, None
-            
-        return closes, opens
+        r_spot = requests.get(SPOT_URL, params={"symbol": SYMBOL.upper()}, timeout=5)
+        if r_spot.status_code == 200:
+            spot_price = float(r_spot.json().get("price", 0))
     except Exception as e:
-        print(f"Binance gerçek mum verisi çekme hatası (Detaylı): {e}")
-        return None, None
+        print(f"Spot fiyat çekme hatası: {e}")
+        
+    # 2. Vadeli (Futures) Fiyatını Çek
+    try:
+        r_fut = requests.get(FUTURES_URL, params={"symbol": SYMBOL.upper()}, timeout=5)
+        if r_fut.status_code == 200:
+            futures_price = float(r_fut.json().get("price", 0))
+    except Exception as e:
+        print(f"Futures fiyat çekme hatası: {e}")
+        
+    return spot_price, futures_price
 
-def islem_ac_PASIF(action):
-    print(f"🔒 [SİMÜLASYON] {action} emri simüle edildi. Gerçek cüzdana dokunulmadı.")
-    return {"retCode": 0, "retMsg": "Success"}
-
-def sma(data, period):
-    return np.mean(data[-period:])
-
-def stdev(data, period):
-    return np.std(data[-period:])
-
-def calc_rsi(closes, period):
-    deltas = np.diff(closes)
-    gains  = np.where(deltas > 0, deltas, 0)
-    losses = np.where(deltas < 0, -deltas, 0)
-    avg_gain = np.mean(gains[-period:])
-    avg_loss = np.mean(losses[-period:])
-    if avg_loss == 0:
-        return 100
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
-
-def pozisyon_kontrol(close):
-    global pozisyon
-    if not pozisyon["var"]:
-        return
-
-    giris = pozisyon["giris"]
-    yon = pozisyon["yon"]
-    tp = pozisyon["tp"]
-
-    if yon == "BUY":
-        kar = ((close - giris) / giris) * 100
-
-        if kar >= BREAKEVEN_YUZDE and not pozisyon["breakeven"]:
-            pozisyon["sl"] = giris
-            pozisyon["breakeven"] = True
-            mesaj = f"🔒 <b>[Sanal] BREAKEVEN AKTİF!</b>\n📊 BTCUSDT (Binance)\n💰 Giriş: {giris:.2f}\n📈 Kar: +%{kar:.2f}\n🛑 Sanal SL → {giris:.2f}"
-            telegram_bildir(mesaj)
-
-        if close >= tp:
-            islem_ac_PASIF("SELL")
-            mesaj = f"✅ <b>[Sanal] TAKE PROFIT!</b>\n📊 BTCUSDT (Binance)\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📈 Kar: +%{kar:.2f}\n⚠️ <i>Sanal simülasyon kapanışı.</i>"
-            telegram_bildir(mesaj)
-            pozisyon["var"] = False
-            pozisyon["breakeven"] = False
-            
-        elif close <= pozisyon["sl"]:
-            islem_ac_PASIF("SELL")
-            if pozisyon["breakeven"]:
-                mesaj = f"🔒 <b>[Sanal] BREAKEVEN ÇIKIŞI</b>\n📊 BTCUSDT\n💰 Giriş/Çıkış: {close:.2f}\n➡️ Risk sıfırlandı."
-            else:
-                mesaj = f"🛑 <b>[Sanal] STOP LOSS!</b>\n📊 BTCUSDT (Binance)\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📉 Zarar: %{kar:.2f}"
-            telegram_bildir(mesaj)
-            pozisyon["var"] = False
-            pozisyon["breakeven"] = False
-
-    elif yon == "SELL":
-        kar = ((giris - close) / giris) * 100
-
-        if kar >= BREAKEVEN_YUZDE and not pozisyon["breakeven"]:
-            pozisyon["sl"] = giris
-            pozisyon["breakeven"] = True
-            mesaj = f"🔒 <b>[Sanal] BREAKEVEN AKTİF!</b>\n📊 BTCUSDT\n💰 Giriş: {giris:.2f}\n📈 Kar: +%{kar:.2f}\n🛑 Sanal SL → {giris:.2f}"
-            telegram_bildir(mesaj)
-
-        if close <= tp:
-            islem_ac_PASIF("BUY")
-            mesaj = f"✅ <b>[Sanal] TAKE PROFIT!</b>\n📊 BTCUSDT (Binance)\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📈 Kar: +%{kar:.2f}\n⚠️ <i>Sanal simülasyon kapanışı.</i>"
-            telegram_bildir(mesaj)
-            pozisyon["var"] = False
-            pozisyon["breakeven"] = False
-            
-        elif close >= pozisyon["sl"]:
-            islem_ac_PASIF("BUY")
-            if pozisyon["breakeven"]:
-                mesaj = f"🔒 <b>[Sanal] BREAKEVEN ÇIKIŞI</b>\n📊 BTCUSDT\n💰 Giriş/Çıkış: {close:.2f}\n➡️ Risk sıfırlandı."
-            else:
-                mesaj = f"🛑 <b>[Sanal] STOP LOSS!</b>\n📊 BTCUSDT (Binance)\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📉 Zarar: %{kar:.2f}"
-            telegram_bildir(mesaj)
-            pozisyon["var"] = False
-            pozisyon["breakeven"] = False
-
-def analiz():
-    global pozisyon
-    closes, opens = get_candles()
-
-    if closes is None or len(closes) < BB_LEN + 1:
-        print("Yeterli veri yok, bu dakika atlanıyor...")
-        return
-
-    basis = sma(closes, BB_LEN)
-    dev = stdev(closes, BB_LEN)
+def arbitraj_tarama():
+    global arbitraj_pozisyon
     
-    bb_upper = basis + dev * BB_MULT
-    bb_lower = basis - dev * BB_MULT
+    spot_fiyat, futures_fiyat = get_live_prices()
+    
+    if not spot_fiyat or not futures_fiyat:
+        print("Fiyatlar çekilemedi, bir sonraki saniye tekrar denenecek...")
+        return
 
-    rsi_val    = calc_rsi(closes, RSI_LEN)
-    close      = closes[-1]
-    prev_close = closes[-2]
+    # Vadeli işlem ile Spot arasındaki makas yüzdesini hesapla
+    # Pozitif değer: Vadeli piyasa, Spottan daha pahalı demektir.
+    anlik_makas = ((futures_fiyat - spot_fiyat) / spot_fiyat) * 100
+    
+    print(f"⏱️ Spot: {spot_fiyat:.2f} | Futures: {futures_fiyat:.2f} | Makas: %{anlik_makas:.4f}")
 
-    print(f"Canlı Fiyat: {close:.2f} | RSI: {rsi_val:.1f} | BB_U: {bb_upper:.2f} | BB_L: {bb_lower:.2f}")
-
-    if pozisyon["var"]:
-        pozisyon_kontrol(close)
+    if not arbitraj_pozisyon["aktif"]:
+        # 🟢 GİRİŞ KOŞULU KONTROLÜ
+        if anlik_makas >= GIRIS_MAKAS_YUZDE:
+            arbitraj_pozisyon.update({
+                "aktif": True,
+                "giris_makas": anlik_makas,
+                "spot_giris_fiyat": spot_fiyat,
+                "futures_gener_fiyat": futures_fiyat
+            })
+            
+            mesaj = (
+                f"🚀 <b>💥 ARBİTRAJ FIRSATI YAKALANDI!</b>\n\n"
+                f"📊 <b>Parite:</b> {SYMBOL}\n"
+                f"🟢 <b>Spot Fiyat:</b> {spot_fiyat:.2f} USDT\n"
+                f"🔴 <b>Futures Fiyat:</b> {futures_fiyat:.2f} USDT\n"
+                f"⚡ <b>Anlık Makas (Spread):</b> %{anlik_makas:.3f}\n\n"
+                f"💡 <i>Manuel İşlem Önerisi: Spot piyasadan AL, Vadeli piyasada aynı miktarda SHORT aç!</i>"
+            )
+            telegram_bildir(mesaj)
+            
     else:
-        buy_signal  = (prev_close <= bb_lower or close <= bb_lower) and (rsi_val <= RSI_OS)
-        sell_signal = (prev_close >= bb_upper or close >= bb_upper) and (rsi_val >= RSI_OB)
-
-        if buy_signal:
-            sonuc = islem_ac_PASIF("BUY")
-            if sonuc.get("retCode") == 0:
-                tp_fiyat = close * (1 + TP_YUZDE / 100)
-                sl_fiyat = close * (1 - SL_YUZDE / 100)
-                pozisyon.update({
-                    "var": True,
-                    "yon": "BUY",
-                    "giris": close,
-                    "tp": tp_fiyat,
-                    "sl": sl_fiyat,
-                    "breakeven": False
-                })
-                mesaj = f"⚡ <b>[SİNYAL] BUY (LONG)</b>\n📊 BTCUSDT (Binance Canlı)\n💰 Fiyat: {close:.2f}\n🎯 Hedef TP: {tp_fiyat:.2f}\n🛑 Güvenlik SL: {sl_fiyat:.2f}\n\n⚠️ <i>Otomatik işlem kapalıdır. Manuel açabilirsiniz.</i>"
-                telegram_bildir(mesaj)
-
-        elif sell_signal:
-            sonuc = islem_ac_PASIF("SELL")
-            if sonuc.get("retCode") == 0:
-                tp_fiyat = close * (1 - TP_YUZDE / 100)
-                sl_fiyat = close * (1 + SL_YUZDE / 100)
-                pozisyon.update({
-                    "var": True,
-                    "yon": "SELL",
-                    "giris": close,
-                    "tp": tp_fiyat,
-                    "sl": sl_fiyat,
-                    "breakeven": False
-                })
-                mesaj = f"⚡ <b>[SİNYAL] SELL (SHORT)</b>\n📊 BTCUSDT (Binance Canlı)\n💰 Fiyat: {close:.2f}\n🎯 Hedef TP: {tp_fiyat:.2f}\n🛑 Güvenlik SL: {sl_fiyat:.2f}\n\n⚠️ <i>Otomatik işlem kapalıdır. Manuel açabilirsiniz.</i>"
-                telegram_bildir(mesaj)
+        # 🔴 ÇIŞIŞ KOŞULU KONTROLÜ (Makas daraldı mı?)
+        if anlik_makas <= CIKIS_MAKAS_YUZDE:
+            kar_orani = arbitraj_pozisyon["giris_makas"] - anlik_makas
+            
+            mesaj = (
+                f"🤝 <b>🔒 ARBİTRAJ POZİSYONU KAPANDI</b>\n\n"
+                f"📊 <b>Parite:</b> {SYMBOL}\n"
+                f"📉 <b>Makas Daraldı:</b> %{anlik_makas:.3f}'e düştü.\n"
+                f"💰 <b>Tahmini Brüt Kazanç:</b> %{kar_orani:.3f}\n\n"
+                f"💡 <i>Manuel İşlem Önerisi: Spot malları SAT, Vadeli SHORT pozisyonunu KAPAT!</i>"
+            )
+            telegram_bildir(mesaj)
+            
+            # Hafızayı sıfırla
+            arbitraj_pozisyon["aktif"] = False
 
 if __name__ == "__main__":
-    print("Bot 1m agresif modda başladı...")
-    telegram_bildir("🔥 <b>Binance Canlı Veri - 1 Dakikalık Agresif Sinyal Motoru Devrede!</b>\nİndikatörler en hassas ayarlarda taranıyor. İzleniyor...")
+    print("Binance Spot-Futures Arbitraj Gözlemcisi Başlatıldı...")
+    telegram_bildir(
+        f"🛰️ <b>Binance Arbitraj Botu Yayında!</b>\n"
+        f"Piyasa: {SYMBOL}\n"
+        f"Giriş Eşiği: %{GIRIS_MAKAS_YUZDE}\n"
+        f"Çıkış Eşiği: %{CIKIS_MAKAS_YUZDE}\n"
+        f"Sistem 2 saniyede bir çift yönlü fiyatları tarıyor..."
+    )
     
     while True:
         try:
-            analiz()
+            arbitraj_tarama()
         except Exception as e:
-            print(f"Döngü hatası: {e}")
-        time.sleep(60) # Her 60 saniyede bir (1 dakika) yeni mumu kontrol eder
+            print(f"Sistem döngü hatası: {e}")
+        time.sleep(LOOP_INTERVAL)
