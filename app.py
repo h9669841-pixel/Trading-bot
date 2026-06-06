@@ -9,8 +9,9 @@ import urllib.parse
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-KRAKEN_API_KEY = os.environ.get("BINANCE_API_KEY")  # Railway değişken adınız korundu
-KRAKEN_SECRET = os.environ.get("BINANCE_SECRET")
+# DEĞİŞKEN İSİMLERİ DOĞRUDAN KRAKEN OLARAK GÜNCELLENDİ:
+KRAKEN_API_KEY = os.environ.get("KRAKEN_API_KEY")  
+KRAKEN_SECRET = os.environ.get("KRAKEN_SECRET")
 
 # --- AGRESİF HIZLI AYARLAR ---
 BB_LEN = 14            
@@ -78,20 +79,23 @@ def get_candles():
         return None, None
 
 def imza_olustur(endpoint, post_data_str, nonce):
-    # KRAKEN FUTURES V3 RESMİ İMZA MOTORU
-    # 1. Adım: post_data + nonce + endpoint stringini birleştirip SHA256'sını alıyoruz
+    if not KRAKEN_SECRET:
+        print("HATA: KRAKEN_SECRET bulunamadı!")
+        return ""
+    
     message = post_data_str + nonce + endpoint
     sha256_hash = hashlib.sha256(message.encode('utf-8')).digest()
     
-    # 2. Adım: Sandbox'tan alınan Secret Key'i Base64 olarak deşifre ediyoruz
     secret_clean = KRAKEN_SECRET.strip()
     secret_bytes = base64.b64decode(secret_clean)
     
-    # 3. Adım: HMAC-SHA512 imzasını üretip Base64 formatında stringe çeviriyoruz
     mac = hmac.new(secret_bytes, sha256_hash, hashlib.sha512)
     return base64.b64encode(mac.digest()).decode('utf-8')
 
 def islem_ac(action):
+    if not KRAKEN_API_KEY or not KRAKEN_SECRET:
+        return {"retCode": -1, "retMsg": "Railway üzerinde Kraken API Anahtarları eksik!"}
+
     endpoint = "/derivatives/api/v3/sendorder"
     url = f"{TESTNET_URL}{endpoint}"
     
@@ -104,7 +108,6 @@ def islem_ac(action):
 
     nonce = str(int(time.time() * 1000))
     
-    # Kraken standartlarına uygun parametre sözlüğü
     post_params = {
         "orderType": "lmt",
         "symbol": KRAKEN_FUTURES_SYMBOL,
@@ -114,10 +117,7 @@ def islem_ac(action):
         "cliOrdId": f"bot_{nonce}"
     }
     
-    # Hatayı çözen kritik nokta: URL-encode formatına resmi standartta dönüştürme
     post_data_str = urllib.parse.urlencode(post_params)
-    
-    # Resmi şemaya göre imzayı üretiyoruz
     imza = imza_olustur(endpoint, post_data_str, nonce)
     
     headers = {
@@ -285,11 +285,11 @@ def analiz():
 
 if __name__ == "__main__":
     print("Bot başladı...")
-    telegram_bildir("🐙 <b>Kraken V3 Resmi Şeması Entegre Edildi!</b>\n⚙️ URL-encoded bayt akışı aktif edildi. İzleniyor...")
+    telegram_bildir("🐙 <b>Kraken Değişken İsimleri Eşitlendi!</b>\n⚙️ Railway üzerinde KRAKEN_API_KEY ve KRAKEN_SECRET aranıyor...")
     
     while True:
         try:
             analiz()
         except Exception as e:
-            print(f"Hata: {e}")
+            print(f"Hata döngüsü yakalandı: {e}")
         time.sleep(60)
