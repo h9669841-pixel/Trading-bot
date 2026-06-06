@@ -14,7 +14,7 @@ GIRIS_MAKAS_YUZDE = float(os.environ.get("GIRIS_MAKAS_YUZDE", 0.05))
 
 # Çıkış için makasın sıfıra yaklaşma eşiği (%0.01 veya altına inince pozisyon biter)
 CIKIS_MAKAS_YUZDE = 0.01  
-LOOP_INTERVAL = 2         
+LOOP_INTERVAL = 10         
 # -------------------------------------
 
 SPOT_URL = "https://api.binance.com/api/v3/ticker/price"
