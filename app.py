@@ -105,63 +105,67 @@ def islem_ac(action):
     if closes:
         current_price = closes[-1]
         target_price = current_price * 1.002 if action == "BUY" else current_price * 0.998
-        
-        # 🛠️ DÜZELTME 1: limitPrice hatasını bitirmek için f-string ile .0 olmasını engelliyor, 
-        # doğrudan saf tam sayı metni (Örn: "68450") üretiyoruz.
         clean_price_str = f"{int(round(target_price))}"
     else:
         return {"retCode": -1, "retMsg": "Fiyat alınamadı"}
 
-    current_nonce = int(time.time() * 1000)
-    if current_nonce <= son_nonce:
-        current_nonce = son_nonce + 1
-    son_nonce = current_nonce
-    nonce_str = str(current_nonce)
-    
-    # 🛠️ DÜZELTME 2: Tüm parametre değerlerini istisnasız string (metin) yapıyoruz.
-    # Böylece urlencode işlemi esnasında veri tipi bozulması veya ondalık karmaşası yaşanmaz.
-    post_params = {
-        "cliOrdId": f"{int(current_nonce % 10000000)}",
-        "orderType": "lmt",
-        "price": clean_price_str,
-        "side": "buy" if action == "BUY" else "sell",
-        "size": f"{float(QUANTITY):.2f}",
-        "symbol": KRAKEN_FUTURES_SYMBOL
-    }
-    
-    # Parametreleri alfabetik sıralayıp ham url gövdesine çeviriyoruz
-    post_data_str = urllib.parse.urlencode(sorted(post_params.items()))
-    imza = imza_olustur(imza_endpoint, post_data_str, nonce_str)
-    
-    headers = {
-        "APIKey": KRAKEN_API_KEY.strip(),
-        "Nonce": nonce_str,
-        "Authent": imza,
-        "Content-Type": "application/x-www-form-urlencoded"
-    }
-    
-    try:
-        r = requests.post(url, data=post_data_str, headers=headers)
-        print(f"Kraken HTTP Status: {r.status_code}")
+    # 🛠️ DÜZELTME: Anlık 502/503 sunucu kopmalarına karşı 3 kez üst üste otomatik deneme döngüsü
+    for deneme in range(3):
+        current_nonce = int(time.time() * 1000)
+        if current_nonce <= son_nonce:
+            current_nonce = son_nonce + 1
+        son_nonce = current_nonce
+        nonce_str = str(current_nonce)
         
-        if not r.text or r.status_code != 200:
-            print(f"Sunucu hatası detay (HTTP {r.status_code}): {r.text[:200]}")
-            return {"retCode": -1, "retMsg": f"Borsa Reddi (HTTP {r.status_code})"}
-            
-        res_json = r.json()
-        print(f"Kraken Futures yanıt: {res_json}")
+        post_params = {
+            "cliOrdId": f"{int(current_nonce % 10000000)}",
+            "orderType": "lmt",
+            "price": clean_price_str,
+            "side": "buy" if action == "BUY" else "sell",
+            "size": f"{float(QUANTITY):.2f}",
+            "symbol": KRAKEN_FUTURES_SYMBOL
+        }
         
-        if res_json.get("result") == "success":
-            return {"retCode": 0, "retMsg": "Success"}
-        else:
-            hata_mesaji = res_json.get("error", "Bilinmeyen Kraken Hatası")
-            if "sendStatus" in res_json and "status" in res_json["sendStatus"]:
-                hata_mesaji = res_json["sendStatus"]["status"]
-            return {"retCode": -1, "retMsg": hata_mesaji}
+        post_data_str = urllib.parse.urlencode(sorted(post_params.items()))
+        imza = imza_olustur(imza_endpoint, post_data_str, nonce_str)
+        
+        headers = {
+            "APIKey": KRAKEN_API_KEY.strip(),
+            "Nonce": nonce_str,
+            "Authent": imza,
+            "Content-Type": "application/x-www-form-urlencoded"
+        }
+        
+        try:
+            r = requests.post(url, data=post_data_str, headers=headers)
+            print(f"Kraken HTTP Status: {r.status_code} (Deneme: {deneme + 1})")
             
-    except Exception as e:
-        print(f"Kraken istek hatası: {e}")
-        return {"retCode": -1, "retMsg": f"Sistem Hatası: {str(e)}"}
+            # Eğer borsa geçici olarak 502/503 verdiyse, döngüyü kırma, 2 saniye bekle ve tekrar dene
+            if r.status_code in [502, 503, 504]:
+                print(f"Sunucu kaynaklı anlık kesinti (HTTP {r.status_code}). 2 sn sonra tekrar deneniyor...")
+                time.sleep(2)
+                continue
+                
+            if not r.text or r.status_code != 200:
+                print(f"Sunucu hatası detay (HTTP {r.status_code}): {r.text[:200]}")
+                return {"retCode": -1, "retMsg": f"Borsa Reddi (HTTP {r.status_code})"}
+                
+            res_json = r.json()
+            print(f"Kraken Futures yanıt: {res_json}")
+            
+            if res_json.get("result") == "success":
+                return {"retCode": 0, "retMsg": "Success"}
+            else:
+                hata_mesaji = res_json.get("error", "Bilinmeyen Kraken Hatası")
+                if "sendStatus" in res_json and "status" in res_json["sendStatus"]:
+                    hata_mesaji = res_json["sendStatus"]["status"]
+                return {"retCode": -1, "retMsg": hata_mesaji}
+                
+        except Exception as e:
+            print(f"Kraken istek hatası (Deneme {deneme + 1}): {e}")
+            time.sleep(2)
+            
+    return {"retCode": -1, "retMsg": "Kraken Demo Sunucusu Yanıt Vermiyor (HTTP 502/503 Overload)"}
 
 def sma(data, period):
     return np.mean(data[-period:])
@@ -307,7 +311,7 @@ def analiz():
 
 if __name__ == "__main__":
     print("Bot başladı...")
-    telegram_bildir("💎 <b>Kraken Saf String Fiyat Doğrulama Sistemi Aktif!</b>\nOndalık basamaklar tamamen kazındı, şema kilitlendi. İzleniyor...")
+    telegram_bildir("🛡️ <b>502 Sunucu Koruma ve Otomatik Retry Filtresi Yüklendi!</b>\nGeçici borsa kopmalarına karşı dayanıklılık sağlandı. İzleniyor...")
     
     while True:
         try:
