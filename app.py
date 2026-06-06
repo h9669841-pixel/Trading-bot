@@ -4,32 +4,31 @@ import hmac
 import hashlib
 import requests
 import numpy as np
-import base64
 import urllib.parse
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-KRAKEN_API_KEY = os.environ.get("KRAKEN_API_KEY")  
-KRAKEN_SECRET = os.environ.get("KRAKEN_SECRET")
+# 🔑 GERÇEK BİNANCE ANAHTARLARINIZ (Railway'e bunları girin)
+BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")  
+BINANCE_SECRET = os.environ.get("BINANCE_SECRET")
 
-# --- AGRESİF HIZLI AYARLAR ---
+# --- STANDART VE KARARLI STRATEJİ AYARLARI ---
 BB_LEN = 20            
-BB_MULT = 2          
-RSI_LEN = 7            
+BB_MULT = 2.0          
+RSI_LEN = 14           
 RSI_OB = 70            
-RSI_OS = 40            
-INTERVAL = 1           
-# -----------------------------
+RSI_OS = 30            
+INTERVAL = 5           # 5 Dakikalık gerçek mumlar izlenir
+# -----------------------------------------------
 
-SYMBOL = "XBTUSD"               
-KRAKEN_FUTURES_SYMBOL = "pi_xbtusd" 
-QUANTITY = "0.01"
-TESTNET_URL = "https://demo-futures.kraken.com"
+SYMBOL = "BTCUSDT"               
+MAINNET_URL = "https://fapi.binance.com" # ✨ Gerçek Binance Vadeli İşlemler Adresi
 
-TP_YUZDE = 1.0         
-SL_YUZDE = 2.0         
-BREAKEVEN_YUZDE = 0.3  
+TP_YUZDE = 1.5         
+SL_YUZDE = 1.0         
+BREAKEVEN_YUZDE = 0.4  
 
+# Sanal pozisyon takip hafızası
 pozisyon = {
     "var": False,
     "yon": None,
@@ -38,8 +37,6 @@ pozisyon = {
     "sl": None,
     "breakeven": False
 }
-
-son_nonce = int(time.time() * 1000)
 
 def telegram_bildir(mesaj):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -57,106 +54,29 @@ def telegram_bildir(mesaj):
         print(f"Telegram hatası: {e}")
 
 def get_candles():
-    url = "https://api.kraken.com/0/public/OHLC"
-    params = {"pair": SYMBOL, "interval": INTERVAL}
+    url = f"{MAINNET_URL}/fapi/v1/klines"
+    binance_interval = f"{INTERVAL}m" if INTERVAL < 60 else "1h"
+    
+    params = {
+        "symbol": SYMBOL,
+        "interval": binance_interval,
+        "limit": 100
+    }
     try:
         r = requests.get(url, params=params)
         data = r.json()
-    except Exception as e:
-        print(f"JSON parse hatası (Candles): {e}")
-        return None, None
-
-    if data.get("error"):
-        print(f"Kraken hata: {data['error']}")
-        return None, None
-
-    try:
-        result = list(data["result"].values())[0]
-        closes = [float(d[4]) for d in result]
-        opens  = [float(d[1]) for d in result]
+        closes = [float(candle[4]) for candle in data]
+        opens = [float(candle[1]) for candle in data]
         return closes, opens
     except Exception as e:
-        print(f"Veri ayrıştırma hatası: {e}")
+        print(f"Binance gerçek mum verisi çekme hatası: {e}")
         return None, None
 
-def imza_olustur(endpoint, post_data_str, nonce):
-    if not KRAKEN_SECRET:
-        print("HATA: KRAKEN_SECRET bulunamadı!")
-        return ""
-    
-    message = post_data_str + nonce + endpoint
-    sha256_hash = hashlib.sha256(message.encode('utf-8')).digest()
-    
-    secret_clean = KRAKEN_SECRET.strip()
-    secret_bytes = base64.b64decode(secret_clean)
-    
-    mac = hmac.new(secret_bytes, sha256_hash, hashlib.sha512)
-    return base64.b64encode(mac.digest()).decode('utf-8')
-
-def islem_ac(action):
-    global son_nonce
-    if not KRAKEN_API_KEY or not KRAKEN_SECRET:
-        return {"retCode": -1, "retMsg": "Railway üzerinde Kraken API Anahtarları eksik!"}
-
-    imza_endpoint = "/api/v3/sendorder"
-    url = f"{TESTNET_URL}/derivatives{imza_endpoint}"
-
-    for deneme in range(3):
-        current_nonce = int(time.time() * 1000)
-        if current_nonce <= son_nonce:
-            current_nonce = son_nonce + 1
-        son_nonce = current_nonce
-        nonce_str = str(current_nonce)
-        
-        # 🛠️ KRİTİK DÜZELTME: limitPrice hatasını aşmak için Market (mkt) emrine geçildi.
-        # Market emirlerinde fiyat (price) parametresi gönderilmez, borsa anlık fiyattan doldurur.
-        post_params = {
-            "cliOrdId": f"{int(current_nonce % 10000000)}",
-            "orderType": "mkt",
-            "side": "buy" if action == "BUY" else "sell",
-            "size": f"{float(QUANTITY):.2f}",
-            "symbol": KRAKEN_FUTURES_SYMBOL
-        }
-        
-        post_data_str = urllib.parse.urlencode(sorted(post_params.items()))
-        imza = imza_olustur(imza_endpoint, post_data_str, nonce_str)
-        
-        headers = {
-            "APIKey": KRAKEN_API_KEY.strip(),
-            "Nonce": nonce_str,
-            "Authent": imza,
-            "Content-Type": "application/x-www-form-urlencoded"
-        }
-        
-        try:
-            r = requests.post(url, data=post_data_str, headers=headers)
-            print(f"Kraken HTTP Status: {r.status_code} (Deneme: {deneme + 1})")
-            
-            if r.status_code in [502, 503, 504]:
-                print(f"Sunucu kesintisi (HTTP {r.status_code}). Tekrar deneniyor...")
-                time.sleep(2)
-                continue
-                
-            if not r.text or r.status_code != 200:
-                print(f"Sunucu hatası detay (HTTP {r.status_code}): {r.text[:200]}")
-                return {"retCode": -1, "retMsg": f"Borsa Reddi (HTTP {r.status_code})"}
-                
-            res_json = r.json()
-            print(f"Kraken Futures yanıt: {res_json}")
-            
-            if res_json.get("result") == "success":
-                return {"retCode": 0, "retMsg": "Success"}
-            else:
-                hata_mesaji = res_json.get("error", "Bilinmeyen Kraken Hatası")
-                if "sendStatus" in res_json and "status" in res_json["sendStatus"]:
-                    hata_mesaji = res_json["sendStatus"]["status"]
-                return {"retCode": -1, "retMsg": hata_mesaji}
-                
-        except Exception as e:
-            print(f"Kraken istek hatası (Deneme {deneme + 1}): {e}")
-            time.sleep(2)
-            
-    return {"retCode": -1, "retMsg": "Kraken Sunucu Hatası"}
+def islem_ac_PASIF(action):
+    # 🔒 GÜVENLİK DUVARI: Bu fonksiyon borsaya asla istek ATMAZ.
+    # Sadece kodun akışını bozmamak için her zaman başarılıymış gibi davranır.
+    print(f"🔒 [SİMÜLASYON] {action} emri borsa yerine simüle edildi. Gerçek işlem açılmadı.")
+    return {"retCode": 0, "retMsg": "Success"}
 
 def sma(data, period):
     return np.mean(data[-period:])
@@ -190,26 +110,25 @@ def pozisyon_kontrol(close):
         if kar >= BREAKEVEN_YUZDE and not pozisyon["breakeven"]:
             pozisyon["sl"] = giris
             pozisyon["breakeven"] = True
-            mesaj = f"🔒 <b>BREAKEVEN AKTİF!</b>\n📊 BTC/USD (Kraken)\n💰 Giriş: {giris:.2f}\n📈 Kar: +%{kar:.2f}\n🛑 SL → {giris:.2f}"
+            mesaj = f"🔒 <b>[Sanal] BREAKEVEN AKTİF!</b>\n📊 BTCUSDT (Binance)\n💰 Giriş: {giris:.2f}\n📈 Kar: +%{kar:.2f}\n🛑 Sanal SL → {giris:.2f} (Giriş Seviyesi)"
             telegram_bildir(mesaj)
 
         if close >= tp:
-            sonuc = islem_ac("SELL")
-            if sonuc.get("retCode") == 0:
-                mesaj = f"✅ <b>TAKE PROFIT!</b>\n📊 BTC/USD (Kraken)\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📈 Kar: +%{kar:.2f}\n🧪 KRAKEN SANDBOX"
-                telegram_bildir(mesaj)
-                pozisyon["var"] = False
-                pozisyon["breakeven"] = False
+            islem_ac_PASIF("SELL")
+            mesaj = f"✅ <b>[Sanal] TAKE PROFIT HEDEFİNE ULAŞILDI!</b>\n📊 BTCUSDT (Binance)\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📈 Kar: +%{kar:.2f}\n⚠️ <i>Gerçek işlem açılmamıştır, bilgi amaçlıdır.</i>"
+            telegram_bildir(mesaj)
+            pozisyon["var"] = False
+            pozisyon["breakeven"] = False
+            
         elif close <= pozisyon["sl"]:
-            sonuc = islem_ac("SELL")
-            if sonuc.get("retCode") == 0:
-                if pozisyon["breakeven"]:
-                    mesaj = f"🔒 <b>BREAKEVEN ÇIKIŞI</b>\n📊 BTC/USD (Kraken)\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n➡️ Sıfır zarar\n🧪 KRAKEN SANDBOX"
-                else:
-                    mesaj = f"🛑 <b>STOP LOSS!</b>\n📊 BTC/USD (Kraken)\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📉 Zarar: %{kar:.2f}\n🧪 KRAKEN SANDBOX"
-                telegram_bildir(mesaj)
-                pozisyon["var"] = False
-                pozisyon["breakeven"] = False
+            islem_ac_PASIF("SELL")
+            if pozisyon["breakeven"]:
+                mesaj = f"🔒 <b>[Sanal] BREAKEVEN ÇIKIŞI Yapıldı</b>\n📊 BTCUSDT\n💰 Giriş/Çıkış: {close:.2f}\n➡️ Risk sıfırlandı."
+            else:
+                mesaj = f"🛑 <b>[Sanal] STOP LOSS SEVİYESİNE DEĞDİ!</b>\n📊 BTCUSDT (Binance)\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📉 Zarar: %{kar:.2f}"
+            telegram_bildir(mesaj)
+            pozisyon["var"] = False
+            pozisyon["breakeven"] = False
 
     elif yon == "SELL":
         kar = ((giris - close) / giris) * 100
@@ -217,26 +136,25 @@ def pozisyon_kontrol(close):
         if kar >= BREAKEVEN_YUZDE and not pozisyon["breakeven"]:
             pozisyon["sl"] = giris
             pozisyon["breakeven"] = True
-            mesaj = f"🔒 <b>BREAKEVEN AKTİF!</b>\n📊 BTC/USD\n💰 Giriş: {giris:.2f}\n📈 Kar: +%{kar:.2f}\n🛑 SL → {giris:.2f}"
+            mesaj = f"🔒 <b>[Sanal] BREAKEVEN AKTİF!</b>\n📊 BTCUSDT\n💰 Giriş: {giris:.2f}\n📈 Kar: +%{kar:.2f}\n🛑 Sanal SL → {giris:.2f}"
             telegram_bildir(mesaj)
 
         if close <= tp:
-            sonuc = islem_ac("BUY")
-            if sonuc.get("retCode") == 0:
-                mesaj = f"✅ <b>TAKE PROFIT!</b>\n📊 BTC/USD (Kraken)\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📈 Kar: +%{kar:.2f}\n🧪 KRAKEN SANDBOX"
-                telegram_bildir(mesaj)
-                pozisyon["var"] = False
-                pozisyon["breakeven"] = False
+            islem_ac_PASIF("BUY")
+            mesaj = f"✅ <b>[Sanal] TAKE PROFIT HEDEFİNE ULAŞILDI!</b>\n📊 BTCUSDT (Binance)\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📈 Kar: +%{kar:.2f}\n⚠️ <i>Gerçek işlem açılmamıştır, bilgi amaçlıdır.</i>"
+            telegram_bildir(mesaj)
+            pozisyon["var"] = False
+            pozisyon["breakeven"] = False
+            
         elif close >= pozisyon["sl"]:
-            sonuc = islem_ac("BUY")
-            if sonuc.get("retCode") == 0:
-                if pozisyon["breakeven"]:
-                    mesaj = f"🔒 <b>BREAKEVEN ÇIKIŞI</b>\n📊 BTC/USD (Kraken)\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n➡️ Sıfır zarar\n🧪 KRAKEN SANDBOX"
-                else:
-                    mesaj = f"🛑 <b>STOP LOSS!</b>\n📊 BTC/USD (Kraken)\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📉 Zarar: %{kar:.2f}\n🧪 KRAKEN SANDBOX"
-                telegram_bildir(mesaj)
-                pozisyon["var"] = False
-                pozisyon["breakeven"] = False
+            islem_ac_PASIF("BUY")
+            if pozisyon["breakeven"]:
+                mesaj = f"🔒 <b>[Sanal] BREAKEVEN ÇIKIŞI Yapıldı</b>\n📊 BTCUSDT\n💰 Giriş/Çıkış: {close:.2f}\n➡️ Risk sıfırlandı."
+            else:
+                mesaj = f"🛑 <b>[Sanal] STOP LOSS SEVİYESİNE DEĞDİ!</b>\n📊 BTCUSDT (Binance)\n💰 Giriş: {giris:.2f}\n💰 Çıkış: {close:.2f}\n📉 Zarar: %{kar:.2f}"
+            telegram_bildir(mesaj)
+            pozisyon["var"] = False
+            pozisyon["breakeven"] = False
 
 def analiz():
     global pozisyon
@@ -256,7 +174,7 @@ def analiz():
     close      = closes[-1]
     prev_close = closes[-2]
 
-    print(f"Fiyat: {close:.2f} | RSI: {rsi_val:.1f} | BB_U: {bb_upper:.2f} | BB_L: {bb_lower:.2f}")
+    print(f"Gerçek Fiyat: {close:.2f} | RSI: {rsi_val:.1f} | BB_U: {bb_upper:.2f} | BB_L: {bb_lower:.2f}")
 
     if pozisyon["var"]:
         pozisyon_kontrol(close)
@@ -265,7 +183,7 @@ def analiz():
         sell_signal = (prev_close >= bb_upper or close >= bb_upper) and (rsi_val >= RSI_OB)
 
         if buy_signal:
-            sonuc = islem_ac("BUY")
+            sonuc = islem_ac_PASIF("BUY")
             if sonuc.get("retCode") == 0:
                 tp_fiyat = close * (1 + TP_YUZDE / 100)
                 sl_fiyat = close * (1 - SL_YUZDE / 100)
@@ -277,13 +195,11 @@ def analiz():
                     "sl": sl_fiyat,
                     "breakeven": False
                 })
-                mesaj = f"🟢 <b>BUY İŞLEMİ AÇILDI</b>\n📊 BTC/USD (Kraken)\n💰 Fiyat: {close:.2f}\n🎯 TP: {tp_fiyat:.2f}\n🛑 SL: {sl_fiyat:.2f}"
-            else:
-                mesaj = f"🟢 <b>BUY SİNYALİ</b>\n⚠️ İşlem açılamadı: {sonuc.get('retMsg', 'Bilinmeyen Hata')}"
-            telegram_bildir(mesaj)
+                mesaj = f"🔔 <b>[SİNYAL] BUY (LONG) ZAMANI</b>\n📊 BTCUSDT (Binance Gerçek Veri)\n💰 Mevcut Fiyat: {close:.2f}\n🎯 Hedef TP: {tp_fiyat:.2f}\n🛑 Güvenlik SL: {sl_fiyat:.2f}\n\n⚠️ <i>Bot otomatik işlem açmamıştır. Manuel açabilirsiniz.</i>"
+                telegram_bildir(mesaj)
 
         elif sell_signal:
-            sonuc = islem_ac("SELL")
+            sonuc = islem_ac_PASIF("SELL")
             if sonuc.get("retCode") == 0:
                 tp_fiyat = close * (1 - TP_YUZDE / 100)
                 sl_fiyat = close * (1 + SL_YUZDE / 100)
@@ -295,14 +211,12 @@ def analiz():
                     "sl": sl_fiyat,
                     "breakeven": False
                 })
-                mesaj = f"🔴 <b>SELL İŞLEMİ AÇILDI</b>\n📊 BTC/USD (Kraken)\n💰 Fiyat: {close:.2f}\n🎯 TP: {tp_fiyat:.2f}\n🛑 SL: {sl_fiyat:.2f}"
-            else:
-                mesaj = f"🔴 <b>SELL SİNYALİ</b>\n⚠️ İşlem açılamadı: {sonuc.get('retMsg', 'Bilinmeyen Hata')}"
-            telegram_bildir(mesaj)
+                mesaj = f"🔔 <b>[SİNYAL] SELL (SHORT) ZAMANI</b>\n📊 BTCUSDT (Binance Gerçek Veri)\n💰 Mevcut Fiyat: {close:.2f}\n🎯 Hedef TP: {tp_fiyat:.2f}\n🛑 Güvenlik SL: {sl_fiyat:.2f}\n\n⚠️ <i>Bot otomatik işlem açmamıştır. Manuel açabilirsiniz.</i>"
+                telegram_bildir(mesaj)
 
 if __name__ == "__main__":
-    print("Bot başladı...")
-    telegram_bildir("⚡ <b>Kraken Market Order (Piyasa Emri) Altyapısı Aktif!</b>\nFiyat doğrulama bariyerleri kaldırıldı, anlık eşleşme moduna geçildi. İzleniyor...")
+    print("Bot güvenli sinyal modunda başladı...")
+    telegram_bildir("🛡️ <b>Binance Canlı Veri - Sadece Sinyal & Simülasyon Motoru Aktif!</b>\nPara riske atılmadan piyasa 5m mumlarla taranıyor. Cüzdanınız %100 güvende.")
     
     while True:
         try:
