@@ -14,10 +14,10 @@ KRAKEN_SECRET = os.environ.get("KRAKEN_SECRET")
 
 # --- AGRESİF HIZLI AYARLAR ---
 BB_LEN = 14            
-BB_MULT = 1.3          
+BB_MULT = 2          
 RSI_LEN = 7            
-RSI_OB = 50            
-RSI_OS = 50            
+RSI_OB = 70            
+RSI_OS = 40            
 INTERVAL = 1           
 # -----------------------------
 
