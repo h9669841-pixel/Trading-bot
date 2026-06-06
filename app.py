@@ -7,8 +7,13 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 # --- 📊 ARBİTRAJ STRATEJİ AYARLARI ---
 SYMBOL = "BTCUSDT"
-GIRIS_MAKAS_YUZDE = 0.08  # 🎯 Makas hassasiyeti %0.08'e indirildi (Daha sık sinyal gelir)
-CIKIS_MAKAS_YUZDE = 0.01  # Makas %0.01'e düştüğünde karı al/çıkış sinyali ver
+
+# 🛠️ GİRİŞ EŞİĞİNİ ELLE DEĞİŞTİRİLEBİLİR YAPTIK:
+# Railway panelinde GIRIS_MAKAS_YUZDE değişkenini ne yaparsan kod onu okur. 
+# Eğer panelde tanımlanmamışsa otomatik olarak %0.08 kabul edilir.
+GIRIS_MAKAS_YUZDE = float(os.environ.get("GIRIS_MAKAS_YUZDE", 0.08))
+
+CIKIS_MAKAS_YUZDE = 0.01  # Makas %0.01'e düştüğünde çıkış sinyali verir
 LOOP_INTERVAL = 2         # Piyasayı 2 saniyede bir tarar
 # -------------------------------------
 
@@ -39,6 +44,7 @@ def telegram_bildir(mesaj):
         print(f"Telegram hatası: {e}")
 
 def get_live_prices():
+    """Hem Spot hem de Vadeli piyasadan anlık fiyatları çeker"""
     spot_price = None
     futures_price = None
     
@@ -69,10 +75,10 @@ def arbitraj_tarama():
         print("Fiyatlar çekilemedi, bir sonraki saniye tekrar denenecek...")
         return
 
-    # Vadeli işlem ile Spot arasındaki makas yüzdesi
+    # Vadeli işlem ile Spot arasındaki makas yüzdesini hesapla
     anlik_makas = ((futures_fiyat - spot_fiyat) / spot_fiyat) * 100
     
-    print(f"⏱️ Spot: {spot_fiyat:.2f} | Futures: {futures_fiyat:.2f} | Makas: %{anlik_makas:.4f}")
+    print(f"⏱️ Spot: {spot_fiyat:.2f} | Futures: {futures_fiyat:.2f} | Makas: %{anlik_makas:.4f} (Hedef: %{GIRIS_MAKAS_YUZDE:.2f})")
 
     if not arbitraj_pozisyon["aktif"]:
         # 🟢 GİRİŞ KOŞULU KONTROLÜ
@@ -89,13 +95,14 @@ def arbitraj_tarama():
                 f"📊 <b>Parite:</b> {SYMBOL}\n"
                 f"🟢 <b>Spot Fiyat:</b> {spot_fiyat:.2f} USDT\n"
                 f"🔴 <b>Futures Fiyat:</b> {futures_fiyat:.2f} USDT\n"
-                f"⚡ <b>Anlık Makas (Spread):</b> %{anlik_makas:.3f}\n\n"
+                f"⚡ <b>Anlık Makas (Spread):</b> %{anlik_makas:.3f}\n"
+                f"🎯 <b>Tetiklenen Eşik:</b> %{GIRIS_MAKAS_YUZDE:.2f}\n\n"
                 f"💡 <i>Manuel İşlem Önerisi: Spot piyasadan AL, Vadeli piyasada aynı miktarda SHORT aç!</i>"
             )
             telegram_bildir(mesaj)
             
     else:
-        # 🔴 ÇIŞIŞ KOŞULU KONTROLÜ
+        # 🔴 ÇIŞIŞ KOŞULU KONTROLÜ (Makas daraldı mı?)
         if anlik_makas <= CIKIS_MAKAS_YUZDE:
             kar_orani = arbitraj_pozisyon["giris_makas"] - anlik_makas
             
@@ -108,16 +115,19 @@ def arbitraj_tarama():
             )
             telegram_bildir(mesaj)
             
+            # Hafızayı sıfırla
             arbitraj_pozisyon["aktif"] = False
 
 if __name__ == "__main__":
+    # İlk başlangıçta küçük bir imza düzeltmesi: 
+    # Kodun başındaki "İmport os" ifadesi Python'da hata verir, doğrusu "import os" olmalıdır.
     print("Binance Spot-Futures Arbitraj Gözlemcisi Başlatıldı...")
     telegram_bildir(
-        f"🛰️ <b>Binance Arbitraj Botu Güncellendi!</b>\n"
+        f"🛰️ <b>Binance Dinamik Arbitraj Botu Yayında!</b>\n"
         f"Piyasa: {SYMBOL}\n"
-        f"Yeni Giriş Eşiği: %{GIRIS_MAKAS_YUZDE}\n"
-        f"Yeni Çıkış Eşiği: %{CIKIS_MAKAS_YUZDE}\n"
-        f"Sistem 2 saniyede bir çift yönlü fiyatları tarıyor..."
+        f"Güncel Giriş Eşiği: %{GIRIS_MAKAS_YUZDE}\n"
+        f"Çıkış Eşiği: %{CIKIS_MAKAS_YUZDE}\n"
+        f"Eşiği değiştirmek için Railway panelinden <code>GIRIS_MAKAS_YUZDE</code> değişkenini güncelleyebilirsiniz."
     )
     
     while True:
