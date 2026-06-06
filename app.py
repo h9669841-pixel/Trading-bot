@@ -9,7 +9,6 @@ import urllib.parse
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-# DEĞİŞKEN İSİMLERİ DOĞRUDAN KRAKEN OLARAK GÜNCELLENDİ:
 KRAKEN_API_KEY = os.environ.get("KRAKEN_API_KEY")  
 KRAKEN_SECRET = os.environ.get("KRAKEN_SECRET")
 
@@ -62,7 +61,7 @@ def get_candles():
         r = requests.get(url, params=params)
         data = r.json()
     except Exception as e:
-        print(f"JSON parse hatası: {e}")
+        print(f"JSON parse hatası (Candles): {e}")
         return None, None
 
     if data.get("error"):
@@ -83,6 +82,7 @@ def imza_olustur(endpoint, post_data_str, nonce):
         print("HATA: KRAKEN_SECRET bulunamadı!")
         return ""
     
+    # 1. Adım: Kraken Futures standart sıralaması: post_data + nonce + endpoint
     message = post_data_str + nonce + endpoint
     sha256_hash = hashlib.sha256(message.encode('utf-8')).digest()
     
@@ -96,29 +96,33 @@ def islem_ac(action):
     if not KRAKEN_API_KEY or not KRAKEN_SECRET:
         return {"retCode": -1, "retMsg": "Railway üzerinde Kraken API Anahtarları eksik!"}
 
-    endpoint = "/derivatives/api/v3/sendorder"
-    url = f"{TESTNET_URL}{endpoint}"
+    # KRİTİK DÜZELTME: İmza için resmi API endpoint yolu /api/v3/... olmalıdır.
+    imza_endpoint = "/api/v3/sendorder"
+    url = f"{TESTNET_URL}/derivatives{imza_endpoint}"
     
     closes, _ = get_candles()
     if closes:
         current_price = closes[-1]
         target_price = current_price * 1.002 if action == "BUY" else current_price * 0.998
+        target_price = round(target_price * 2) / 2
     else:
         return {"retCode": -1, "retMsg": "Fiyat alınamadı"}
 
     nonce = str(int(time.time() * 1000))
     
     post_params = {
+        "cliOrdId": f"bot_{nonce}",
         "orderType": "lmt",
-        "symbol": KRAKEN_FUTURES_SYMBOL,
+        "price": str(target_price),
         "side": "buy" if action == "BUY" else "sell",
         "size": QUANTITY,
-        "price": f"{target_price:.1f}",
-        "cliOrdId": f"bot_{nonce}"
+        "symbol": KRAKEN_FUTURES_SYMBOL
     }
     
-    post_data_str = urllib.parse.urlencode(post_params)
-    imza = imza_olustur(endpoint, post_data_str, nonce)
+    # KRİTİK DÜZELTME 2: Parametrelerin alfabetik olarak sıralanması (doseq=True ve sorted)
+    post_data_str = urllib.parse.urlencode(sorted(post_params.items()))
+    
+    imza = imza_olustur(imza_endpoint, post_data_str, nonce)
     
     headers = {
         "APIKey": KRAKEN_API_KEY.strip(),
@@ -129,6 +133,12 @@ def islem_ac(action):
     
     try:
         r = requests.post(url, data=post_data_str, headers=headers)
+        print(f"Kraken Status Code: {r.status_code}")
+        
+        if not r.text or r.status_code != 200:
+            print(f"Sunucu hatası: {r.text[:200]}")
+            return {"retCode": -1, "retMsg": f"Borsa hatası (HTTP {r.status_code})"}
+            
         res_json = r.json()
         print(f"Kraken Futures yanıt: {res_json}")
         
@@ -137,9 +147,10 @@ def islem_ac(action):
         else:
             hata_mesaji = res_json.get("error", "Bilinmeyen Kraken Hatası")
             return {"retCode": -1, "retMsg": hata_mesaji}
+            
     except Exception as e:
-        print(f"Kraken istek hatası: {e}")
-        return {"retCode": -1, "retMsg": str(e)}
+        print(f"Kraken istek veya JSON parse hatası: {e}")
+        return {"retCode": -1, "retMsg": f"Sistem Hatası: {str(e)}"}
 
 def sma(data, period):
     return np.mean(data[-period:])
@@ -285,7 +296,7 @@ def analiz():
 
 if __name__ == "__main__":
     print("Bot başladı...")
-    telegram_bildir("🐙 <b>Kraken Değişken İsimleri Eşitlendi!</b>\n⚙️ Railway üzerinde KRAKEN_API_KEY ve KRAKEN_SECRET aranıyor...")
+    telegram_bildir("⚙️ <b>Kraken V3 Alfabetik İmza Motoru Aktif!</b>\nSıralı URL yapısı ve endpoint yolu güncellendi. İlk sinyal bekleniyor...")
     
     while True:
         try:
