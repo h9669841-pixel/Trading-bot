@@ -23,7 +23,7 @@ INTERVAL = 1
 
 SYMBOL = "XBTUSD"               
 KRAKEN_FUTURES_SYMBOL = "pi_xbtusd" 
-QUANTITY = "0.001"
+QUANTITY = "0.01"
 TESTNET_URL = "https://demo-futures.kraken.com"
 
 TP_YUZDE = 1.0         
