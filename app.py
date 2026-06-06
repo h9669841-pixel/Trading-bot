@@ -13,10 +13,10 @@ KRAKEN_SECRET = os.environ.get("BINANCE_SECRET")
 
 # --- AGRESİF HIZLI AYARLAR ---
 BB_LEN = 14            
-BB_MULT = 1.3          
-RSI_LEN = 7            
-RSI_OB = 50            
-RSI_OS = 50            
+BB_MULT = 4          
+RSI_LEN = 20            
+RSI_OB = 80            
+RSI_OS = 20            
 INTERVAL = 1           
 # -----------------------------
 
