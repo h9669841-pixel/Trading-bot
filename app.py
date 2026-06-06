@@ -105,8 +105,10 @@ def islem_ac(action):
     if closes:
         current_price = closes[-1]
         target_price = current_price * 1.002 if action == "BUY" else current_price * 0.998
-        # KRİTİK DÜZELTME: limitPrice hatasını engellemek için fiyatı kesinlikle TAM SAYI yapıyoruz
-        target_price = int(round(target_price))
+        
+        # 🛠️ DÜZELTME 1: limitPrice hatasını bitirmek için f-string ile .0 olmasını engelliyor, 
+        # doğrudan saf tam sayı metni (Örn: "68450") üretiyoruz.
+        clean_price_str = f"{int(round(target_price))}"
     else:
         return {"retCode": -1, "retMsg": "Fiyat alınamadı"}
 
@@ -116,15 +118,18 @@ def islem_ac(action):
     son_nonce = current_nonce
     nonce_str = str(current_nonce)
     
+    # 🛠️ DÜZELTME 2: Tüm parametre değerlerini istisnasız string (metin) yapıyoruz.
+    # Böylece urlencode işlemi esnasında veri tipi bozulması veya ondalık karmaşası yaşanmaz.
     post_params = {
-        "cliOrdId": f"bot_{nonce_str}",
+        "cliOrdId": f"{int(current_nonce % 10000000)}",
         "orderType": "lmt",
-        "price": str(target_price),
+        "price": clean_price_str,
         "side": "buy" if action == "BUY" else "sell",
-        "size": QUANTITY,
+        "size": f"{float(QUANTITY):.2f}",
         "symbol": KRAKEN_FUTURES_SYMBOL
     }
     
+    # Parametreleri alfabetik sıralayıp ham url gövdesine çeviriyoruz
     post_data_str = urllib.parse.urlencode(sorted(post_params.items()))
     imza = imza_olustur(imza_endpoint, post_data_str, nonce_str)
     
@@ -140,8 +145,8 @@ def islem_ac(action):
         print(f"Kraken HTTP Status: {r.status_code}")
         
         if not r.text or r.status_code != 200:
-            print(f"Sunucu hatası detay: {r.text[:200]}")
-            return {"retCode": -1, "retMsg": f"Borsa hatası (HTTP {r.status_code})"}
+            print(f"Sunucu hatası detay (HTTP {r.status_code}): {r.text[:200]}")
+            return {"retCode": -1, "retMsg": f"Borsa Reddi (HTTP {r.status_code})"}
             
         res_json = r.json()
         print(f"Kraken Futures yanıt: {res_json}")
@@ -302,7 +307,7 @@ def analiz():
 
 if __name__ == "__main__":
     print("Bot başladı...")
-    telegram_bildir("🎯 <b>Kraken Tam Sayı Fiyat Motoru Devreye Alındı!</b>\n`limitPrice` hatasına karşı koruma sağlandı. İzleniyor...")
+    telegram_bildir("💎 <b>Kraken Saf String Fiyat Doğrulama Sistemi Aktif!</b>\nOndalık basamaklar tamamen kazındı, şema kilitlendi. İzleniyor...")
     
     while True:
         try:
