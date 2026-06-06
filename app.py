@@ -5,6 +5,7 @@ import hashlib
 import requests
 import numpy as np
 import base64
+import urllib.parse
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
@@ -22,7 +23,7 @@ INTERVAL = 1
 
 SYMBOL = "XBTUSD"               
 KRAKEN_FUTURES_SYMBOL = "pi_xbtusd" 
-QUANTITY = "0.001"
+QUANTITY = "0.01"
 TESTNET_URL = "https://demo-futures.kraken.com"
 
 TP_YUZDE = 1.0         
@@ -76,21 +77,19 @@ def get_candles():
         print(f"Veri ayrıştırma hatası: {e}")
         return None, None
 
-def imza_olustur(endpoint, post_data, nonce):
-    # Kraken Futures V3 kimlik doğrulama algoritması düzeltildi
-    # Formül: SHA256(post_data + nonce) + endpoint -> HMAC_SHA512
-    message_to_hash = post_data + nonce + endpoint
-    sha256_hash = hashlib.sha256(message_to_hash.encode('utf-8')).digest()
+def imza_olustur(endpoint, post_data_str, nonce):
+    # KRAKEN FUTURES V3 RESMİ İMZA MOTORU
+    # 1. Adım: post_data + nonce + endpoint stringini birleştirip SHA256'sını alıyoruz
+    message = post_data_str + nonce + endpoint
+    sha256_hash = hashlib.sha256(message.encode('utf-8')).digest()
     
-    # Secret anahtarını temizle ve byte dizisine çevir
+    # 2. Adım: Sandbox'tan alınan Secret Key'i Base64 olarak deşifre ediyoruz
     secret_clean = KRAKEN_SECRET.strip()
-    try:
-        secret_bytes = base64.b64decode(secret_clean)
-    except Exception:
-        secret_bytes = secret_clean.encode('utf-8')
-        
-    signature = hmac.new(secret_bytes, sha256_hash, hashlib.sha512).digest()
-    return base64.b64encode(signature).decode('utf-8')
+    secret_bytes = base64.b64decode(secret_clean)
+    
+    # 3. Adım: HMAC-SHA512 imzasını üretip Base64 formatında stringe çeviriyoruz
+    mac = hmac.new(secret_bytes, sha256_hash, hashlib.sha512)
+    return base64.b64encode(mac.digest()).decode('utf-8')
 
 def islem_ac(action):
     endpoint = "/derivatives/api/v3/sendorder"
@@ -105,7 +104,7 @@ def islem_ac(action):
 
     nonce = str(int(time.time() * 1000))
     
-    # Kraken parametre yapısı string formatına tam olarak eşitlendi
+    # Kraken standartlarına uygun parametre sözlüğü
     post_params = {
         "orderType": "lmt",
         "symbol": KRAKEN_FUTURES_SYMBOL,
@@ -115,7 +114,10 @@ def islem_ac(action):
         "cliOrdId": f"bot_{nonce}"
     }
     
-    post_data_str = "&".join([f"{k}={v}" for k, v in post_params.items()])
+    # Hatayı çözen kritik nokta: URL-encode formatına resmi standartta dönüştürme
+    post_data_str = urllib.parse.urlencode(post_params)
+    
+    # Resmi şemaya göre imzayı üretiyoruz
     imza = imza_olustur(endpoint, post_data_str, nonce)
     
     headers = {
@@ -133,10 +135,7 @@ def islem_ac(action):
         if res_json.get("result") == "success":
             return {"retCode": 0, "retMsg": "Success"}
         else:
-            # Kraken'in tam hata mesajını yakala
-            hata_mesaji = res_json.get("sendStatus", {}).get("status", "Bilinmeyen Hata")
-            if "error" in res_json:
-                hata_mesaji = res_json.get("error")
+            hata_mesaji = res_json.get("error", "Bilinmeyen Kraken Hatası")
             return {"retCode": -1, "retMsg": hata_mesaji}
     except Exception as e:
         print(f"Kraken istek hatası: {e}")
@@ -201,7 +200,7 @@ def pozisyon_kontrol(close):
         if kar >= BREAKEVEN_YUZDE and not pozisyon["breakeven"]:
             pozisyon["sl"] = giris
             pozisyon["breakeven"] = True
-            mesaj = f"🔒 <b>BREAKEVEN AKTİF!</b>\n📊 BTC/USD (Kraken)\n💰 Giriş: {giris:.2f}\n📈 Kar: +%{kar:.2f}\n🛑 SL → {giris:.2f}"
+            mesaj = f"🔒 <b>BREAKEVEN AKTİF!</b>\n📊 BTC/USD\n💰 Giriş: {giris:.2f}\n📈 Kar: +%{kar:.2f}\n🛑 SL → {giris:.2f}"
             telegram_bildir(mesaj)
 
         if close <= tp:
@@ -286,7 +285,7 @@ def analiz():
 
 if __name__ == "__main__":
     print("Bot başladı...")
-    telegram_bildir("🐙 <b>Kraken V3 Entegrasyonu Aktif!</b>\n⚙️ Kimlik doğrulama şeması optimize edildi, test ediliyor...")
+    telegram_bildir("🐙 <b>Kraken V3 Resmi Şeması Entegre Edildi!</b>\n⚙️ URL-encoded bayt akışı aktif edildi. İzleniyor...")
     
     while True:
         try:
