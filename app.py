@@ -1,4 +1,4 @@
-İmport os
+import os
 import time
 import requests
 
@@ -128,4 +128,4 @@ if __name__ == "__main__":
             arbitraj_tarama()
         except Exception as e:
             print(f"Sistem döngü hatası: {e}")
-        time.sleep(LOOP_INTERVAL) bu kod çalışıyor. Bu kod uzerinden devam edelim
+        time.sleep(LOOP_INTERVAL)
