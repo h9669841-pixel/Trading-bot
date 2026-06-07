@@ -9,11 +9,11 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 # --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
-# Takip etmek istediğimiz tüm koinleri küçük harfle listeye ekledik
-SYMBOLS = ["btcusdt", "ethusdt", "xrpusdt", "arbusdt"]
+# Takip listemizi yüksek makas potansiyeli olan koinlerle genişlettik
+SYMBOLS = ["btcusdt", "ethusdt", "xrpusdt", "arbusdt", "solusdt", "dogeusdt", "pepeusdt", "suiusdt"]
 
 GIRIS_MAKAS_YUZDE = 0.30  # Brüt hedef makas eşiği
-CIKIS_MAKAS_YUZDE = 0.05  # Çıkış makas eşiği
+CIKIS_MAKAS_YUZDE = 0.05  # Çıkış makas eşiği (Kâr Al)
 
 # 💰 BAKİYE VE KOMİSYON AYARLARI (Görseldeki değerlere göre % bazında)
 SPOT_BAKIYE = 1000.0       # Giriş yapılacak Spot bütçesi (USDT)
@@ -59,13 +59,12 @@ def net_kar_hesapla(giris_makas, cikis_makas):
     net_kazanc_usdt = brut_kazanc_usdt - toplam_kesinti_usdt
     return brut_kazanc_usdt, toplam_kesinti_usdt, net_kazanc_usdt
 
-# --- 🌐 ÇOKLU WEBSOCKET AKIŞLARI ---
+# --- 🌐 ÇOKLU WEBSOCKET AKIŞLARI (COMBINED STREAM) ---
 
 def start_multi_spot_ws():
     """Tüm koinlerin Spot fiyatlarını tek tünelden çeker"""
     def on_message(ws, message):
         data = json.loads(message)
-        # Çoklu akışlarda (Combined Stream) gelen veri yapısı farklıdır
         stream_name = data.get("stream", "")
         event_data = data.get("data", {})
         
@@ -77,7 +76,6 @@ def start_multi_spot_ws():
     def on_close(ws, c_code, c_msg):
         time.sleep(5); start_multi_spot_ws()
 
-    # Tüm koinleri tek tünelde birleştiriyoruz
     streams = "/".join([f"{symbol}@trade" for symbol in SYMBOLS])
     url = f"wss://stream.binance.com:9443/stream?streams={streams}"
     WebSocketApp(url, on_message=on_message, on_error=on_error, on_close=on_close).run_forever()
@@ -105,7 +103,7 @@ def start_multi_futures_ws():
 
 def arbitraj_tarama_dongusu():
     global arbitraj_pozisyonlari
-    print(f"Arbitraj Analiz Motoru {len(SYMBOLS)} koin için başlatıldı...")
+    print(f"Arbitraj Analiz Motoru {len(SYMBOLS)} koin için aktif durumda...")
     
     while True:
         try:
@@ -113,20 +111,19 @@ def arbitraj_tarama_dongusu():
                 spot_fiyat = piyasa_verisi[symbol]["spot_price"]
                 futures_fiyat = piyasa_verisi[symbol]["futures_price"]
                 
-                # Koinlerden herhangi birinin verisi henüz gelmediyse o adımı atla
                 if not spot_fiyat or not futures_fiyat:
                     continue
 
                 anlik_makas = ((futures_fiyat - spot_fiyat) / spot_fiyat) * 100
                 coin_label = symbol.upper().replace("USDT", "")
                 
-                # Konsolda hangi koinin ne durumda olduğunu temizce listeler
+                # Konsolda tüm yeni koinlerin durumunu anlık listeler
                 print(f"⏱️ [{coin_label}] Spot: {spot_fiyat:.4f} | Futures: {futures_fiyat:.4f} | Makas: %{anlik_makas:.4f}")
 
                 pos = arbitraj_pozisyonlari[symbol]
 
                 if not pos["aktif"]:
-                    # 🟢 GİRİŞ KONTROLLERİ
+                    # 🟢 GİRİŞ KONTROLLERİ (Hem + hem - yön için)
                     if anlik_makas >= GIRIS_MAKAS_YUZDE or anlik_makas <= -GIRIS_MAKAS_YUZDE:
                         yon = "ARTI" if anlik_makas >= GIRIS_MAKAS_YUZDE else "EKSI"
                         pos.update({
@@ -179,24 +176,24 @@ def arbitraj_tarama_dongusu():
         except Exception as e:
             print(f"Analiz motoru çoklu tarama hatası: {e}")
             
-        time.sleep(2)  # Log akış hızı ve işlemciyi yormamak için ideal süre
+        time.sleep(2)
 
 if __name__ == "__main__":
-    print("Çoklu Koin Websocket Arbitraj Botu Başlatılıyor...")
+    print("Genişletilmiş Çoklu Koin Websocket Arbitraj Botu Başlatılıyor...")
     
+    # Telegram başlangıç mesajında yeni listeyi gösteriyoruz
+    koin_listesi_str = ", ".join([coin.upper().replace("USDT", "") for coin in SYMBOLS])
     telegram_bildir(
-        f"🛰️ <b>Çoklu Arbitraj Avcısı Aktif!</b>\n"
-        f"📋 <b>Takip Listesi:</b> BTC, ETH, XRP, ARB\n"
+        f"🛰️ <b>Genişletilmiş Arbitraj Avcısı Yayında!</b>\n"
+        f"📋 <b>Takip Listesi:</b> {koin_listesi_str}\n"
         f"🎯 <b>Giriş Eşiği:</b> ±%{GIRIS_MAKAS_YUZDE}\n"
-        f"Sistem tüm koinleri tek tünelden sıfır ban riskiyle tarıyor."
+        f"Sistem 8 koin için tek tünelden akışı başlattı."
     )
     
-    # Arka plan iş parçacıklarını (Thread) başlatıyoruz
     spot_thread = threading.Thread(target=start_multi_spot_ws, daemon=True)
     futures_thread = threading.Thread(target=start_multi_futures_ws, daemon=True)
     
     spot_thread.start()
     futures_thread.start()
     
-    # Ana döngüyü başlat
     arbitraj_tarama_dongusu()
