@@ -10,7 +10,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 # --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
 GIRIS_MAKAS_YUZDE = 0.30  # Sinyal tetiklenecek pozitif brüt makas eşiği
-CIKIS_MAKAS_YUZDE = 0.02  # Pozisyon kapatılıp kâr alınacak çıkış eşiği
+CIKIS_MAKAS_YUZDE = 0.02  # Pozisyon kapatılıp kâr alınacak KESİN çıkış eşiği
 
 # 💰 BAKİYE VE KOMİSYON AYARLARI (100$ Spot Alım + 100$ Vadeli Short)
 SPOT_BAKIYE = 100.0       
@@ -103,7 +103,7 @@ def start_multi_futures_ws():
 
 def arbitraj_tarama_dongusu():
     global arbitraj_pozisyonlari
-    print("Market Tarayıcı sadece POZİTİF (+) nakit fırsatları süzüyor...")
+    print("Market Tarayıcı sadece net kârlı pozitif (+) fırsatları süzüyor...")
     
     while True:
         try:
@@ -116,18 +116,22 @@ def arbitraj_tarama_dongusu():
                 if not spot_fiyat or not futures_fiyat:
                     continue
 
-                # Makas formülü: Vadeli fiyatın spottan ne kadar pahalı olduğunu ölçer
                 anlik_makas = ((futures_fiyat - spot_fiyat) / spot_fiyat) * 100
                 coin_label = symbol.upper().replace("USDT", "")
                 
-                # Canlı takip log listesi
                 en_yuksek_makaslar.append((coin_label, anlik_makas, spot_fiyat, futures_fiyat))
 
                 pos = arbitraj_pozisyonlari[symbol]
 
                 if not pos["aktif"]:
-                    # 🟢 SADECE POZİTİF (+) MAKAS KONTROLÜ (Eksiler filtrelendi)
+                    # 🟢 SADECE POZİTİF (+) MAKAS GİRİŞ KONTROLÜ
                     if anlik_makas >= GIRIS_MAKAS_YUZDE:
+                        brut, kesinti, net = net_kar_hesapla(anlik_makas, CIKIS_MAKAS_YUZDE)
+                        
+                        # Girişte net kâr eksi veya sıfırsa pozisyona hiç başlama
+                        if net <= 0:
+                            continue
+                        
                         pos.update({
                             "aktif": True,
                             "yon": "ARTI",
@@ -136,10 +140,8 @@ def arbitraj_tarama_dongusu():
                             "futures_giris_fiyat": futures_fiyat
                         })
                         
-                        brut, kesinti, net = net_kar_hesapla(anlik_makas, CIKIS_MAKAS_YUZDE)
-                        
                         mesaj = (
-                            f"🚀 <b>POZİTİF ARBİTRAJ FIRSATI!</b>\n\n"
+                            f"🚀 <b>YÜKSEK KÂRLI ARBİTRAJ FIRSATI!</b>\n\n"
                             f"📊 <b>Koin:</b> {coin_label}/USDT\n"
                             f"⚡ <b>Anlık Makas:</b> +%{anlik_makas:.4f}\n"
                             f"💰 <b>Gerekli Nakit:</b> {SPOT_BAKIYE}$ Spot + {FUTURES_BAKIYE}$ Vadeli\n\n"
@@ -151,7 +153,8 @@ def arbitraj_tarama_dongusu():
                         telegram_bildir(mesaj)
                         
                 else:
-                    # 🔴 ÇIŞIŞ KONTROLÜ (Fiyatlar birbirine yaklaşınca kapanış tetiklenir)
+                    # 🔴 KESİN ÇIKIŞ KONTROLÜ (İstediğin gibi eksideyken asla kapatmaz, sadece hedefe sadık kalır)
+                    # Makas, bizim belirlediğimiz çıkış eşiğine (%0.02) eşit veya altına inene kadar bekler.
                     if anlik_makas <= CIKIS_MAKAS_YUZDE:
                         brut, kesinti, net = net_kar_hesapla(pos["giris_makas"], anlik_makas)
                         mesaj = (
@@ -164,9 +167,8 @@ def arbitraj_tarama_dongusu():
                         telegram_bildir(mesaj)
                         pos["aktif"] = False
 
-            # Konsol Ekranında o saniye piyasada en çok açılan ilk 3 pozitif makası listeler
+            # Konsolda piyasanın en yüksek ilk 3 pozitif makasını listeler
             if en_yuksek_makaslar:
-                # En yüksek artı makasları yukarıda listelemek için sıralama yapıyoruz
                 en_yuksek_makaslar.sort(key=lambda x: x[1], reverse=True)
                 print("\n💵 --- PİYASADA ANLIK EN YÜKSEK 3 POZİTİF MAKAS ---")
                 for i, item in enumerate(en_yuksek_makaslar[:3]):
@@ -186,11 +188,10 @@ if __name__ == "__main__":
     arbitraj_pozisyonlari = {symbol: {"aktif": False, "yon": None, "giris_makas": 0.0, "spot_giris_fiyat": 0.0, "futures_giris_fiyat": 0.0} for symbol in SYMBOLS}
     
     telegram_bildir(
-        f"🕵️‍♂️ <b>Nakit Taşımacılığı (Cash & Carry) Botu Başlatıldı!</b>\n\n"
-        f"Sistem sadece elinizde koin stoğu gerektirmeyen Pozitif (+) Fırsatları tarar.\n"
+        f"🕵️‍♂️ <b>Sabırlı Arbitraj Botu Başlatıldı!</b>\n\n"
         f"🎯 <b>Giriş Eşiği:</b> +%{GIRIS_MAKAS_YUZDE}\n"
-        f"💰 <b>Kasa Planlaması:</b> 100$ + 100$\n"
-        f"Gelen sinyaller doğrudan nakit dolar ile uygulanabilir."
+        f"🔒 <b>Çıkış Eşiği:</b> %{CIKIS_MAKAS_YUZDE}\n"
+        f"🛡️ <b>Kural:</b> Pozisyon açıldıktan sonra makas tersine genişlese dahi hedef seviyeye gelene kadar pozisyonlar sıkıca korunacaktır."
     )
     
     threading.Thread(target=start_multi_spot_ws, daemon=True).start()
