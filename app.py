@@ -12,7 +12,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 # Takip etmek istediğimiz tüm koinleri küçük harfle listeye ekledik
 SYMBOLS = ["btcusdt", "ethusdt", "xrpusdt", "arbusdt"]
 
-GIRIS_MAKAS_YUZDE = 0.30  # Brüt hedef makas eşiği
+GIRIS_MAKAS_YUZDE = 0.12  # Brüt hedef makas eşiği
 CIKIS_MAKAS_YUZDE = 0.05  # Çıkış makas eşiği
 
 # 💰 BAKİYE VE KOMİSYON AYARLARI (Görseldeki değerlere göre % bazında)
