@@ -9,10 +9,10 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 # --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
-GIRIS_MAKAS_YUZDE = 2  # Sinyal tetiklenecek brüt makas eşiği
-CIKIS_MAKAS_YUZDE = 0.2  # Pozisyon kapandı sayılacak çıkış eşiği
+GIRIS_MAKAS_YUZDE = 0.30  # Sinyal tetiklenecek pozitif brüt makas eşiği
+CIKIS_MAKAS_YUZDE = 0.02  # Pozisyon kapatılıp kâr alınacak çıkış eşiği
 
-# 💰 BAKİYE VE KOMİSYON AYARLARI (100$ + 100$)
+# 💰 BAKİYE VE KOMİSYON AYARLARI (100$ Spot Alım + 100$ Vadeli Short)
 SPOT_BAKIYE = 100.0       
 FUTURES_BAKIYE = 100.0    
 
@@ -26,7 +26,7 @@ piyasa_verisi = {}
 arbitraj_pozisyonlari = {}
 
 def get_all_futures_symbols():
-    """Binance Vadeli İşlemler piyasasındaki tüm USDT paritelerini otomatik çeker"""
+    """Binance Vadeli İşlemler piyasasındaki tüm aktif USDT paritelerini otomatik çeker"""
     try:
         url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
         r = requests.get(url, timeout=10)
@@ -34,13 +34,12 @@ def get_all_futures_symbols():
             data = r.json()
             symbols = []
             for market in data.get("symbols", []):
-                # Sadece aktif ve USDT çifti olan koinleri filtrele (Örn: BTCUSDT)
                 if market.get("quoteAsset") == "USDT" and market.get("status") == "TRADING":
                     symbols.append(market.get("symbol").lower())
             return symbols
     except Exception as e:
         print(f"Koin listesi çekilirken hata oluştu: {e}")
-    return ["btcusdt", "ethusdt", "solusdt", "xrpusdt"] # Hata durumunda koruma listesi
+    return ["btcusdt", "ethusdt", "solusdt", "xrpusdt"] # Hata koruma listesi
 
 def telegram_bildir(mesaj):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -57,6 +56,7 @@ def net_kar_hesapla(giris_makas, cikis_makas):
     brut_oran_farki = abs(giris_makas) - abs(cikis_makas)
     brut_kazanc_usdt = SPOT_BAKIYE * (brut_oran_farki / 100)
     
+    # Giriş + çıkış toplam komisyon sabit masrafını düşer (100+100 için ~0.24 USDT)
     spot_toplam_komisyon = (SPOT_BAKIYE * SPOT_FEE_RATE) * 2
     futures_toplam_komisyon = (FUTURES_BAKIYE * FUTURES_FEE_RATE) * 2
     toplam_kesinti_usdt = spot_toplam_komisyon + futures_toplam_komisyon
@@ -64,7 +64,7 @@ def net_kar_hesapla(giris_makas, cikis_makas):
     net_kazanc_usdt = brut_kazanc_usdt - toplam_kesinti_usdt
     return brut_kazanc_usdt, toplam_kesinti_usdt, net_kazanc_usdt
 
-# --- 🌐 TÜM PİYASAYI DİNLEYEN WEBSOCKET SİSTEMİ ---
+# --- 🌐 GLOBAL WEBSOCKET AKIŞLARI ---
 
 def start_multi_spot_ws():
     def on_message(ws, message):
@@ -78,8 +78,7 @@ def start_multi_spot_ws():
     def on_error(ws, error): print(f"Global Spot WS Hatası: {error}")
     def on_close(ws, c_code, c_msg): time.sleep(5); start_multi_spot_ws()
 
-    # Binance'in bağlantı başına maksimum 200 stream limitine takılmamak için 
-    # İlk aşamada en aktif 150 pariteyi tünel içerisine alıyoruz
+    # Binance stream limiti nedeniyle en aktif ilk 150 parite ana tünele alınır
     streams = "/".join([f"{symbol}@trade" for symbol in SYMBOLS[:150]])
     url = f"wss://stream.binance.com:9443/stream?streams={streams}"
     WebSocketApp(url, on_message=on_message, on_error=on_error, on_close=on_close).run_forever()
@@ -100,11 +99,11 @@ def start_multi_futures_ws():
     url = f"wss://fstream.binance.com/stream?streams={streams}"
     WebSocketApp(url, on_message=on_message, on_error=on_error, on_close=on_close).run_forever()
 
-# --- 🧠 300+ KOİNİ AYNI ANDA KIYASLAYAN ANALİZ MOTORU ---
+# --- 🧠 POZİTİF ARBİTRAJ MOTORU ---
 
 def arbitraj_tarama_dongusu():
     global arbitraj_pozisyonlari
-    print("Market Tarayıcı arka planda en yüksek makasları süzüyor...")
+    print("Market Tarayıcı sadece POZİTİF (+) nakit fırsatları süzüyor...")
     
     while True:
         try:
@@ -117,67 +116,61 @@ def arbitraj_tarama_dongusu():
                 if not spot_fiyat or not futures_fiyat:
                     continue
 
+                # Makas formülü: Vadeli fiyatın spottan ne kadar pahalı olduğunu ölçer
                 anlik_makas = ((futures_fiyat - spot_fiyat) / spot_fiyat) * 100
                 coin_label = symbol.upper().replace("USDT", "")
                 
-                # Anlık tarama listesini doldur (Konsolda ilk 3'ü göstermek için)
+                # Canlı takip log listesi
                 en_yuksek_makaslar.append((coin_label, anlik_makas, spot_fiyat, futures_fiyat))
 
                 pos = arbitraj_pozisyonlari[symbol]
 
                 if not pos["aktif"]:
-                    # 🟢 TÜM PİYASADA GİRİŞ KONTROLÜ
-                    if anlik_makas >= GIRIS_MAKAS_YUZDE or anlik_makas <= -GIRIS_MAKAS_YUZDE:
-                        yon = "ARTI" if anlik_makas >= GIRIS_MAKAS_YUZDE else "EKSI"
+                    # 🟢 SADECE POZİTİF (+) MAKAS KONTROLÜ (Eksiler filtrelendi)
+                    if anlik_makas >= GIRIS_MAKAS_YUZDE:
                         pos.update({
                             "aktif": True,
-                            "yon": yon,
+                            "yon": "ARTI",
                             "giris_makas": anlik_makas,
                             "spot_giris_fiyat": spot_fiyat,
                             "futures_giris_fiyat": futures_fiyat
                         })
                         
-                        brut, kesinti, net = net_kar_hesapla(anlik_makas, CIKIS_MAKAS_YUZDE if yon == "ARTI" else -CIKIS_MAKAS_YUZDE)
-                        baslik = "🚀 POZİTİF ARBİTRAJ" if yon == "ARTI" else "📉 NEGATİF ARBİTRAJ"
-                        oneri = f"{coin_label} Spot AL, Vadeli SHORT aç!" if yon == "ARTI" else f"{coin_label} Spot SAT, Vadeli LONG aç!"
+                        brut, kesinti, net = net_kar_hesapla(anlik_makas, CIKIS_MAKAS_YUZDE)
                         
                         mesaj = (
-                            f"💥 <b>PİYASADA MAKSİMUM MAKAS YAKALANDI!</b>\n\n"
+                            f"🚀 <b>POZİTİF ARBİTRAJ FIRSATI!</b>\n\n"
                             f"📊 <b>Koin:</b> {coin_label}/USDT\n"
-                            f"⚡ <b>Anlık Makas Oranı:</b> %{anlik_makas:.4f}\n"
-                            f"💰 <b>İşlem Büyüklüğü:</b> {SPOT_BAKIYE}$ + {FUTURES_BAKIYE}$\n\n"
+                            f"⚡ <b>Anlık Makas:</b> +%{anlik_makas:.4f}\n"
+                            f"💰 <b>Gerekli Nakit:</b> {SPOT_BAKIYE}$ Spot + {FUTURES_BAKIYE}$ Vadeli\n\n"
                             f"💵 <b>Tahmini Brüt Kazanç:</b> {brut:.4f} USDT\n"
-                            f"✂️ <b>Toplam Komisyon:</b> {kesinti:.4f} USDT\n"
-                            f"🎉 <b>NET CEBE KALACAK:</b> <b>{net:.4f} USDT</b>\n\n"
-                            f"💡 <i>{oneri}</i>"
+                            f"✂️ <b>Toplam Komisyon Masrafı:</b> {kesinti:.4f} USDT\n"
+                            f"🎉 <b>NET TEMİZ KÂR:</b> <b>{net:.4f} USDT</b>\n\n"
+                            f"💡 <b>TALİMAT:</b> <u>{coin_label} Spot cüzdandan SATIN AL, Vadeli tarafta SHORT aç!</u>"
                         )
                         telegram_bildir(mesaj)
                         
                 else:
-                    # 🔴 ÇIŞIŞ KONTROLÜ
-                    pozisyon_kapandi = False
-                    if pos["yon"] == "ARTI" and anlik_makas <= CIKIS_MAKAS_YUZDE:
-                        pozisyon_kapandi = True
-                    elif pos["yon"] == "EKSI" and anlik_makas >= -CIKIS_MAKAS_YUZDE:
-                        pozisyon_kapandi = True
-                        
-                    if pozisyon_kapandi:
+                    # 🔴 ÇIŞIŞ KONTROLÜ (Fiyatlar birbirine yaklaşınca kapanış tetiklenir)
+                    if anlik_makas <= CIKIS_MAKAS_YUZDE:
                         brut, kesinti, net = net_kar_hesapla(pos["giris_makas"], anlik_makas)
                         mesaj = (
                             f"🤝 <b>🔒 {coin_label} POZİSYONU BAŞARIYLA KAPANDI</b>\n\n"
                             f"📉 <b>Kapanış Makası:</b> %{anlik_makas:.4f}\n"
                             f"💰 <b>Brüt Kâr:</b> {brut:.4f} USDT\n"
-                            f"🎉 <b>NET TEMİZ KÂR:</b> <b>{net:.4f} USDT</b>"
+                            f"🎉 <b>NET TEMİZ KÂR:</b> <b>{net:.4f} USDT</b>\n\n"
+                            f"💡 <b>TALİMAT:</b> Spottaki malı sat, vadelideki shortu kapat ve tamamen nakit USDT'ye dön!"
                         )
                         telegram_bildir(mesaj)
                         pos["aktif"] = False
 
-            # Konsol Ekranında o saniye piyasada en çok açılan ilk 3 makası gösterir (Ekranı yormaz)
+            # Konsol Ekranında o saniye piyasada en çok açılan ilk 3 pozitif makası listeler
             if en_yuksek_makaslar:
-                en_yuksek_makaslar.sort(key=lambda x: abs(x[1]), reverse=True)
-                print("\n🔥 --- PİYASADA ANLIK EN YÜKSEK 3 MAKAS ---")
+                # En yüksek artı makasları yukarıda listelemek için sıralama yapıyoruz
+                en_yuksek_makaslar.sort(key=lambda x: x[1], reverse=True)
+                print("\n💵 --- PİYASADA ANLIK EN YÜKSEK 3 POZİTİF MAKAS ---")
                 for i, item in enumerate(en_yuksek_makaslar[:3]):
-                    print(f"{i+1}. [{item[0]}] Makas: %{item[1]:.4f} | Spot: {item[2]:.2f} | Fut: {item[3]:.2f}")
+                    print(f"{i+1}. [{item[0]}] Makas: +%{item[1]:.4f} | Spot: {item[2]:.2f} | Fut: {item[3]:.2f}")
 
         except Exception as e:
             print(f"Scanner döngü hatası: {e}")
@@ -187,21 +180,19 @@ def arbitraj_tarama_dongusu():
 if __name__ == "__main__":
     print("🔄 Binance API'den tüm aktif vadeli koin listesi taranıyor...")
     SYMBOLS = get_all_futures_symbols()
-    print(f"✅ Toplam {len(SYMBOLS)} aktif parite tespit edildi. Altyapı hazırlanıyor...")
+    print(f"✅ Toplam {len(SYMBOLS)} aktif parite radara alındı. Altyapı hazırlanıyor...")
     
-    # Hafıza sözlüklerini dinamik doldur
     piyasa_verisi = {symbol: {"spot_price": None, "futures_price": None} for symbol in SYMBOLS}
     arbitraj_pozisyonlari = {symbol: {"aktif": False, "yon": None, "giris_makas": 0.0, "spot_giris_fiyat": 0.0, "futures_giris_fiyat": 0.0} for symbol in SYMBOLS}
     
     telegram_bildir(
-        f"🕵️‍♂️ <b>Canlı Piyasa Tarayıcı Arbitraj Botu Başlatıldı!</b>\n\n"
-        f"Binance üzerindeki tüm aktif pariteler dinamik olarak radara alındı.\n"
-        f"🎯 <b>Giriş Eşiği:</b> ±%{GIRIS_MAKAS_YUZDE}\n"
-        f"💰 <b>Kasa:</b> 100$ + 100$\n"
-        f"Bot o an piyasada en çok ayrışan koinleri ayıklayıp sinyal atacaktır!"
+        f"🕵️‍♂️ <b>Nakit Taşımacılığı (Cash & Carry) Botu Başlatıldı!</b>\n\n"
+        f"Sistem sadece elinizde koin stoğu gerektirmeyen Pozitif (+) Fırsatları tarar.\n"
+        f"🎯 <b>Giriş Eşiği:</b> +%{GIRIS_MAKAS_YUZDE}\n"
+        f"💰 <b>Kasa Planlaması:</b> 100$ + 100$\n"
+        f"Gelen sinyaller doğrudan nakit dolar ile uygulanabilir."
     )
     
-    # Websocket iplerini başlat
     threading.Thread(target=start_multi_spot_ws, daemon=True).start()
     threading.Thread(target=start_multi_futures_ws, daemon=True).start()
     
