@@ -9,12 +9,12 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 # --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
-GIRIS_MAKAS_YUZDE = 0.30  # Sinyal tetiklenecek pozitif brüt makas eşiği
+GIRIS_MAKAS_YUZDE = 0.40  # ⚡ Küçük bakiye (10$) için giriş barajı %0.65'e yükseltildi!
 CIKIS_MAKAS_YUZDE = 0.02  # Pozisyon kapatılıp kâr alınacak KESİN çıkış eşiği
 
-# 💰 BAKİYE VE KOMİSYON AYARLARI (100$ Spot Alım + 100$ Vadeli Short)
-SPOT_BAKIYE = 100.0       
-FUTURES_BAKIYE = 100.0    
+# 💰 BAKİYE VE KOMİSYON AYARLARI (10$ Spot Alım + 100$ Vadeli Short)
+SPOT_BAKIYE = 10.0       # 🚀 Test bütçen 10$ olarak ayarlandı
+FUTURES_BAKIYE = 10.0    # 🚀 Test bütçen 10$ olarak ayarlandı
 
 SPOT_FEE_RATE = 0.0750 / 100     # %0.0750 Taker komisyonu
 FUTURES_FEE_RATE = 0.0450 / 100  # %0.0450 Taker komisyonu
@@ -56,7 +56,7 @@ def net_kar_hesapla(giris_makas, cikis_makas):
     brut_oran_farki = abs(giris_makas) - abs(cikis_makas)
     brut_kazanc_usdt = SPOT_BAKIYE * (brut_oran_farki / 100)
     
-    # Giriş + çıkış toplam komisyon sabit masrafını düşer (100+100 için ~0.24 USDT)
+    # Giriş + çıkış toplam komisyon sabit masrafını düşer (10+10 için ~0.024 USDT)
     spot_toplam_komisyon = (SPOT_BAKIYE * SPOT_FEE_RATE) * 2
     futures_toplam_komisyon = (FUTURES_BAKIYE * FUTURES_FEE_RATE) * 2
     toplam_kesinti_usdt = spot_toplam_komisyon + futures_toplam_komisyon
@@ -103,7 +103,7 @@ def start_multi_futures_ws():
 
 def arbitraj_tarama_dongusu():
     global arbitraj_pozisyonlari
-    print("Market Tarayıcı sadece net kârlı pozitif (+) fırsatları süzüyor...")
+    print("Market Tarayıcı 10$ bütçeye uygun yüksek pozitif (+) fırsatları süzüyor...")
     
     while True:
         try:
@@ -141,7 +141,7 @@ def arbitraj_tarama_dongusu():
                         })
                         
                         mesaj = (
-                            f"🚀 <b>YÜKSEK KÂRLI ARBİTRAJ FIRSATI!</b>\n\n"
+                            f"🚀 <b>10$ MİKRO ARBİTRAJ FIRSATI!</b>\n\n"
                             f"📊 <b>Koin:</b> {coin_label}/USDT\n"
                             f"⚡ <b>Anlık Makas:</b> +%{anlik_makas:.4f}\n"
                             f"💰 <b>Gerekli Nakit:</b> {SPOT_BAKIYE}$ Spot + {FUTURES_BAKIYE}$ Vadeli\n\n"
@@ -153,8 +153,7 @@ def arbitraj_tarama_dongusu():
                         telegram_bildir(mesaj)
                         
                 else:
-                    # 🔴 KESİN ÇIKIŞ KONTROLÜ (İstediğin gibi eksideyken asla kapatmaz, sadece hedefe sadık kalır)
-                    # Makas, bizim belirlediğimiz çıkış eşiğine (%0.02) eşit veya altına inene kadar bekler.
+                    # 🔴 KESİN ÇIKIŞ KONTROLÜ
                     if anlik_makas <= CIKIS_MAKAS_YUZDE:
                         brut, kesinti, net = net_kar_hesapla(pos["giris_makas"], anlik_makas)
                         mesaj = (
@@ -188,10 +187,10 @@ if __name__ == "__main__":
     arbitraj_pozisyonlari = {symbol: {"aktif": False, "yon": None, "giris_makas": 0.0, "spot_giris_fiyat": 0.0, "futures_giris_fiyat": 0.0} for symbol in SYMBOLS}
     
     telegram_bildir(
-        f"🕵️‍♂️ <b>Sabırlı Arbitraj Botu Başlatıldı!</b>\n\n"
+        f"🕵️‍♂️ <b>10$ Mikro Bütçe Arbitraj Botu Başlatıldı!</b>\n\n"
+        f"Sistem küçük bütçedeki komisyon dezavantajını ezmek için sadece devasa makasları arayacaktır.\n"
         f"🎯 <b>Giriş Eşiği:</b> +%{GIRIS_MAKAS_YUZDE}\n"
-        f"🔒 <b>Çıkış Eşiği:</b> %{CIKIS_MAKAS_YUZDE}\n"
-        f"🛡️ <b>Kural:</b> Pozisyon açıldıktan sonra makas tersine genişlese dahi hedef seviyeye gelene kadar pozisyonlar sıkıca korunacaktır."
+        f"💰 <b>Kasa Planlaması:</b> {SPOT_BAKIYE}$ + {FUTURES_BAKIYE}$ (Toplam 20$)"
     )
     
     threading.Thread(target=start_multi_spot_ws, daemon=True).start()
