@@ -9,7 +9,7 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 # --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
-GIRIS_MAKAS_YUZDE = 1.10  # Sinyal tetiklenecek pozitif brüt makas eşiği
+GIRIS_MAKAS_YUZDE = 5.10  # Sinyal tetiklenecek pozitif brüt makas eşiği
 CIKIS_MAKAS_YUZDE = 0.02  # 🎯 Hedef Çıkış: Makas bu seviyeye VEYA DAHA ALTINA (Eksiye) indiğinde kapat!
 
 # 💰 BAKİYE VE KOMİSYON AYARLARI (10$ Spot Alım + 10$ Vadeli Short)
