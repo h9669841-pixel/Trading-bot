@@ -12,7 +12,7 @@ CIKIS_MAKAS_YUZDE = 0.05  # Makas normale döndüğünde (%0.05 veya altına/üs
 
 # 🛑 IP ENGELİNİ AŞMAK İÇİN SÜREYİ 4 SANİYEYE ÇEKTİK:
 # Saniyede bir gitmek Binance'in Railway IP'sini engellemesine sebep olur.
-LOOP_INTERVAL = 4         
+LOOP_INTERVAL = 72000         
 # -------------------------------------
 
 # Binance API Adresleri
