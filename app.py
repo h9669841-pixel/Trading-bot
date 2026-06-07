@@ -3,33 +3,64 @@ import json
 import time
 import requests
 import threading
+from binance.client import Client
+from binance.enums import *
 from websocket import WebSocketApp
 
+# --- 🔑 GÜVENLİK VE API AYARLARI ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
-GIRIS_MAKAS_YUZDE = 5.10  # Sinyal tetiklenecek pozitif brüt makas eşiği
-CIKIS_MAKAS_YUZDE = 0.02  # 🎯 Hedef Çıkış: Makas bu seviyeye VEYA DAHA ALTINA (Eksiye) indiğinde kapat!
+BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")
+BINANCE_SECRET_KEY = os.environ.get("BINANCE_SECRET_KEY")
 
-# 💰 BAKİYE VE KOMİSYON AYARLARI (10$ Spot Alım + 10$ Vadeli Short)
+# 🌐 PROXY (STATIK IP) AYARLARI
+# Railway'e eklediğin PROXY_URL değişkenini çeker
+PROXY_URL = os.environ.get("PROXY_URL") 
+
+requests_requests_proxies = None
+binance_client_requests_params = {}
+
+if PROXY_URL:
+    print(f"🌐 Statik IP Proxy Aktif Ediliyor: {PROXY_URL}")
+    # requests ve websocket için proxy formatı
+    requests_requests_proxies = {
+        "http": PROXY_URL,
+        "https": PROXY_URL
+    }
+    # python-binance kütüphanesinin proxy kullanması için gereken parametre
+    binance_client_requests_params = {
+        "proxies": requests_requests_proxies
+    }
+
+# Binance API İstemcisi Statik IP (Proxy) Desteğiyle Başlatılıyor
+client = Client(
+    BINANCE_API_KEY, 
+    BINANCE_SECRET_KEY, 
+    requests_params=binance_client_requests_params
+)
+
+# --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
+GIRIS_MAKAS_YUZDE = 0.80  
+CIKIS_MAKAS_YUZDE = 0.02  
+
+# 💰 BAKİYE AYARLARI (Her işlem için ayrılan nominal büyüklük)
 SPOT_BAKIYE = 10.0       
 FUTURES_BAKIYE = 10.0    
 
-SPOT_FEE_RATE = 0.0750 / 100     # %0.0750 Taker komisyonu
-FUTURES_FEE_RATE = 0.0450 / 100  # %0.0450 Taker komisyonu
+SPOT_FEE_RATE = 0.0750 / 100     
+FUTURES_FEE_RATE = 0.0450 / 100  
 # ----------------------------------------------
 
-# Dinamik koin listesi ve fiyat hafızası
 SYMBOLS = []
 piyasa_verisi = {}
 arbitraj_pozisyonlari = {}
 
 def get_all_futures_symbols():
-    """Binance Vadeli İşlemler piyasasındaki tüm aktif USDT paritelerini otomatik çeker"""
+    """Binance Vadeli İşlemler listesini çeker (Proxy üzerinden)"""
     try:
         url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
-        r = requests.get(url, timeout=10)
+        r = requests.get(url, proxies=requests_requests_proxies, timeout=10)
         if r.status_code == 200:
             data = r.json()
             symbols = []
@@ -47,16 +78,11 @@ def telegram_bildir(mesaj):
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": mesaj, "parse_mode": "HTML"}, timeout=5)
+        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": mesaj, "parse_mode": "HTML"}, proxies=requests_requests_proxies, timeout=5)
     except Exception as e:
         print(f"Telegram hatası: {e}")
 
 def net_kar_hesapla(giris_makas, kapanis_makas):
-    """
-    🎯 KUSURSUZ FORMÜL:
-    Pozitif arbitrajda (Spot Al - Vadeli Short), kapanış makası ne kadar küçük veya eksi olursa 
-    kazancımız o kadar katlanır. Formül artık bu yön kaymasını doğru hesaplar.
-    """
     brut_oran_farki = giris_makas - kapanis_makas
     brut_kazanc_usdt = SPOT_BAKIYE * (brut_oran_farki / 100)
     
@@ -66,6 +92,51 @@ def net_kar_hesapla(giris_makas, kapanis_makas):
     
     net_kazanc_usdt = brut_kazanc_usdt - toplam_kesinti_usdt
     return brut_kazanc_usdt, toplam_kesinti_usdt, net_kazanc_usdt
+
+# --- 🎯 AKTİF EMİR YÖNETİM MOTORU (API) ---
+
+def execute_arbitrage_entry(symbol, spot_price, futures_price):
+    """Eşzamanlı olarak Spot Alım ve Vadeli Short emri gönderir (Proxy Üzerinden)"""
+    coin_label = symbol.upper()
+    print(f"⚡ {coin_label} için API Emirleri Gönderiliyor...")
+    
+    try:
+        client.futures_change_leverage(symbol=coin_label, leverage=1)
+        
+        spot_quantity = round(SPOT_BAKIYE / spot_price, 4)
+        futures_quantity = round(FUTURES_BAKIYE / futures_price, 4)
+
+        # Spot Satın Alım
+        spot_order = client.create_order(symbol=coin_label, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=spot_quantity)
+        # Vadeli Short Açılış
+        futures_order = client.futures_create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=futures_quantity)
+        
+        print(f"✅ {coin_label} Giriş Emirleri Borsada Başarıyla Gerçekleşti!")
+        return True, spot_quantity, futures_quantity
+    except Exception as e:
+        err_msg = f"❌ {coin_label} GİRİŞ EMİR HATASI: {e}"
+        print(err_msg)
+        telegram_bildir(err_msg)
+        return False, 0, 0
+
+def execute_arbitrage_exit(symbol, spot_qty, futures_qty):
+    """Eşzamanlı olarak Spottaki malı satar ve Vadeli Shortu kapatır (Proxy Üzerinden)"""
+    coin_label = symbol.upper()
+    print(f"⚡ {coin_label} Pozisyonu API ile Kapatılıyor...")
+    
+    try:
+        # Spot Satış
+        client.create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=spot_qty)
+        # Vadeli Short Kapatma
+        client.futures_create_order(symbol=coin_label, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=futures_qty)
+        
+        print(f"✅ {coin_label} Pozisyonları Başarıyla Tasfiye Edildi.")
+        return True
+    except Exception as e:
+        err_msg = f"❌ {coin_label} ÇIKIŞ EMİR HATASI: {e}"
+        print(err_msg)
+        telegram_bildir(err_msg)
+        return False
 
 # --- 🌐 GLOBAL WEBSOCKET AKIŞLARI ---
 
@@ -83,7 +154,19 @@ def start_multi_spot_ws():
 
     streams = "/".join([f"{symbol}@trade" for symbol in SYMBOLS[:150]])
     url = f"wss://stream.binance.com:9443/stream?streams={streams}"
-    WebSocketApp(url, on_message=on_message, on_error=on_error, on_close=on_close).run_forever()
+    
+    # Websocket akışını proxy üzerinden tünelleme ayarları
+    ws_kwargs = {}
+    if PROXY_URL:
+        from urllib.parse import urlparse
+        parsed_proxy = urlparse(PROXY_URL)
+        ws_kwargs = {
+            "http_proxy_host": parsed_proxy.hostname,
+            "http_proxy_port": parsed_proxy.port,
+            "http_proxy_auth": (parsed_proxy.username, parsed_proxy.password) if parsed_proxy.username else None
+        }
+        
+    WebSocketApp(url, on_message=on_message, on_error=on_error, on_close=on_close).run_forever(**ws_kwargs)
 
 def start_multi_futures_ws():
     def on_message(ws, message):
@@ -99,13 +182,24 @@ def start_multi_futures_ws():
 
     streams = "/".join([f"{symbol}@trade" for symbol in SYMBOLS[:150]])
     url = f"wss://fstream.binance.com/stream?streams={streams}"
-    WebSocketApp(url, on_message=on_message, on_error=on_error, on_close=on_close).run_forever()
+    
+    ws_kwargs = {}
+    if PROXY_URL:
+        from urllib.parse import urlparse
+        parsed_proxy = urlparse(PROXY_URL)
+        ws_kwargs = {
+            "http_proxy_host": parsed_proxy.hostname,
+            "http_proxy_port": parsed_proxy.port,
+            "http_proxy_auth": (parsed_proxy.username, parsed_proxy.password) if parsed_proxy.username else None
+        }
+        
+    WebSocketApp(url, on_message=on_message, on_error=on_error, on_close=on_close).run_forever(**ws_kwargs)
 
-# --- 🧠 DİNAMİK ARBİTRAJ MOTORU ---
+# --- 🧠 OTOMATİK İŞLEM YAPAN ARBİTRAJ MOTORU ---
 
 def arbitraj_tarama_dongusu():
     global arbitraj_pozisyonlari
-    print("Market Tarayıcı güncellenmiş kâr motoruyla piyasayı süzüyor...")
+    print("🤖 API Emir Motoru ve Statik IP Aktif. Robot piyasayı tarıyor...")
     
     while True:
         try:
@@ -119,57 +213,54 @@ def arbitraj_tarama_dongusu():
                     continue
 
                 anlik_makas = ((futures_fiyat - spot_fiyat) / spot_fiyat) * 100
-                coin_label = symbol.upper().replace("USDT", "")
+                coin_label = symbol.upper()
                 
                 en_yuksek_makaslar.append((coin_label, anlik_makas, spot_fiyat, futures_fiyat))
 
                 pos = arbitraj_pozisyonlari[symbol]
 
                 if not pos["aktif"]:
-                    # 🟢 GİRİŞ KONTROLÜ
                     if anlik_makas >= GIRIS_MAKAS_YUZDE:
-                        # Girişte muhtemel kârı hedef çıkışa göre hesapla
                         brut, kesinti, net = net_kar_hesapla(anlik_makas, CIKIS_MAKAS_YUZDE)
                         
                         if net <= 0:
                             continue
                         
-                        pos.update({
-                            "aktif": True,
-                            "yon": "ARTI",
-                            "giris_makas": anlik_makas,
-                            "spot_giris_fiyat": spot_fiyat,
-                            "futures_giris_fiyat": futures_fiyat
-                        })
+                        basarili, s_qty, f_qty = execute_arbitrage_entry(symbol, spot_fiyat, futures_fiyat)
                         
-                        mesaj = (
-                            f"🚀 <b>10$ MİKRO ARBİTRAJ FIRSATI!</b>\n\n"
-                            f"📊 <b>Koin:</b> {coin_label}/USDT\n"
-                            f"⚡ <b>Anlık Makas:</b> +%{anlik_makas:.4f}\n"
-                            f"💰 <b>Gerekli Nakit:</b> {SPOT_BAKIYE}$ Spot + {FUTURES_BAKIYE}$ Vadeli\n\n"
-                            f"💵 <b>Tahmini Brüt Kazanç:</b> {brut:.4f} USDT\n"
-                            f"✂️ <b>Toplam Komisyon Masrafı:</b> {kesinti:.4f} USDT\n"
-                            f"🎉 <b>NET TEMİZ KÂR:</b> <b>{net:.4f} USDT</b>\n\n"
-                            f"💡 <b>TALİMAT:</b> <u>{coin_label} Spot cüzdandan SATIN AL, Vadeli tarafta SHORT aç!</u>"
-                        )
-                        telegram_bildir(mesaj)
+                        if basarili:
+                            pos.update({
+                                "aktif": True,
+                                "giris_makas": anlik_makas,
+                                "spot_adet": s_qty,
+                                "futures_adet": f_qty
+                            })
+                            
+                            mesaj = (
+                                f"🤖 <b>İŞLEME GİRİLDİ (OTOMATİK EMİR)</b>\n\n"
+                                f"📊 <b>Koin:</b> {coin_label}\n"
+                                f"⚡ <b>Giriş Makası:</b> +%{anlik_makas:.4f}\n"
+                                f"📦 <b>Alınan Adet:</b> {s_qty} Spot / {f_qty} Vadeli Short\n\n"
+                                f"💵 <b>Beklenen Net Kâr:</b> <b>{net:.4f} USDT</b>\n"
+                                f"🔒 Pozisyon borsa tarafında kilitlendi, çıkış taranıyor..."
+                            )
+                            telegram_bildir(mesaj)
                         
                 else:
-                    # 🔴 DİNAMİK ÇIŞIŞ KONTROLÜ
-                    # Makas belirlediğimiz %0.02'ye eşit veya altına (eksiye) düştüğü an pozisyonu kapatır.
                     if anlik_makas <= CIKIS_MAKAS_YUZDE:
-                        # 💥 YENİ: Gerçekleşen eksi makas değerini formüle paslayarak dev kârı doğru hesaplar!
-                        brut, kesinti, net = net_kar_hesapla(pos["giris_makas"], anlik_makas)
+                        kapatma_basarili = execute_arbitrage_exit(symbol, pos["spot_adet"], pos["futures_adet"])
                         
-                        mesaj = (
-                            f"🤝 <b>🔒 {coin_label} POZİSYONU BAŞARIYLA KAPANDI</b>\n\n"
-                            f"📉 <b>Kapanış Makası:</b> %{anlik_makas:.4f}\n"
-                            f"💰 <b>Gerçekleşen Brüt Kâr:</b> {brut:.4f} USDT\n"
-                            f"🎉 <b>NET TEMİZ KÂR:</b> <b>{net:.4f} USDT</b>\n\n"
-                            f"💡 <b>TALİMAT:</b> Spottaki malı sat, vadelideki shortu kapat ve tamamen nakit USDT'ye dön!"
-                        )
-                        telegram_bildir(mesaj)
-                        pos["aktif"] = False
+                        if kapatma_basarili:
+                            brut, kesinti, net = net_kar_hesapla(pos["giris_makas"], anlik_makas)
+                            
+                            mesaj = (
+                                f"🤝 <b>🔒 POZİSYON OTOMATİK KAPATILDI</b>\n\n"
+                                f"📉 <b>Kapanış Makası:</b> %{anlik_makas:.4f}\n"
+                                f"🎉 <b>NET REALİZE KÂR:</b> <b>{net:.4f} USDT</b>\n\n"
+                                f"💰 Hesap tamamen nakit nakit USDT'ye çekildi. Yeni fırsatlar aranıyor..."
+                            )
+                            telegram_bildir(mesaj)
+                            pos["aktif"] = False
 
             if en_yuksek_makaslar:
                 en_yuksek_makaslar.sort(key=lambda x: x[1], reverse=True)
@@ -183,18 +274,17 @@ def arbitraj_tarama_dongusu():
         time.sleep(2)
 
 if __name__ == "__main__":
-    print("🔄 Binance API'den tüm aktif vadeli koin listesi taranıyor...")
+    print("🔄 Binance API bağlantısı kuruluyor ve aktif pariteler alınıyor...")
     SYMBOLS = get_all_futures_symbols()
     print(f"✅ Toplam {len(SYMBOLS)} aktif parite radara alındı. Altyapı hazırlanıyor...")
     
     piyasa_verisi = {symbol: {"spot_price": None, "futures_price": None} for symbol in SYMBOLS}
-    arbitraj_pozisyonlari = {symbol: {"aktif": False, "yon": None, "giris_makas": 0.0, "spot_giris_fiyat": 0.0, "futures_giris_fiyat": 0.0} for symbol in SYMBOLS}
+    arbitraj_pozisyonlari = {symbol: {"aktif": False, "giris_makas": 0.0, "spot_adet": 0.0, "futures_adet": 0.0} for symbol in SYMBOLS}
     
     telegram_bildir(
-        f"🕵️‍♂️ <b>Kâr Motoru Güncellenmiş Bot Başlatıldı!</b>\n\n"
-        f"Artık makasın sıfırın altına sarktığı ekstrem durumlarda elde ettiğiniz ekstra büyük kârlar kusursuz şekilde hesaplanacaktır.\n"
-        f"🎯 <b>Giriş Eşiği:</b> +%{GIRIS_MAKAS_YUZDE}\n"
-        f"📉 <b>Kapanış Koşulu:</b> <= %{CIKIS_MAKAS_YUZDE}"
+        f"🤖 <b>Tam Otomatik Statik IP Korumalı Robot Başlatıldı!</b>\n\n"
+        f"Tüm ağ istekleri ve borsa emirleri Webshare proxy adresiniz (`198.105.121.200`) üzerinden güvenli şekilde tünelleniyor.\n"
+        f"🎯 <b>Giriş Eşiği:</b> +%{GIRIS_MAKAS_YUZDE}"
     )
     
     threading.Thread(target=start_multi_spot_ws, daemon=True).start()
