@@ -1,4 +1,4 @@
-import os
+İmport os
 import time
 import requests
 
@@ -7,8 +7,8 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 # --- 📊 ARBİTRAJ STRATEJİ AYARLARI ---
 SYMBOL = "BTCUSDT"
-GIRIS_MAKAS_YUZDE = 0.30  # Vadeli fiyat, Spottan %0.30 veya daha fazla uzaklaşırsa (+ veya -) sinyal ver
-CIKIS_MAKAS_YUZDE = 0.05  # Makas normale döndüğünde (%0.05 veya altına/üstüne gelince) çıkış sinyali ver
+GIRIS_MAKAS_YUZDE = 0.30  # Vadeli fiyat, Spottan %0.30 veya daha fazla pahalıysa sinyal ver
+CIKIS_MAKAS_YUZDE = 0.05  # Makas %0.05'e düştüğünde (kapandığında) karı al/çıkış sinyali ver
 LOOP_INTERVAL = 2         # Piyasayı kaç saniyede bir tarasın? (Canlı takip için 2 saniye idealdir)
 # -------------------------------------
 
@@ -19,7 +19,6 @@ FUTURES_URL = "https://fapi.binance.com/fapi/v1/ticker/price"
 # Sanal arbitraj pozisyon takip hafızası
 arbitraj_pozisyon = {
     "aktif": False,
-    "yon": None, # "ARTI" veya "EKSI" yön takibi için eklendi
     "giris_makas": 0.0,
     "spot_giris_fiyat": 0.0,
     "futures_giris_fiyat": 0.0
@@ -72,89 +71,55 @@ def arbitraj_tarama():
         return
 
     # Vadeli işlem ile Spot arasındaki makas yüzdesini hesapla
+    # Pozitif değer: Vadeli piyasa, Spottan daha pahalı demektir.
     anlik_makas = ((futures_fiyat - spot_fiyat) / spot_fiyat) * 100
     
     print(f"⏱️ Spot: {spot_fiyat:.2f} | Futures: {futures_fiyat:.2f} | Makas: %{anlik_makas:.4f}")
 
     if not arbitraj_pozisyon["aktif"]:
-        # 🟢 GİRİŞ KOŞULLARI KONTROLÜ
-        
-        # Durum A: Pozitif Makas (Vadeli Pahalı)
+        # 🟢 GİRİŞ KOŞULU KONTROLÜ
         if anlik_makas >= GIRIS_MAKAS_YUZDE:
             arbitraj_pozisyon.update({
                 "aktif": True,
-                "yon": "ARTI",
                 "giris_makas": anlik_makas,
                 "spot_giris_fiyat": spot_fiyat,
-                "futures_giris_fiyat": futures_fiyat
+                "futures_gener_fiyat": futures_fiyat
             })
             
             mesaj = (
-                f"🚀 <b>💥 POZİTİF ARBİTRAJ FIRSATI YAKALANDI!</b>\n\n"
-                f"📊 <b>Parite:</b> {SYMBOL}\n"
-                f"🟢 <b>Spot Fiyat:</b> {spot_fiyat:.2f} USDT\n"
-                f"🔴 <b>Futures Fiyat:</b> {futures_fiyat:.2f} USDT\n"
-                f"⚡ <b>Anlık Makas (Spread):</b> +%{anlik_makas:.3f}\n\n"
-                f"💡 <i>Manuel İşlem Önerisi: Spot piyasadan AL, Vadeli piyasada aynı miktarda SHORT aç!</i>"
-            )
-            telegram_bildir(mesaj)
-            
-        # Durum B: Negatif Makas (Vadeli Ucuz)
-        elif anlik_makas <= -GIRIS_MAKAS_YUZDE:
-            arbitraj_pozisyon.update({
-                "aktif": True,
-                "yon": "EKSI",
-                "giris_makas": anlik_makas,
-                "spot_giris_fiyat": spot_fiyat,
-                "futures_giris_fiyat": futures_fiyat
-            })
-            
-            mesaj = (
-                f"📉 <b>💥 NEGATİF ARBİTRAJ FIRSATI YAKALANDI!</b>\n\n"
+                f"🚀 <b>💥 ARBİTRAJ FIRSATI YAKALANDI!</b>\n\n"
                 f"📊 <b>Parite:</b> {SYMBOL}\n"
                 f"🟢 <b>Spot Fiyat:</b> {spot_fiyat:.2f} USDT\n"
                 f"🔴 <b>Futures Fiyat:</b> {futures_fiyat:.2f} USDT\n"
                 f"⚡ <b>Anlık Makas (Spread):</b> %{anlik_makas:.3f}\n\n"
-                f"💡 <i>Manuel İşlem Önerisi: Spot malları SAT, Vadeli piyasada aynı miktarda LONG aç!</i>"
+                f"💡 <i>Manuel İşlem Önerisi: Spot piyasadan AL, Vadeli piyasada aynı miktarda SHORT aç!</i>"
             )
             telegram_bildir(mesaj)
             
     else:
-        # 🔴 ÇIŞIŞ KOŞULLARI KONTROLÜ
-        
-        # Pozitif makastan çıkış kontrolü (Sıfıra/Çıkış eşiğine düştü mü?)
-        if arbitraj_pozisyon["yon"] == "ARTI" and anlik_makas <= CIKIS_MAKAS_YUZDE:
+        # 🔴 ÇIŞIŞ KOŞULU KONTROLÜ (Makas daraldı mı?)
+        if anlik_makas <= CIKIS_MAKAS_YUZDE:
             kar_orani = arbitraj_pozisyon["giris_makas"] - anlik_makas
+            
             mesaj = (
-                f"🤝 <b>🔒 POZİTİF ARBİTRAJ POZİSYONU KAPANDI</b>\n\n"
+                f"🤝 <b>🔒 ARBİTRAJ POZİSYONU KAPANDI</b>\n\n"
                 f"📊 <b>Parite:</b> {SYMBOL}\n"
                 f"📉 <b>Makas Daraldı:</b> %{anlik_makas:.3f}'e düştü.\n"
                 f"💰 <b>Tahmini Brüt Kazanç:</b> %{kar_orani:.3f}\n\n"
                 f"💡 <i>Manuel İşlem Önerisi: Spot malları SAT, Vadeli SHORT pozisyonunu KAPAT!</i>"
             )
             telegram_bildir(mesaj)
-            arbitraj_pozisyon["aktif"] = False
             
-        # Negatif makastan çıkış kontrolü (Sıfıra/Çıkış eşiğine doğru yukarı tırmandı mı?)
-        elif arbitraj_pozisyon["yon"] == "EKSI" and anlik_makas >= -CIKIS_MAKAS_YUZDE:
-            kar_orani = abs(arbitraj_pozisyon["giris_makas"]) - abs(anlik_makas)
-            mesaj = (
-                f"🤝 <b>🔒 NEGATİF ARBİTRAJ POZİSYONU KAPANDI</b>\n\n"
-                f"📊 <b>Parite:</b> {SYMBOL}\n"
-                f"📈 <b>Makas Normale Döndü:</b> %{anlik_makas:.3f}'e tırmandı.\n"
-                f"💰 <b>Tahmini Brüt Kazanç:</b> %{kar_orani:.3f}\n\n"
-                f"💡 <i>Manuel İşlem Önerisi: Spot piyasadan geri AL, Vadeli LONG pozisyonunu KAPAT!</i>"
-            )
-            telegram_bildir(mesaj)
+            # Hafızayı sıfırla
             arbitraj_pozisyon["aktif"] = False
 
 if __name__ == "__main__":
     print("Binance Spot-Futures Arbitraj Gözlemcisi Başlatıldı...")
     telegram_bildir(
-        f"🛰️ <b>Binance Çift Yönlü Arbitraj Botu Yayında!</b>\n"
+        f"🛰️ <b>Binance Arbitraj Botu Yayında!</b>\n"
         f"Piyasa: {SYMBOL}\n"
-        f"Giriş Eşiği: ±%{GIRIS_MAKAS_YUZDE}\n"
-        f"Çıkış Eşiği: ±%{CIKIS_MAKAS_YUZDE}\n"
+        f"Giriş Eşiği: %{GIRIS_MAKAS_YUZDE}\n"
+        f"Çıkış Eşiği: %{CIKIS_MAKAS_YUZDE}\n"
         f"Sistem 2 saniyede bir çift yönlü fiyatları tarıyor..."
     )
     
@@ -163,4 +128,4 @@ if __name__ == "__main__":
             arbitraj_tarama()
         except Exception as e:
             print(f"Sistem döngü hatası: {e}")
-        time.sleep(LOOP_INTERVAL)
+        time.sleep(LOOP_INTERVAL) bu kod çalışıyor. Bu kod uzerinden devam edelim
