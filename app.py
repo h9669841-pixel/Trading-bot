@@ -12,7 +12,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 # Takip listemizi yüksek makas potansiyeli olan koinlerle genişlettik
 SYMBOLS = ["btcusdt", "ethusdt", "xrpusdt", "arbusdt", "solusdt", "dogeusdt", "pepeusdt", "suiusdt"]
 
-GIRIS_MAKAS_YUZDE = 0.24  # Brüt hedef makas eşiği
+GIRIS_MAKAS_YUZDE = 0.40  # Brüt hedef makas eşiği
 CIKIS_MAKAS_YUZDE = 0.00  # Çıkış makas eşiği (Kâr Al)
 
 # 💰 BAKİYE VE KOMİSYON AYARLARI (Görseldeki değerlere göre % bazında)
