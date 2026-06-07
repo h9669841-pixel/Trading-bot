@@ -15,7 +15,6 @@ BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")
 BINANCE_SECRET_KEY = os.environ.get("BINANCE_SECRET_KEY")
 
 # 🌐 PROXY (STATIK IP) AYARLARI
-# Railway'e eklediğin PROXY_URL değişkenini çeker
 PROXY_URL = os.environ.get("PROXY_URL") 
 
 requests_requests_proxies = None
@@ -23,12 +22,10 @@ binance_client_requests_params = {}
 
 if PROXY_URL:
     print(f"🌐 Statik IP Proxy Aktif Ediliyor: {PROXY_URL}")
-    # requests ve websocket için proxy formatı
     requests_requests_proxies = {
         "http": PROXY_URL,
         "https": PROXY_URL
     }
-    # python-binance kütüphanesinin proxy kullanması için gereken parametre
     binance_client_requests_params = {
         "proxies": requests_requests_proxies
     }
@@ -44,7 +41,7 @@ client = Client(
 GIRIS_MAKAS_YUZDE = 0.80  
 CIKIS_MAKAS_YUZDE = 0.02  
 
-# 💰 BAKİYE AYARLARI (Her işlem için ayrılan nominal büyüklük)
+# 💰 BAKİYE AYARLARI
 SPOT_BAKIYE = 10.0       
 FUTURES_BAKIYE = 10.0    
 
@@ -73,12 +70,17 @@ def get_all_futures_symbols():
     return ["btcusdt", "ethusdt", "solusdt", "xrpusdt"]
 
 def telegram_bildir(mesaj):
+    """
+    🎯 DÜZELTME: Telegram istekleri proxy kullanmadan doğrudan Railway üzerinden gider.
+    Böylece Webshare IP'sinin Telegram tarafından engellenmesi problemi aşılır.
+    """
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print("Telegram değişkenleri eksik!")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": mesaj, "parse_mode": "HTML"}, proxies=requests_requests_proxies, timeout=5)
+        # proxies parametresi kaldırıldı, direkt temiz internetten istek atıyor
+        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": mesaj, "parse_mode": "HTML"}, timeout=5)
     except Exception as e:
         print(f"Telegram hatası: {e}")
 
@@ -96,7 +98,6 @@ def net_kar_hesapla(giris_makas, kapanis_makas):
 # --- 🎯 AKTİF EMİR YÖNETİM MOTORU (API) ---
 
 def execute_arbitrage_entry(symbol, spot_price, futures_price):
-    """Eşzamanlı olarak Spot Alım ve Vadeli Short emri gönderir (Proxy Üzerinden)"""
     coin_label = symbol.upper()
     print(f"⚡ {coin_label} için API Emirleri Gönderiliyor...")
     
@@ -106,9 +107,7 @@ def execute_arbitrage_entry(symbol, spot_price, futures_price):
         spot_quantity = round(SPOT_BAKIYE / spot_price, 4)
         futures_quantity = round(FUTURES_BAKIYE / futures_price, 4)
 
-        # Spot Satın Alım
         spot_order = client.create_order(symbol=coin_label, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=spot_quantity)
-        # Vadeli Short Açılış
         futures_order = client.futures_create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=futures_quantity)
         
         print(f"✅ {coin_label} Giriş Emirleri Borsada Başarıyla Gerçekleşti!")
@@ -120,14 +119,11 @@ def execute_arbitrage_entry(symbol, spot_price, futures_price):
         return False, 0, 0
 
 def execute_arbitrage_exit(symbol, spot_qty, futures_qty):
-    """Eşzamanlı olarak Spottaki malı satar ve Vadeli Shortu kapatır (Proxy Üzerinden)"""
     coin_label = symbol.upper()
     print(f"⚡ {coin_label} Pozisyonu API ile Kapatılıyor...")
     
     try:
-        # Spot Satış
         client.create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=spot_qty)
-        # Vadeli Short Kapatma
         client.futures_create_order(symbol=coin_label, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=futures_qty)
         
         print(f"✅ {coin_label} Pozisyonları Başarıyla Tasfiye Edildi.")
@@ -155,7 +151,6 @@ def start_multi_spot_ws():
     streams = "/".join([f"{symbol}@trade" for symbol in SYMBOLS[:150]])
     url = f"wss://stream.binance.com:9443/stream?streams={streams}"
     
-    # Websocket akışını proxy üzerinden tünelleme ayarları
     ws_kwargs = {}
     if PROXY_URL:
         from urllib.parse import urlparse
@@ -283,7 +278,7 @@ if __name__ == "__main__":
     
     telegram_bildir(
         f"🤖 <b>Tam Otomatik Statik IP Korumalı Robot Başlatıldı!</b>\n\n"
-        f"Tüm ağ istekleri ve borsa emirleri Webshare proxy adresiniz (`198.105.121.200`) üzerinden güvenli şekilde tünelleniyor.\n"
+        f"Giriş barajı %0.80 olarak güncellendi. Tüm ağ istekleri ve borsa emirleri proxy üzerinden tünellenirken, Telegram bildirimleri engelsiz hattan aktarılıyor.\n"
         f"🎯 <b>Giriş Eşiği:</b> +%{GIRIS_MAKAS_YUZDE}"
     )
     
