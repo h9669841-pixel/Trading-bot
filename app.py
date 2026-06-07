@@ -9,8 +9,10 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 # --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
-SYMBOL = "btcusdt"
-GIRIS_MAKAS_YUZDE = 0.06  # Brüt hedef makas eşiği
+# Takip etmek istediğimiz tüm koinleri küçük harfle listeye ekledik
+SYMBOLS = ["btcusdt", "ethusdt", "xrpusdt", "arbusdt"]
+
+GIRIS_MAKAS_YUZDE = 0.30  # Brüt hedef makas eşiği
 CIKIS_MAKAS_YUZDE = 0.05  # Çıkış makas eşiği
 
 # 💰 BAKİYE VE KOMİSYON AYARLARI (Görseldeki değerlere göre % bazında)
@@ -21,17 +23,18 @@ SPOT_FEE_RATE = 0.0750 / 100     # %0.0750 Taker komisyon oranı
 FUTURES_FEE_RATE = 0.0450 / 100  # %0.0450 Taker komisyon oranı
 # ----------------------------------------------
 
-piyasa_verisi = {
-    "spot_price": None,
-    "futures_price": None
-}
+# Tüm koinlerin anlık fiyat hafızası
+piyasa_verisi = {symbol: {"spot_price": None, "futures_price": None} for symbol in SYMBOLS}
 
-arbitraj_pozisyon = {
-    "aktif": False,
-    "yon": None, 
-    "giris_makas": 0.0,
-    "spot_giris_fiyat": 0.0,
-    "futures_giris_fiyat": 0.0
+# Tüm koinlerin bağımsız arbitraj pozisyon hafızası
+arbitraj_pozisyonlari = {
+    symbol: {
+        "aktif": False,
+        "yon": None, 
+        "giris_makas": 0.0,
+        "spot_giris_fiyat": 0.0,
+        "futures_giris_fiyat": 0.0
+    } for symbol in SYMBOLS
 }
 
 def telegram_bildir(mesaj):
@@ -46,119 +49,154 @@ def telegram_bildir(mesaj):
 
 def net_kar_hesapla(giris_makas, cikis_makas):
     """Brüt kârdan, giriş ve çıkıştaki toplam komisyonu düşerek NET kazancı hesaplar"""
-    # 1. Toplam Brüt Kazanç Oranı (Yüzdesel fark)
     brut_oran_farki = abs(giris_makas) - abs(cikis_makas)
-    
-    # 2. Brüt dolar kazancı (Spot ve Vadeli taraftaki fiyat hareketinin toplam getirisi)
-    # Arbitrajda iki bacak da aynı büyüklükte açıldığı için ana bakiye üzerinden brüt kâr:
     brut_kazanc_usdt = SPOT_BAKIYE * (brut_oran_farki / 100)
     
-    # 3. Ödenecek Toplam Komisyonlar (Giriş + Çıkış)
     spot_toplam_komisyon = (SPOT_BAKIYE * SPOT_FEE_RATE) * 2
     futures_toplam_komisyon = (FUTURES_BAKIYE * FUTURES_FEE_RATE) * 2
     toplam_kesinti_usdt = spot_toplam_komisyon + futures_toplam_komisyon
     
-    # 4. Net Kazanç
     net_kazanc_usdt = brut_kazanc_usdt - toplam_kesinti_usdt
     return brut_kazanc_usdt, toplam_kesinti_usdt, net_kazanc_usdt
 
-# --- 🌐 WEBSOCKET AKIŞLARI ---
-def start_spot_ws():
+# --- 🌐 ÇOKLU WEBSOCKET AKIŞLARI ---
+
+def start_multi_spot_ws():
+    """Tüm koinlerin Spot fiyatlarını tek tünelden çeker"""
     def on_message(ws, message):
         data = json.loads(message)
-        piyasa_verisi["spot_price"] = float(data.get("p", 0))
-    def on_error(ws, error): print(f"Spot WS Hatası: {error}")
+        # Çoklu akışlarda (Combined Stream) gelen veri yapısı farklıdır
+        stream_name = data.get("stream", "")
+        event_data = data.get("data", {})
+        
+        for symbol in SYMBOLS:
+            if symbol in stream_name:
+                piyasa_verisi[symbol]["spot_price"] = float(event_data.get("p", 0))
+
+    def on_error(ws, error): print(f"Multi-Spot WS Hatası: {error}")
     def on_close(ws, c_code, c_msg):
-        time.sleep(5); start_spot_ws()
-    url = f"wss://stream.binance.com:9443/ws/{SYMBOL}@trade"
+        time.sleep(5); start_multi_spot_ws()
+
+    # Tüm koinleri tek tünelde birleştiriyoruz
+    streams = "/".join([f"{symbol}@trade" for symbol in SYMBOLS])
+    url = f"wss://stream.binance.com:9443/stream?streams={streams}"
     WebSocketApp(url, on_message=on_message, on_error=on_error, on_close=on_close).run_forever()
 
-def start_futures_ws():
+def start_multi_futures_ws():
+    """Tüm koinlerin Vadeli fiyatlarını tek tünelden çeker"""
     def on_message(ws, message):
         data = json.loads(message)
-        piyasa_verisi["futures_price"] = float(data.get("p", 0))
-    def on_error(ws, error): print(f"Futures WS Hatası: {error}")
+        stream_name = data.get("stream", "")
+        event_data = data.get("data", {})
+        
+        for symbol in SYMBOLS:
+            if symbol in stream_name:
+                piyasa_verisi[symbol]["futures_price"] = float(event_data.get("p", 0))
+
+    def on_error(ws, error): print(f"Multi-Futures WS Hatası: {error}")
     def on_close(ws, c_code, c_msg):
-        time.sleep(5); start_futures_ws()
-    url = f"wss://fstream.binance.com/ws/{SYMBOL}@trade"
+        time.sleep(5); start_multi_futures_ws()
+
+    streams = "/".join([f"{symbol}@trade" for symbol in SYMBOLS])
+    url = f"wss://fstream.binance.com/stream?streams={streams}"
     WebSocketApp(url, on_message=on_message, on_error=on_error, on_close=on_close).run_forever()
 
-# --- 🧠 ANALİZ MOTORU ---
+# --- 🧠 ÇOKLU ANALİZ MOTORU ---
+
 def arbitraj_tarama_dongusu():
-    global arbitraj_pozisyon
-    print("Arbitraj Analiz Motoru komisyon filtreleriyle çalışıyor...")
+    global arbitraj_pozisyonlari
+    print(f"Arbitraj Analiz Motoru {len(SYMBOLS)} koin için başlatıldı...")
     
     while True:
         try:
-            spot_fiyat = piyasa_verisi["spot_price"]
-            futures_fiyat = piyasa_verisi["futures_price"]
-            
-            if not spot_fiyat or not futures_fiyat:
-                time.sleep(1)
-                continue
+            for symbol in SYMBOLS:
+                spot_fiyat = piyasa_verisi[symbol]["spot_price"]
+                futures_fiyat = piyasa_verisi[symbol]["futures_price"]
+                
+                # Koinlerden herhangi birinin verisi henüz gelmediyse o adımı atla
+                if not spot_fiyat or not futures_fiyat:
+                    continue
 
-            anlik_makas = ((futures_fiyat - spot_fiyat) / spot_fiyat) * 100
-            print(f"⏱️ Spot: {spot_fiyat:.2f} | Futures: {futures_fiyat:.2f} | Makas: %{anlik_makas:.4f}")
+                anlik_makas = ((futures_fiyat - spot_fiyat) / spot_fiyat) * 100
+                coin_label = symbol.upper().replace("USDT", "")
+                
+                # Konsolda hangi koinin ne durumda olduğunu temizce listeler
+                print(f"⏱️ [{coin_label}] Spot: {spot_fiyat:.4f} | Futures: {futures_fiyat:.4f} | Makas: %{anlik_makas:.4f}")
 
-            if not arbitraj_pozisyon["aktif"]:
-                # 🟢 GİRİŞ KONTROLLERİ
-                if anlik_makas >= GIRIS_MAKAS_YUZDE or anlik_makas <= -GIRIS_MAKAS_YUZDE:
-                    yon = "ARTI" if anlik_makas >= GIRIS_MAKAS_YUZDE else "EKSI"
-                    arbitraj_pozisyon.update({
-                        "aktif": True,
-                        "yon": yon,
-                        "giris_makas": anlik_makas,
-                        "spot_giris_fiyat": spot_fiyat,
-                        "futures_gener_fiyat": futures_fiyat
-                    })
-                    
-                    # Girişte tahmini hesaplama yapıyoruz (Pozisyon CIKIS_MAKAS_YUZDE'de kapanırsa ne kalacak?)
-                    brut, kesinti, net = net_kar_hesapla(anlik_makas, CIKIS_MAKAS_YUZDE if yon == "ARTI" else -CIKIS_MAKAS_YUZDE)
-                    
-                    baslik = "🚀 POZİTİF ARBİTRAJ" if yon == "ARTI" else "📉 NEGATİF ARBİTRAJ"
-                    oneri = "Spot AL, Vadeli SHORT aç!" if yon == "ARTI" else "Spot SAT, Vadeli LONG aç!"
-                    
-                    mesaj = (
-                        f"💥 <b>{baslik} FIRSATI!</b>\n\n"
-                        f"📊 <b>Parite:</b> {SYMBOL.upper()}\n"
-                        f"⚡ <b>Giriş Makası:</b> %{anlik_makas:.4f}\n"
-                        f"💰 <b>Hedef Büyüklüğü:</b> {SPOT_BAKIYE}$ Spot + {FUTURES_BAKIYE}$ Vadeli\n\n"
-                        f"💵 <b>Tahmini Brüt Kazanç:</b> {brut:.2f} USDT\n"
-                        f"✂️ <b>Toplam Komisyon Kesintisi:</b> {kesinti:.2f} USDT\n"
-                        f"💵 <b>💵 NET CEBE KALACAK:</b> <b>{net:.2f} USDT</b>\n\n"
-                        f"💡 <i>{oneri}</i>"
-                    )
-                    telegram_bildir(mesaj)
-                    
-            else:
-                # 🔴 ÇIKIŞ KONTROLLERİ
-                pozisyon_kapandi = False
-                if arbitraj_pozisyon["yon"] == "ARTI" and anlik_makas <= CIKIS_MAKAS_YUZDE:
-                    pozisyon_kapandi = True
-                elif arbitraj_pozisyon["yon"] == "EKSI" and anlik_makas >= -CIKIS_MAKAS_YUZDE:
-                    pozisyon_kapandi = True
-                    
-                if pozisyon_kapandi:
-                    brut, kesinti, net = net_kar_hesapla(arbitraj_pozisyon["giris_makas"], anlik_makas)
-                    
-                    mesaj = (
-                        f"🤝 <b>🔒 ARBİTRAJ POZİSYONU KAPANDI</b>\n\n"
-                        f"📊 <b>Parite:</b> {SYMBOL.upper()}\n"
-                        f"📉 <b>Kapanış Makası:</b> %{anlik_makas:.4f}\n\n"
-                        f"💰 <b>Gerçekleşen Brüt Kâr:</b> {brut:.2f} USDT\n"
-                        f"✂️ <b>Ödenen Toplam Komisyon:</b> {kesinti:.2f} USDT\n"
-                        f"🎉 <b>NET TEMİZ KÂR:</b> <b>{net:.2f} USDT</b>"
-                    )
-                    telegram_bildir(mesaj)
-                    arbitraj_pozisyon["aktif"] = False
+                pos = arbitraj_pozisyonlari[symbol]
+
+                if not pos["aktif"]:
+                    # 🟢 GİRİŞ KONTROLLERİ
+                    if anlik_makas >= GIRIS_MAKAS_YUZDE or anlik_makas <= -GIRIS_MAKAS_YUZDE:
+                        yon = "ARTI" if anlik_makas >= GIRIS_MAKAS_YUZDE else "EKSI"
+                        pos.update({
+                            "aktif": True,
+                            "yon": yon,
+                            "giris_makas": anlik_makas,
+                            "spot_giris_fiyat": spot_fiyat,
+                            "futures_giris_fiyat": futures_fiyat
+                        })
+                        
+                        brut, kesinti, net = net_kar_hesapla(anlik_makas, CIKIS_MAKAS_YUZDE if yon == "ARTI" else -CIKIS_MAKAS_YUZDE)
+                        
+                        baslik = "🚀 POZİTİF ARBİTRAJ" if yon == "ARTI" else "📉 NEGATİF ARBİTRAJ"
+                        oneri = f"{coin_label} Spot AL, Vadeli SHORT aç!" if yon == "ARTI" else f"{coin_label} Spot SAT, Vadeli LONG aç!"
+                        
+                        mesaj = (
+                            f"💥 <b>{baslik} FIRSATI YAKALANDI!</b>\n\n"
+                            f"📊 <b>Koin:</b> {coin_label}/USDT\n"
+                            f"⚡ <b>Giriş Makası:</b> %{anlik_makas:.4f}\n"
+                            f"💰 <b>İşlem Büyüklüğü:</b> {SPOT_BAKIYE}$ + {FUTURES_BAKIYE}$\n\n"
+                            f"💵 <b>Tahmini Brüt Kazanç:</b> {brut:.2f} USDT\n"
+                            f"✂️ <b>Toplam Komisyon:</b> {kesinti:.2f} USDT\n"
+                            f"🎉 <b>NET CEBE KALACAK:</b> <b>{net:.2f} USDT</b>\n\n"
+                            f"💡 <i>{oneri}</i>"
+                        )
+                        telegram_bildir(mesaj)
+                        
+                else:
+                    # 🔴 ÇIŞIŞ KONTROLLERİ
+                    pozisyon_kapandi = False
+                    if pos["yon"] == "ARTI" and anlik_makas <= CIKIS_MAKAS_YUZDE:
+                        pozisyon_kapandi = True
+                    elif pos["yon"] == "EKSI" and anlik_makas >= -CIKIS_MAKAS_YUZDE:
+                        pozisyon_kapandi = True
+                        
+                    if pozisyon_kapandi:
+                        brut, kesinti, net = net_kar_hesapla(pos["giris_makas"], anlik_makas)
+                        
+                        mesaj = (
+                            f"🤝 <b>🔒 {coin_label} ARBİTRAJ POZİSYONU KAPANDI</b>\n\n"
+                            f"📊 <b>Koin:</b> {coin_label}/USDT\n"
+                            f"📉 <b>Kapanış Makası:</b> %{anlik_makas:.4f}\n\n"
+                            f"💰 <b>Brüt Kâr:</b> {brut:.2f} USDT\n"
+                            f"✂️ <b>Komisyon Kesintisi:</b> {kesinti:.2f} USDT\n"
+                            f"🎉 <b>NET TEMİZ KÂR:</b> <b>{net:.2f} USDT</b>"
+                        )
+                        telegram_bildir(mesaj)
+                        pos["aktif"] = False
 
         except Exception as e:
-            print(f"Analiz motoru hatası: {e}")
-        time.sleep(2)
+            print(f"Analiz motoru çoklu tarama hatası: {e}")
+            
+        time.sleep(2)  # Log akış hızı ve işlemciyi yormamak için ideal süre
 
 if __name__ == "__main__":
-    spot_thread = threading.Thread(target=start_spot_ws, daemon=True)
-    futures_thread = threading.Thread(target=start_futures_ws, daemon=True)
+    print("Çoklu Koin Websocket Arbitraj Botu Başlatılıyor...")
+    
+    telegram_bildir(
+        f"🛰️ <b>Çoklu Arbitraj Avcısı Aktif!</b>\n"
+        f"📋 <b>Takip Listesi:</b> BTC, ETH, XRP, ARB\n"
+        f"🎯 <b>Giriş Eşiği:</b> ±%{GIRIS_MAKAS_YUZDE}\n"
+        f"Sistem tüm koinleri tek tünelden sıfır ban riskiyle tarıyor."
+    )
+    
+    # Arka plan iş parçacıklarını (Thread) başlatıyoruz
+    spot_thread = threading.Thread(target=start_multi_spot_ws, daemon=True)
+    futures_thread = threading.Thread(target=start_multi_futures_ws, daemon=True)
+    
     spot_thread.start()
     futures_thread.start()
+    
+    # Ana döngüyü başlat
     arbitraj_tarama_dongusu()
