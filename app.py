@@ -10,7 +10,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 # --- 📊 ARBİTRAJ STRATEJİ AYARLARI ---
 SYMBOL = "btcusdt"        # Websocket için küçük harf olmalıdır
-GIRIS_MAKAS_YUZDE = 0.06  # Vadeli fiyat, Spottan %0.30 veya daha fazla uzaklaşırsa (+ veya -) sinyal ver
+GIRIS_MAKAS_YUZDE = 0.6  # Vadeli fiyat, Spottan %0.30 veya daha fazla uzaklaşırsa (+ veya -) sinyal ver
 CIKIS_MAKAS_YUZDE = 0.05  # Makas normale döndüğünde çıkış sinyali ver
 # -------------------------------------
 
