@@ -9,7 +9,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 SYMBOL = "BTCUSDT"
 GIRIS_MAKAS_YUZDE = 0.30  # Vadeli fiyat, Spottan %0.30 veya daha fazla pahalıysa sinyal ver
 CIKIS_MAKAS_YUZDE = 0.05  # Makas %0.05'e düştüğünde (kapandığında) karı al/çıkış sinyali ver
-LOOP_INTERVAL = 2         # Piyasayı kaç saniyede bir tarasın? (Canlı takip için 2 saniye idealdir)
+LOOP_INTERVAL = 4         # Piyasayı kaç saniyede bir tarasın? (Canlı takip için 2 saniye idealdir)
 # -------------------------------------
 
 # Binance API Adresleri
