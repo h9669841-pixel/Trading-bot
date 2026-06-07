@@ -9,15 +9,15 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 # --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
-# Takip listemizi yüksek makas potansiyeli olan koinlerle genişlettik
-SYMBOLS = ["btcusdt", "ethusdt", "xrpusdt", "arbusdt", "solusdt", "dogeusdt", "pepeusdt", "suiusdt"]
+# İstediğin ZEC ve WLD koinleri de listeye dahil edildi (SOL zaten mevcut)
+SYMBOLS = ["btcusdt", "ethusdt", "xrpusdt", "arbusdt", "solusdt", "dogeusdt", "pepeusdt", "suiusdt", "zecusdt", "wldusdt"]
 
-GIRIS_MAKAS_YUZDE = 0.40  # Brüt hedef makas eşiği
-CIKIS_MAKAS_YUZDE = 0.00  # Çıkış makas eşiği (Kâr Al)
+GIRIS_MAKAS_YUZDE = 0.30  # Brüt hedef makas eşiği
+CIKIS_MAKAS_YUZDE = 0.02  # ⚠️ Küçük bakiye için çıkış eşiğini %0.02'ye çekerek net kârı artırdık!
 
-# 💰 BAKİYE VE KOMİSYON AYARLARI (Görseldeki değerlere göre % bazında)
-SPOT_BAKIYE = 1000.0       # Giriş yapılacak Spot bütçesi (USDT)
-FUTURES_BAKIYE = 1000.0    # Giriş yapılacak Vadeli bütçesi (USDT)
+# 💰 GÜNCELLENEN BAKİYE VE KOMİSYON AYARLARI (100$ + 100$)
+SPOT_BAKIYE = 100.0       # Giriş yapılacak Spot bütçesi (USDT)
+FUTURES_BAKIYE = 100.0    # Giriş yapılacak Vadeli bütçesi (USDT)
 
 SPOT_FEE_RATE = 0.0750 / 100     # %0.0750 Taker komisyon oranı
 FUTURES_FEE_RATE = 0.0450 / 100  # %0.0450 Taker komisyon oranı
@@ -43,7 +43,7 @@ def telegram_bildir(mesaj):
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": mesaj, "parse_mode": "HTML"}, timeout=5)
+        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}, timeout=5)
     except Exception as e:
         print(f"Telegram hatası: {e}")
 
@@ -52,6 +52,7 @@ def net_kar_hesapla(giris_makas, cikis_makas):
     brut_oran_farki = abs(giris_makas) - abs(cikis_makas)
     brut_kazanc_usdt = SPOT_BAKIYE * (brut_oran_farki / 100)
     
+    # 100$ + 100$ bütçede giriş+çıkış toplam komisyon sabit 0.24 USDT tutacaktır.
     spot_toplam_komisyon = (SPOT_BAKIYE * SPOT_FEE_RATE) * 2
     futures_toplam_komisyon = (FUTURES_BAKIYE * FUTURES_FEE_RATE) * 2
     toplam_kesinti_usdt = spot_toplam_komisyon + futures_toplam_komisyon
@@ -62,7 +63,6 @@ def net_kar_hesapla(giris_makas, cikis_makas):
 # --- 🌐 ÇOKLU WEBSOCKET AKIŞLARI (COMBINED STREAM) ---
 
 def start_multi_spot_ws():
-    """Tüm koinlerin Spot fiyatlarını tek tünelden çeker"""
     def on_message(ws, message):
         data = json.loads(message)
         stream_name = data.get("stream", "")
@@ -81,7 +81,6 @@ def start_multi_spot_ws():
     WebSocketApp(url, on_message=on_message, on_error=on_error, on_close=on_close).run_forever()
 
 def start_multi_futures_ws():
-    """Tüm koinlerin Vadeli fiyatlarını tek tünelden çeker"""
     def on_message(ws, message):
         data = json.loads(message)
         stream_name = data.get("stream", "")
@@ -117,13 +116,13 @@ def arbitraj_tarama_dongusu():
                 anlik_makas = ((futures_fiyat - spot_fiyat) / spot_fiyat) * 100
                 coin_label = symbol.upper().replace("USDT", "")
                 
-                # Konsolda tüm yeni koinlerin durumunu anlık listeler
+                # Konsolda tüm koinleri alt alta temizce takip edebilirsin
                 print(f"⏱️ [{coin_label}] Spot: {spot_fiyat:.4f} | Futures: {futures_fiyat:.4f} | Makas: %{anlik_makas:.4f}")
 
                 pos = arbitraj_pozisyonlari[symbol]
 
                 if not pos["aktif"]:
-                    # 🟢 GİRİŞ KONTROLLERİ (Hem + hem - yön için)
+                    # 🟢 GİRİŞ KONTROLLERİ
                     if anlik_makas >= GIRIS_MAKAS_YUZDE or anlik_makas <= -GIRIS_MAKAS_YUZDE:
                         yon = "ARTI" if anlik_makas >= GIRIS_MAKAS_YUZDE else "EKSI"
                         pos.update({
@@ -134,6 +133,7 @@ def arbitraj_tarama_dongusu():
                             "futures_giris_fiyat": futures_fiyat
                         })
                         
+                        # Hedeflenen çıkışa göre komisyonu düşüp NET kârı hesaplar
                         brut, kesinti, net = net_kar_hesapla(anlik_makas, CIKIS_MAKAS_YUZDE if yon == "ARTI" else -CIKIS_MAKAS_YUZDE)
                         
                         baslik = "🚀 POZİTİF ARBİTRAJ" if yon == "ARTI" else "📉 NEGATİF ARBİTRAJ"
@@ -144,9 +144,9 @@ def arbitraj_tarama_dongusu():
                             f"📊 <b>Koin:</b> {coin_label}/USDT\n"
                             f"⚡ <b>Giriş Makası:</b> %{anlik_makas:.4f}\n"
                             f"💰 <b>İşlem Büyüklüğü:</b> {SPOT_BAKIYE}$ + {FUTURES_BAKIYE}$\n\n"
-                            f"💵 <b>Tahmini Brüt Kazanç:</b> {brut:.2f} USDT\n"
-                            f"✂️ <b>Toplam Komisyon:</b> {kesinti:.2f} USDT\n"
-                            f"🎉 <b>NET CEBE KALACAK:</b> <b>{net:.2f} USDT</b>\n\n"
+                            f"💵 <b>Tahmini Brüt Kazanç:</b> {brut:.4f} USDT\n"
+                            f"✂️ <b>Toplam Komisyon:</b> {kesinti:.4f} USDT\n"
+                            f"🎉 <b>NET CEBE KALACAK:</b> <b>{net:.4f} USDT</b>\n\n"
                             f"💡 <i>{oneri}</i>"
                         )
                         telegram_bildir(mesaj)
@@ -166,9 +166,9 @@ def arbitraj_tarama_dongusu():
                             f"🤝 <b>🔒 {coin_label} ARBİTRAJ POZİSYONU KAPANDI</b>\n\n"
                             f"📊 <b>Koin:</b> {coin_label}/USDT\n"
                             f"📉 <b>Kapanış Makası:</b> %{anlik_makas:.4f}\n\n"
-                            f"💰 <b>Brüt Kâr:</b> {brut:.2f} USDT\n"
-                            f"✂️ <b>Komisyon Kesintisi:</b> {kesinti:.2f} USDT\n"
-                            f"🎉 <b>NET TEMİZ KÂR:</b> <b>{net:.2f} USDT</b>"
+                            f"💰 <b>Brüt Kâr:</b> {brut:.4f} USDT\n"
+                            f"✂️ <b>Komisyon Kesintisi:</b> {kesinti:.4f} USDT\n"
+                            f"🎉 <b>NET TEMİZ KÂR:</b> <b>{net:.4f} USDT</b>"
                         )
                         telegram_bildir(mesaj)
                         pos["aktif"] = False
@@ -179,15 +179,14 @@ def arbitraj_tarama_dongusu():
         time.sleep(2)
 
 if __name__ == "__main__":
-    print("Genişletilmiş Çoklu Koin Websocket Arbitraj Botu Başlatılıyor...")
+    print("Çoklu Koin Websocket Arbitraj Botu Başlatılıyor...")
     
-    # Telegram başlangıç mesajında yeni listeyi gösteriyoruz
     koin_listesi_str = ", ".join([coin.upper().replace("USDT", "") for coin in SYMBOLS])
     telegram_bildir(
-        f"🛰️ <b>Genişletilmiş Arbitraj Avcısı Yayında!</b>\n"
-        f"📋 <b>Takip Listesi:</b> {koin_listesi_str}\n"
-        f"🎯 <b>Giriş Eşiği:</b> ±%{GIRIS_MAKAS_YUZDE}\n"
-        f"Sistem 8 koin için tek tünelden akışı başlattı."
+        f"🛰️ <b>Arbitraj Avcısı Yeni Koinlerle Yayında!</b>\n"
+        f"📋 <b>Yeni Liste:</b> {koin_listesi_str}\n"
+        f"💰 <b>Test Bakiyesi:</b> 100$ + 100$\n"
+        f"🎯 <b>Giriş Eşiği:</b> ±%{GIRIS_MAKAS_YUZDE}"
     )
     
     spot_thread = threading.Thread(target=start_multi_spot_ws, daemon=True)
