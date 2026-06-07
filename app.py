@@ -9,8 +9,8 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 # --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
-GIRIS_MAKAS_YUZDE = 1.99  # Sinyal tetiklenecek brüt makas eşiği
-CIKIS_MAKAS_YUZDE = 0.02  # Pozisyon kapandı sayılacak çıkış eşiği
+GIRIS_MAKAS_YUZDE = 0.6  # Sinyal tetiklenecek brüt makas eşiği
+CIKIS_MAKAS_YUZDE = 0.002  # Pozisyon kapandı sayılacak çıkış eşiği
 
 # 💰 BAKİYE VE KOMİSYON AYARLARI (100$ + 100$)
 SPOT_BAKIYE = 100.0       
