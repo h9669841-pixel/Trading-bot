@@ -3,46 +3,59 @@ import json
 import time
 import requests
 import threading
+import traceback
+import socket  # 🎯 Python'ın yerel soket kütüphanesi
 from binance.client import Client
 from binance.enums import *
+from binance.exceptions import BinanceAPIException
 from websocket import WebSocketApp
 
+# --- 🌐 GLOBAL SOCKS5 ENJEKSİYONU (ÇEKİRDEK SEVİYESİNDE) ---
+PROXY_URL = os.environ.get("PROXY_URL") 
+
+if PROXY_URL:
+    try:
+        import socks
+        from urllib.parse import urlparse
+        
+        parsed_proxy = urlparse(PROXY_URL)
+        proxy_host = parsed_proxy.hostname
+        proxy_port = parsed_proxy.port
+        proxy_user = parsed_proxy.username
+        proxy_pass = parsed_proxy.password
+
+        print(f"🌐 SOCKS5 Protokolü Çekirdeğe Enjekte Ediliyor: {proxy_host}:{proxy_port}")
+        
+        # Python'ın tüm soket trafiğini (REST ve WS) global olarak SOCKS5 proxy'sine gömüyoruz.
+        # Bu yöntem DNS sızıntılarını (DNS Leak) önler ve Binance engellerini aşar.
+        socks.set_default_proxy(
+            socks.SOCKS5, 
+            addr=proxy_host, 
+            port=proxy_port, 
+            username=proxy_user, 
+            password=proxy_pass,
+            rdns=True # DNS sorgularını da proxy üzerinden güvenli çözümler
+        )
+        socket.socket = socks.socksocket # Tüm sistemi SOCKS5 soketine yamala
+        
+    except ImportError:
+        print("❌ HATA: SOCKS5 aktif edilemedi. Lütfen terminalde 'pip install PySocks' çalıştırın.")
+
 # --- 🔑 GÜVENLİK VE API AYARLARI ---
+# Sistem soketini küresel olarak proxy'ye bağladığımız için ek 'requests_params' gerekmez.
+BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")
+BINANCE_SECRET_KEY = os.environ.get("BINANCE_SECRET_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")
-BINANCE_SECRET_KEY = os.environ.get("BINANCE_SECRET_KEY")
-
-# 🌐 PROXY (SOCKS5 STATIK IP) AYARLARI
-PROXY_URL = os.environ.get("PROXY_URL") 
-
-requests_requests_proxies = None
-binance_client_requests_params = {}
-
-if PROXY_URL:
-    print(f"🌐 SOCKS5 Statik IP Proxy Aktif Ediliyor: {PROXY_URL}")
-    requests_requests_proxies = {
-        "http": PROXY_URL,
-        "https": PROXY_URL
-    }
-    binance_client_requests_params = {
-        "proxies": requests_requests_proxies
-    }
-
-# Binance API İstemcisi SOCKS5 Desteğiyle Başlatılıyor
-client = Client(
-    BINANCE_API_KEY, 
-    BINANCE_SECRET_KEY, 
-    requests_params=binance_client_requests_params
-)
+client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY)
 
 # --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
 GIRIS_MAKAS_YUZDE = 0.41  
 CIKIS_MAKAS_YUZDE = 0.02  
 
-SPOT_BAKIYE = 10.0       
-FUTURES_BAKIYE = 10.0    
+SPOT_BAKIYE = 15.0       # 🎯 Binance minimum emir limitine (MIN_NOTIONAL) takılmamak için 15 USDT yapıldı
+FUTURES_BAKIYE = 15.0    
 
 SPOT_FEE_RATE = 0.0750 / 100     
 FUTURES_FEE_RATE = 0.0450 / 100  
@@ -54,8 +67,9 @@ arbitraj_pozisyonlari = {}
 
 def get_all_futures_symbols():
     try:
+        # Bu istek otomatik olarak SOCKS5 üzerinden gider
         url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
-        r = requests.get(url, proxies=requests_requests_proxies, timeout=10)
+        r = requests.get(url, timeout=10)
         if r.status_code == 200:
             data = r.json()
             symbols = []
@@ -64,18 +78,30 @@ def get_all_futures_symbols():
                     symbols.append(market.get("symbol").lower())
             return symbols
     except Exception as e:
-        print(f"Koin listesi çekilirken hata oluştu: {e}")
+        print(f"❌ Koin listesi çekilirken hata oluştu: {e}")
+        traceback.print_exc()
     return ["btcusdt", "ethusdt", "solusdt", "xrpusdt"]
+
+def set_all_leverages():
+    print("⏳ Tüm sembollerin kaldıracı 1x olarak ayarlanıyor...")
+    for symbol in SYMBOLS[:150]:
+        try:
+            client.futures_change_leverage(symbol=symbol.upper(), leverage=1)
+            time.sleep(0.1) # Rate limit koruması
+        except BinanceAPIException as b_err:
+            print(f"⚠️ {symbol.upper()} kaldıraç değiştirilemedi: {b_err.message}")
+        except Exception as e:
+            print(f"❌ Kaldıraç ayar hatası ({symbol.upper()}): {e}")
 
 def telegram_bildir(mesaj):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram değişkenleri eksik!")
+        print(f"📢 [Telegram Değişkenleri Eksik] -> {mesaj}")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
         requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": mesaj, "parse_mode": "HTML"}, timeout=5)
     except Exception as e:
-        print(f"Telegram hatası: {e}")
+        print(f"❌ Telegram hatası: {e}")
 
 def net_kar_hesapla(giris_makas, kapanis_makas):
     brut_oran_farki = giris_makas - kapanis_makas
@@ -90,15 +116,23 @@ def net_kar_hesapla(giris_makas, kapanis_makas):
 def execute_arbitrage_entry(symbol, spot_price, futures_price):
     coin_label = symbol.upper()
     try:
-        client.futures_change_leverage(symbol=coin_label, leverage=1)
         spot_quantity = round(SPOT_BAKIYE / spot_price, 4)
         futures_quantity = round(FUTURES_BAKIYE / futures_price, 4)
 
+        # Emirler ardı ardına asenkron hıza yakın şekilde fırlatılır
         spot_order = client.create_order(symbol=coin_label, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=spot_quantity)
         futures_order = client.futures_create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=futures_quantity)
         return True, spot_quantity, futures_quantity
+    except BinanceAPIException as e:
+        err_msg = f"❌ <b>{coin_label} BORSASAL GİRİŞ HATASI:</b>\nKod: {e.code}\nMesaj: {e.message}"
+        print(err_msg)
+        traceback.print_exc()
+        telegram_bildir(err_msg)
+        return False, 0, 0
     except Exception as e:
-        err_msg = f"❌ {coin_label} GİRİŞ EMİR HATASI: {e}"
+        err_msg = f"❌ {coin_label} SİSTEMSEL GİRİŞ HATASI: {e}"
+        print(err_msg)
+        traceback.print_exc()
         telegram_bildir(err_msg)
         return False, 0, 0
 
@@ -108,8 +142,16 @@ def execute_arbitrage_exit(symbol, spot_qty, futures_qty):
         client.create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=spot_qty)
         client.futures_create_order(symbol=coin_label, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=futures_qty)
         return True
+    except BinanceAPIException as e:
+        err_msg = f"❌ <b>{coin_label} BORSASAL ÇIKIŞ HATASI (BACAK AÇIK KALDI!):</b>\nKod: {e.code}\nMesaj: {e.message}"
+        print(err_msg)
+        traceback.print_exc()
+        telegram_bildir(err_msg)
+        return False
     except Exception as e:
-        err_msg = f"❌ {coin_label} ÇIKIŞ EMİR HATASI: {e}"
+        err_msg = f"❌ {coin_label} SİSTEMSEL ÇIKIŞ HATASI: {e}"
+        print(err_msg)
+        traceback.print_exc()
         telegram_bildir(err_msg)
         return False
 
@@ -121,24 +163,20 @@ def start_multi_spot_ws():
         if symbol in piyasa_verisi:
             piyasa_verisi[symbol]["spot_price"] = float(data.get("data", {}).get("p", 0))
 
-    def on_error(ws, error): print(f"Global Spot WS Hatası: {error}")
-    def on_close(ws, c_code, c_msg): time.sleep(5); start_multi_spot_ws()
+    def on_error(ws, error): 
+        print(f"❌ Global Spot WS Hatası: {error}")
+        traceback.print_exc()
+        
+    def on_close(ws, c_code, c_msg): 
+        print(f"🔄 Spot WS kapandı. 5 saniye sonra yeniden bağlanıyor...")
+        time.sleep(5)
+        start_multi_spot_ws()
 
     streams = "/".join([f"{symbol}@trade" for symbol in SYMBOLS[:150]])
     url = f"wss://stream.binance.com:9443/stream?streams={streams}"
     
-    ws_kwargs = {}
-    if PROXY_URL:
-        from urllib.parse import urlparse
-        parsed_proxy = urlparse(PROXY_URL)
-        ws_kwargs = {
-            "http_proxy_host": parsed_proxy.hostname,
-            "http_proxy_port": parsed_proxy.port,
-            "http_proxy_auth": (parsed_proxy.username, parsed_proxy.password) if parsed_proxy.username else None,
-            "proxy_type": "socks5"  # 🎯 SOCKS5 protokolü zorunlu kılındı
-        }
-        
-    WebSocketApp(url, on_message=on_message, on_error=on_error, on_close=on_close).run_forever(**ws_kwargs)
+    # 🎯 Sistem soketi SOCKS5'e yamandığı için ekstra argümana ihtiyaç kalmadı.
+    WebSocketApp(url, on_message=on_message, on_error=on_error, on_close=on_close).run_forever()
 
 def start_multi_futures_ws():
     def on_message(ws, message):
@@ -147,24 +185,20 @@ def start_multi_futures_ws():
         if symbol in piyasa_verisi:
             piyasa_verisi[symbol]["futures_price"] = float(data.get("data", {}).get("p", 0))
 
-    def on_error(ws, error): print(f"Global Futures WS Hatası: {error}")
-    def on_close(ws, c_code, c_msg): time.sleep(5); start_multi_futures_ws()
+    def on_error(ws, error): 
+        print(f"❌ Global Futures WS Hatası: {error}")
+        traceback.print_exc()
+        
+    def on_close(ws, c_code, c_msg): 
+        print(f"🔄 Futures WS kapandı. 5 saniye sonra yeniden bağlanıyor...")
+        time.sleep(5)
+        start_multi_futures_ws()
 
     streams = "/".join([f"{symbol}@trade" for symbol in SYMBOLS[:150]])
     url = f"wss://fstream.binance.com/stream?streams={streams}"
     
-    ws_kwargs = {}
-    if PROXY_URL:
-        from urllib.parse import urlparse
-        parsed_proxy = urlparse(PROXY_URL)
-        ws_kwargs = {
-            "http_proxy_host": parsed_proxy.hostname,
-            "http_proxy_port": parsed_proxy.port,
-            "http_proxy_auth": (parsed_proxy.username, parsed_proxy.password) if parsed_proxy.username else None,
-            "proxy_type": "socks5"  # 🎯 SOCKS5 protokolü zorunlu kılındı
-        }
-        
-    WebSocketApp(url, on_message=on_message, on_error=on_error, on_close=on_close).run_forever(**ws_kwargs)
+    # 🎯 Sistem soketi SOCKS5'e yamandığı için ekstra argümana ihtiyaç kalmadı.
+    WebSocketApp(url, on_message=on_message, on_error=on_error, on_close=on_close).run_forever()
 
 def arbitraj_tarama_dongusu():
     global arbitraj_pozisyonlari
@@ -191,7 +225,7 @@ def arbitraj_tarama_dongusu():
                         basarili, s_qty, f_qty = execute_arbitrage_entry(symbol, spot_fiyat, futures_fiyat)
                         if basarili:
                             pos.update({"aktif": True, "giris_makas": anlik_makas, "spot_adet": s_qty, "futures_adet": f_qty})
-                            telegram_bildir(f"🤖 <b>İŞLEME GİRİLDİ</b>\n\n📊 <b>Koin:</b> {coin_label}\n⚡ <b>Makas:</b> +%{anlik_makas:.4f}\n💵 <b>Net Kâr:</b> {net:.4f} USDT")
+                            telegram_bildir(f"🤖 <b>İŞLEME GİRİLDİ</b>\n\n📊 <b>Koin:</b> {coin_label}\n⚡ <b>Makas:</b> +%{anlik_makas:.4f}\n💵 <b>Tahmini Net Kâr:</b> {net:.4f} USDT")
                 else:
                     if anlik_makas <= CIKIS_MAKAS_YUZDE:
                         if execute_arbitrage_exit(symbol, pos["spot_adet"], pos["futures_adet"]):
@@ -205,7 +239,8 @@ def arbitraj_tarama_dongusu():
                 for i, item in enumerate(en_yuksek_makaslar[:3]):
                     print(f"{i+1}. [{item[0]}] +%{item[1]:.4f} | Sp: {item[2]} | Fu: {item[3]}")
         except Exception as e:
-            print(f"Döngü hatası: {e}")
+            print(f"❌ Döngü hatası: {e}")
+            traceback.print_exc()
         time.sleep(2)
 
 if __name__ == "__main__":
@@ -213,7 +248,10 @@ if __name__ == "__main__":
     piyasa_verisi = {symbol: {"spot_price": None, "futures_price": None} for symbol in SYMBOLS}
     arbitraj_pozisyonlari = {symbol: {"aktif": False, "giris_makas": 0.0, "spot_adet": 0.0, "futures_adet": 0.0} for symbol in SYMBOLS}
     
-    telegram_bildir(f"🤖 <b>SOCKS5 Destekli Robot Başlatıldı!</b>\n🎯 <b>Giriş Eşiği:</b> +%{GIRIS_MAKAS_YUZDE}")
+    # Kaldıraç ayarları başlangıçta bir kez yapılır
+    set_all_leverages()
+    
+    telegram_bildir(f"🤖 <b>SOCKS5 Enjeksiyonlu Robot Başlatıldı!</b>\n🎯 <b>Giriş Eşiği:</b> +%{GIRIS_MAKAS_YUZDE}")
     
     threading.Thread(target=start_multi_spot_ws, daemon=True).start()
     threading.Thread(target=start_multi_futures_ws, daemon=True).start()
