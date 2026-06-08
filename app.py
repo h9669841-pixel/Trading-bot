@@ -16,18 +16,17 @@ PROXY_URL = os.environ.get("PROXY_URL")
 if PROXY_URL:
     try:
         import socks
-        from urllib.parse import urlparse
+        from urllib.parse import urlparse, unquote
         
         parsed_proxy = urlparse(PROXY_URL)
         proxy_host = parsed_proxy.hostname
         proxy_port = parsed_proxy.port
-        proxy_user = parsed_proxy.username
-        proxy_pass = parsed_proxy.password
+        proxy_user = unquote(parsed_proxy.username) if parsed_proxy.username else None
+        proxy_pass = unquote(parsed_proxy.password) if parsed_proxy.password else None
 
         print(f"🌐 SOCKS5 Protokolü Çekirdeğe Enjekte Ediliyor: {proxy_host}:{proxy_port}")
         
         # Python'ın tüm soket trafiğini (REST ve WS) global olarak SOCKS5 proxy'sine gömüyoruz.
-        # Bu yöntem DNS sızıntılarını (DNS Leak) önler ve Binance engellerini aşar.
         socks.set_default_proxy(
             socks.SOCKS5, 
             addr=proxy_host, 
@@ -42,7 +41,6 @@ if PROXY_URL:
         print("❌ HATA: SOCKS5 aktif edilemedi. Lütfen terminalde 'pip install PySocks' çalıştırın.")
 
 # --- 🔑 GÜVENLİK VE API AYARLARI ---
-# Sistem soketini küresel olarak proxy'ye bağladığımız için ek 'requests_params' gerekmez.
 BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")
 BINANCE_SECRET_KEY = os.environ.get("BINANCE_SECRET_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -51,7 +49,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY)
 
 # --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
-GIRIS_MAKAS_YUZDE = 41  
+GIRIS_MAKAS_YUZDE = 0.41  # 🎯 41 olan değer %0.41 olarak düzeltildi
 CIKIS_MAKAS_YUZDE = 0.02  
 
 SPOT_BAKIYE = 15.0       # 🎯 Binance minimum emir limitine (MIN_NOTIONAL) takılmamak için 15 USDT yapıldı
@@ -67,7 +65,6 @@ arbitraj_pozisyonlari = {}
 
 def get_all_futures_symbols():
     try:
-        # Bu istek otomatik olarak SOCKS5 üzerinden gider
         url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
         r = requests.get(url, timeout=10)
         if r.status_code == 200:
@@ -112,12 +109,39 @@ def net_kar_hesapla(giris_makas, kapanis_makas):
     net_kazanc_usdt = brut_kazanc_usdt - toplam_kesinti_usdt
     return brut_kazanc_usdt, toplam_kesinti_usdt, net_kazanc_usdt
 
+# --- 🎯 DİNAMİK LOT SIZE HESAPLAMA FONKSİYONU ---
+def get_lot_size_precision(symbol):
+    """Koinin borsadaki izin verilen maksimum virgülden sonraki hane sayısını (Step Size) bulur"""
+    try:
+        info = client.get_symbol_info(symbol.upper())
+        if info and 'filters' in info:
+            for f in info['filters']:
+                if f['filterType'] == 'LOT_SIZE':
+                    step_size = float(f['stepSize'])
+                    if step_size >= 1.0:
+                        return 0
+                    # Virgülden sonraki hane sayısını string üzerinden dinamik hesaplar
+                    return len(str(step_size).split('.')[1].rstrip('0'))
+    except Exception as e:
+        print(f"⚠️ {symbol} için LOT_SIZE hassasiyeti alınamadı, varsayılan 2 kullanılacak: {e}")
+    return 2
+
 # --- 🎯 AKTİF EMİR YÖNETİM MOTORU ---
 def execute_arbitrage_entry(symbol, spot_price, futures_price):
     coin_label = symbol.upper()
     try:
-        spot_quantity = round(SPOT_BAKIYE / spot_price, 4)
-        futures_quantity = round(FUTURES_BAKIYE / futures_price, 4)
+        # 🎯 LOT_SIZE filtresine göre dinamik basamak hassasiyeti alınıyor
+        precision = get_lot_size_precision(coin_label)
+        
+        raw_spot_qty = SPOT_BAKIYE / spot_price
+        raw_futures_qty = FUTURES_BAKIYE / futures_price
+        
+        # 🎯 Matematiksel Kırpma (Truncate) -> round() yerine güvenli aşağı yuvarlama
+        factor = 10 ** precision
+        spot_quantity = int(raw_spot_qty * factor) / factor if precision > 0 else int(raw_spot_qty)
+        futures_quantity = int(raw_futures_qty * factor) / factor if precision > 0 else int(raw_futures_qty)
+
+        print(f"⚙️ {coin_label} Hassasiyet: {precision} | Emir Adetleri -> Spot: {spot_quantity}, Futures: {futures_quantity}")
 
         # Emirler ardı ardına asenkron hıza yakın şekilde fırlatılır
         spot_order = client.create_order(symbol=coin_label, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=spot_quantity)
@@ -175,7 +199,6 @@ def start_multi_spot_ws():
     streams = "/".join([f"{symbol}@trade" for symbol in SYMBOLS[:150]])
     url = f"wss://stream.binance.com:9443/stream?streams={streams}"
     
-    # 🎯 Sistem soketi SOCKS5'e yamandığı için ekstra argümana ihtiyaç kalmadı.
     WebSocketApp(url, on_message=on_message, on_error=on_error, on_close=on_close).run_forever()
 
 def start_multi_futures_ws():
@@ -197,7 +220,6 @@ def start_multi_futures_ws():
     streams = "/".join([f"{symbol}@trade" for symbol in SYMBOLS[:150]])
     url = f"wss://fstream.binance.com/stream?streams={streams}"
     
-    # 🎯 Sistem soketi SOCKS5'e yamandığı için ekstra argümana ihtiyaç kalmadı.
     WebSocketApp(url, on_message=on_message, on_error=on_error, on_close=on_close).run_forever()
 
 def arbitraj_tarama_dongusu():
