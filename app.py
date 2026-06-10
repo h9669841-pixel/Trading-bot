@@ -69,15 +69,8 @@ def get_all_futures_symbols():
             data = r.json()
             symbols = []
             for market in data.get("symbols", []):
-                if market.get("quoteAsset") == "USDT" and market.get("status") == "TRADING":
-                    symbols.append(market.get("symbol").lower())
-            return symbols
-    except Exception as e:
-        print(f"❌ Koin listesi çekilirken hata oluştu: {e}")
-        traceback.print_exc()
-    return ["btcusdt", "ethusdt", "solusdt", "xrpusdt"]
-
-def set_all_leverages():
+                if market.get("quotet") == "USDT" and market.get("status") == "TRADING":
+                    symbols.appedef et_all_leverages():
     print("⏳ Tüm sembollerin kaldıracı 1x olarak ayarlanıyor...")
     for symbol in SYMBOLS[:150]:
         try:
