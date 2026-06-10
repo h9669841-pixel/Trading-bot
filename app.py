@@ -138,7 +138,6 @@ def _hizli_emir_gonder_spot(coin_label, quantity, sonuclar):
 
 def _hizli_emir_gonder_futures(coin_label, quantity, sonuclar):
     try:
-        sonuclar['futures'] = client.futures_change_leverage(symbol=coin_label, leverage=1) # Güvenlik kilidi
         sonuclar['futures'] = client.futures_create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=quantity)
     except Exception as e:
         sonuclar['futures_hata'] = e
@@ -164,8 +163,14 @@ def get_lot_size_precision(symbol):
 def execute_arbitrage_entry(symbol, spot_price, futures_price):
     coin_label = symbol.upper()
     try:
-        # 🎯 OPTİMİZASYON: Borsa API'sine istek atmak yerine direkt RAM sözlüğünden veri çekiliyor (~200ms kazanç)
+        # ⏱️ GECİKME ÖLÇÜMÜ BAŞLANGICI
+        toplam_baslangic = time.perf_counter()
+        
+        # 1. RAM'den okuma hızı kontrolü
+        ram_baslangic = time.perf_counter()
         precision = get_lot_size_precision(symbol)
+        ram_bitis = time.perf_counter()
+        ram_sure_ms = (ram_bitis - ram_baslangic) * 1000
         
         raw_spot_qty = SPOT_BAKIYE / spot_price
         raw_futures_qty = FUTURES_BAKIYE / futures_price
@@ -177,7 +182,9 @@ def execute_arbitrage_entry(symbol, spot_price, futures_price):
 
         print(f"⚙️ {coin_label} Hassasiyet: {precision} | Emir Adetleri -> Spot: {spot_quantity}, Futures: {futures_quantity}")
 
-        # 🎯 OPTİMİZASYON: Sıralı istek göndermek yerine Spot ve Vadeli emirleri aynı anda (Paralel) fırlatılıyor
+        # 2. Paralel Emir Gönderme Süresi Ölçümü
+        emir_baslangic = time.perf_counter()
+        
         emir_sonuclari = {}
         t1 = threading.Thread(target=_hizli_emir_gonder_spot, args=(coin_label, spot_quantity, emir_sonuclari))
         t2 = threading.Thread(target=_hizli_emir_gonder_futures, args=(coin_label, futures_quantity, emir_sonuclari))
@@ -188,11 +195,24 @@ def execute_arbitrage_entry(symbol, spot_price, futures_price):
         t1.join()
         t2.join()
 
+        emir_bitis = time.perf_counter()
+        emir_sure_ms = (emir_bitis - emir_baslangic) * 1000
+
         # Hata kontrolleri
         if 'spot_hata' in emir_sonuclari:
             raise emir_sonuclari['spot_hata']
         if 'futures_hata' in emir_sonuclari:
             raise emir_sonuclari['futures_hata']
+
+        # ⏱️ TOPLAM GECİKME BİTİŞİ
+        toplam_bitis = time.perf_counter()
+        toplam_sure_ms = (toplam_bitis - toplam_baslangic) * 1000
+
+        # 📊 TERMİNALE HIZ RAPORU YAZDIRMA
+        print(f"\n⏱️ --- [{coin_label} GİRİŞ] İŞLEM HIZI RAPORU ---")
+        print(f" └─ 🧠 RAM'den Bilgi Okuma: {ram_sure_ms:.4f} ms")
+        print(f" └─ 🚀 Paralel Emir İletimi (Ağ + Proxy Gecikmesi Dahil): {emir_sure_ms:.2f} ms")
+        print(f" ⚡ TOPLAM SİSTEMSEL TEPKİ SÜRESİ: {toplam_sure_ms:.2f} ms\n")
 
         return True, spot_quantity, futures_quantity
     except BinanceAPIException as e:
@@ -211,7 +231,9 @@ def execute_arbitrage_entry(symbol, spot_price, futures_price):
 def execute_arbitrage_exit(symbol, spot_qty, futures_qty):
     coin_label = symbol.upper()
     try:
-        # 🎯 OPTİMİZASYON: Pozisyondan çıkarken de bacakların açık kalmaması için paralel emir yapısı uygulandı
+        # ⏱️ ÇIKIŞ GECİKME ÖLÇÜMÜ BAŞLANGICI
+        cikis_baslangic = time.perf_counter()
+
         emir_sonuclari = {}
         t1 = threading.Thread(target=_hizli_cikis_gonder_spot, args=(coin_label, spot_qty, emir_sonuclari))
         t2 = threading.Thread(target=_hizli_cikis_gonder_futures, args=(coin_label, futures_qty, emir_sonuclari))
@@ -222,10 +244,17 @@ def execute_arbitrage_exit(symbol, spot_qty, futures_qty):
         t1.join()
         t2.join()
 
+        cikis_bitis = time.perf_counter()
+        cikis_sure_ms = (cikis_bitis - cikis_baslangic) * 1000
+
         if 'spot_hata' in emir_sonuclari:
             raise emir_sonuclari['spot_hata']
         if 'futures_hata' in emir_sonuclari:
             raise emir_sonuclari['futures_hata']
+
+        # 📊 TERMİNALE ÇIKIŞ HIZ RAPORU YAZDIRMA
+        print(f"\n⏱️ --- [{coin_label} ÇIKIŞ] İŞLEM HIZI RAPORU ---")
+        print(f" ⚡ POZİSYONDAN PARALEL ÇIKIŞ SÜRESİ: {cikis_sure_ms:.2f} ms\n")
 
         return True
     except BinanceAPIException as e:
@@ -326,7 +355,7 @@ def arbitraj_tarama_dongusu():
             print(f"❌ Döngü hatası: {e}")
             traceback.print_exc()
         
-        # ⚡ OPTİMİZASYON: Tarama döngüsü bekleme süresi, canlı piyasayı kaçırmamak için 2 saniyeden 0.2 saniyeye düşürüldü.
+        # ⚡ OPTİMİZASYON: Canlı piyasayı kaçırmamak için tarama döngüsü bekleme süresi 0.2 saniyeye düşürüldü.
         time.sleep(0.2)
 
 if __name__ == "__main__":
@@ -337,7 +366,7 @@ if __name__ == "__main__":
     # Kaldıraç ayarları başlangıçta bir kez yapılır
     set_all_leverages()
     
-    # ⚡ OPTİMİZASYON: Bot döngüye girmeden hemen önce tüm limit kuralları RAM belleğe alınır.
+    # ⚡ OPTİMİZASYON: Bot döngüye girmeden hemen önce tüm limit kuralları tek istekte RAM belleğe alınır.
     tum_hassasiyetleri_yukle()
     
     telegram_bildir(f"🤖 <b>SOCKS5 Enjeksiyonlu Robot Başlatıldı!</b>\n🎯 <b>Giriş Eşiği:</b> +%{GIRIS_MAKAS_YUZDE}")
