@@ -218,25 +218,7 @@ def execute_arbitrage_exit(symbol, spot_qty, futures_qty):
         telegram_bildir(err_msg)
         return False
 
-# --- 🌐 GLOBAL WEBSOCKET AKIŞLARI ---
-def start_multi_spot_ws():
-    def on_message(ws, message):
-        data = json.loads(message)
-        symbol = data.get("stream", "").split("@")[0]
-        if symbol in piyasa_verisi:
-            piyasa_verisi[symbol]["spot_price"] = float(data.get("data", {}).get("p", 0))
-
-    def on_error(ws, error): 
-        print(f"❌ Global Spot WS Hatası: {error}")
-        traceback.print_exc()
-        
-    def on_close(ws, c_code, c_msg): 
-        print(f"🔄 Spot WS kapandı. 5 saniye sonra yeniden bağlanıyor...")
-        time.sleep(5)
-        start_multi_spot_ws()
-
-    streams = "/".join([f"{symbol}@trade" for symbol in SYMBOLS[:150]])
-    url = f"wss://stream.binance.com:9443/stream?streams={streams}"
+# --- 🌐 GLOBAL 3/stream?streams={streams}"
     
     WebSocketApp(url, on_message=on_message, on_error=on_error, on_close=on_close).run_forever()
 
