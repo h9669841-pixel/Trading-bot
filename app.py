@@ -10,7 +10,7 @@ from binance.exceptions import BinanceAPIException
 from websocket import WebSocketApp
 from urllib.parse import urlparse, unquote
 
-# --- 🌐 PROXY CONFIGURATION (Python 3.13 Kararlı Mod) ---
+# --- 🌐 PROXY CONFIGURATION (Python 3.13 Tam Uyumlu Kararlı Mod) ---
 PROXY_URL = os.environ.get("PROXY_URL") 
 
 requests_proxies = None
@@ -26,17 +26,18 @@ if PROXY_URL:
 
         print(f"🌐 Proxy Bilgileri Ayarlanıyor: {proxy_host}:{proxy_port}")
         
-        # 1. REST API için proxy sözlüğü
+        # 1. REST API için proxy sözlüğü (requests kütüphanesi için)
         requests_proxies = {
             "http": PROXY_URL,
             "https": PROXY_URL
         }
         
-        # 2. WebSocketApp için El Sıkışma (Handshake) Hatasını Çözen Parametreler
+        # 2. WebSocketApp için Protokol ve El Sıkışma Hatalarını Çözen Parametreler
         ws_proxy_params = {
             "http_proxy_host": proxy_host,
             "http_proxy_port": proxy_port,
-            "http_proxy_auth": (proxy_user, proxy_pass) if proxy_user else None
+            "http_proxy_auth": (proxy_user, proxy_pass) if proxy_user else None,
+            "proxy_type": "socks5"  # 🎯 Protokol eşleşme hatasını kesin olarak çözen satır
         }
     except Exception as e:
         print(f"❌ Proxy ayrıştırma hatası: {e}")
@@ -47,7 +48,7 @@ BINANCE_SECRET_KEY = os.environ.get("BINANCE_SECRET_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# 🎯 DEMO (TESTNET) AYARI: demo.binance.com anahtarlarının çalışması için True yapıldı.
+# 🎯 DEMO (TESTNET) AYARI: demo.binance.com anahtarlarının çalışması için True kalmalı.
 USE_TESTNET = True 
 
 client = Client(
@@ -58,7 +59,7 @@ client = Client(
 )
 
 # --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
-GIRIS_MAKAS_YUZDE = 0.41  # 🎯 %0.41 seviyesine düzeltildi
+GIRIS_MAKAS_YUZDE = 0.41  # 🎯 Makul arbitraj giriş eşiği %0.41 seviyesine çekildi
 CIKIS_MAKAS_YUZDE = 0.02  
 
 SPOT_BAKIYE = 15.0       # 🎯 Minimum emir limiti (MIN_NOTIONAL) koruması
