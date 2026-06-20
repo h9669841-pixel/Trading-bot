@@ -37,30 +37,26 @@ if PROXY_URL:
         print(f"❌ Proxy ayrıştırma hatası: {e}")
 
 # --- 🔑 SİMÜLASYON (MOCK) API ANAHTARLARI ---
-# demo.binance.com üzerinden aldığın API anahtarları buralara gelecek
 BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")
 BINANCE_SECRET_KEY = os.environ.get("BINANCE_SECRET_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# ⚠️ UYARI: python-binance kütüphanesinin standart 'testnet=True' modu eski testnet'e gider.
-# demo.binance.com (Mock) hesabı için testnet=False kalmalı, ancak isteklerin yönlendirileceği base_url değiştirilmelidir!
 client = Client(
     BINANCE_API_KEY, 
     BINANCE_SECRET_KEY, 
     requests_params={"proxies": requests_proxies} if requests_proxies else {}
 )
 
-# 🎯 SİMÜLASYON (MOCK TRADING) DUVARLARI: API isteklerini sanal hesaba yönlendiriyoruz
-client.API_URL = 'https://vapi.binance.com/api'          # Sanal Spot API Uç Noktası
+# 🎯 SİMÜLASYON (MOCK TRADING) UÇ NOKTALARI
+client.API_URL = 'https://vapi.binance.com/api'          
 client.MARGIN_API_URL = 'https://vapi.binance.com/nvapi'
-client.FUTURES_API_URL = 'https://vapi.binance.com/fapi' # Sanal Vadeli İşlemler API Uç Noktası
+client.FUTURES_API_URL = 'https://vapi.binance.com/fapi' 
 
 # --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
 GIRIS_MAKAS_YUZDE = 0.41  
 CIKIS_MAKAS_YUZDE = 0.02  
 
-# 💰 Sanal hesabında 10k$ olduğu için işlem hacimlerini 100$ seviyesine çıkarttık
 SPOT_BAKIYE = 100.0       
 FUTURES_BAKIYE = 100.0    
 
@@ -73,7 +69,6 @@ arbitraj_pozisyonlari = {}
 
 def get_all_futures_symbols():
     try:
-        # Fiyat karşılaştırması ve koin havuzu için listeyi canlı borsadan alıyoruz
         url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
         r = requests.get(url, proxies=requests_proxies, timeout=10)
         if r.status_code == 200:
@@ -88,11 +83,12 @@ def get_all_futures_symbols():
     return ["btcusdt", "ethusdt", "solusdt", "xrpusdt"]
 
 def set_all_leverages():
-    print("⏳ Sanal hesaptaki kaldıraçlar 1x olarak senkronize ediliyor...")
-    for symbol in SYMBOLS[:50]: # İlk 50 koin için kaldıraç ayarla
+    # 🎯 Sınır kaldırıldı: Borsadaki TÜM aktif koinlerin kaldıracı ayarlanıyor
+    print(f"⏳ Sanal hesaptaki {len(SYMBOLS)} koinin kaldıracı 1x olarak senkronize ediliyor...")
+    for symbol in SYMBOLS:
         try:
             client.futures_change_leverage(symbol=symbol.upper(), leverage=1)
-            time.sleep(0.2) 
+            time.sleep(0.15) # Hızlı döngüde borsa rate limit yememek için ideal süre
         except Exception as e:
             pass
 
@@ -109,12 +105,11 @@ def telegram_bildir(mesaj):
 def net_kar_hesapla(giris_makas, kapanis_makas):
     brut_oran_farki = giris_makas - kapanis_makas
     brut_kazanc_usdt = SPOT_BAKIYE * (brut_oran_farki / 100)
-    toplam_kesinti_usdt = ((SPOT_BAKIYE * SPOT_FEE_RATE) * 2) + ((FUTURES_BAKIYE * FUTURES_FEE_RATE) * 2)
-    return brut_kazanc_usdt, toplam_kesinti_usdt, brut_kazanc_usdt - toplam_kesinti_usdt
+    topham_kesinti_usdt = ((SPOT_BAKIYE * SPOT_FEE_RATE) * 2) + ((FUTURES_BAKIYE * FUTURES_FEE_RATE) * 2)
+    return brut_kazanc_usdt, topham_kesinti_usdt, brut_kazanc_usdt - topham_kesinti_usdt
 
 def get_lot_size_precision(symbol):
     try:
-        # Hassasiyet bilgisi vapi üzerinden sanal borsadan sorgulanıyor
         info = client.get_symbol_info(symbol.upper())
         if info and 'filters' in info:
             for f in info['filters']:
@@ -126,7 +121,6 @@ def get_lot_size_precision(symbol):
         pass
     return 2
 
-# --- 🎯 GERÇEK ZAMANLI S SİMÜLASYON EMİR EMİR MOTORU ---
 def execute_arbitrage_entry(symbol, spot_price, futures_price):
     coin_label = symbol.upper()
     try:
@@ -140,7 +134,6 @@ def execute_arbitrage_entry(symbol, spot_price, futures_price):
 
         print(f"🛒 {coin_label} Sanal Emir Gönderiliyor.. Adetler -> Spot: {spot_quantity}, Futures: {futures_quantity}")
 
-        # Emirler vapi.binance.com üzerinden doğrudan demo hesabına gider
         spot_order = client.create_order(symbol=coin_label, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=spot_quantity)
         futures_order = client.futures_create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=futures_quantity)
         return True, spot_quantity, futures_quantity
@@ -159,10 +152,10 @@ def execute_arbitrage_exit(symbol, spot_qty, futures_qty):
         client.futures_create_order(symbol=coin_label, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=futures_qty)
         return True
     except Exception as e:
-        print(f"❌ Sanal Çıkış Hatası: {e}")
+        print(f"❌ Sanal Çıkış Hatası ({coin_label}): {e}")
         return False
 
-# --- 🌐 LIVE WEBSOCKET AKIŞLARI (GERÇEK BORSADAN ANLIK VERİ BESLEME) ---
+# --- 🌐 LIVE WEBSOCKET AKIŞLARI (SINIRSIZ TÜM KOİNLER HAVUZU) ---
 def start_multi_spot_ws():
     def on_message(ws, message):
         data = json.loads(message)
@@ -175,12 +168,11 @@ def start_multi_spot_ws():
         time.sleep(2)
         start_multi_spot_ws()
 
-    # Gerçek borsanın en likit 50 koinini takibe alıyoruz
-    active_symbols = [s for s in SYMBOLS[:50]]
-    streams = "/".join([f"{symbol}@trade" for symbol in active_symbols])
+    # 🎯 Sınır kaldırıldı: SYMBOLS içindeki istisnasız TÜM koinler dinleniyor
+    streams = "/".join([f"{symbol}@trade" for symbol in SYMBOLS])
     url = f"wss://stream.binance.com:9443/stream?streams={streams}"
     
-    print(f"📡 Canlı Spot Veri Akışı Bağlandı: {len(active_symbols)} koin dinleniyor...")
+    print(f"📡 Canlı Spot Veri Akışı Bağlandı: {len(SYMBOLS)} koin havuzdan dinleniyor...")
     WebSocketApp(url, on_message=on_message, on_close=on_close).run_forever(**ws_proxy_params)
 
 def start_multi_futures_ws():
@@ -195,11 +187,11 @@ def start_multi_futures_ws():
         time.sleep(2)
         start_multi_futures_ws()
 
-    active_symbols = [s for s in SYMBOLS[:50]]
-    streams = "/".join([f"{symbol}@trade" for symbol in active_symbols])
+    # 🎯 Sınır kaldırıldı: SYMBOLS içindeki istisnasız TÜM koinler dinleniyor
+    streams = "/".join([f"{symbol}@trade" for symbol in SYMBOLS])
     url = f"wss://fstream.binance.com/stream?streams={streams}"
     
-    print(f"📡 Canlı Futures Veri Akışı Bağlandı: {len(active_symbols)} koin dinleniyor...")
+    print(f"📡 Canlı Futures Veri Akışı Bağlandı: {len(SYMBOLS)} koin havuzdan dinleniyor...")
     WebSocketApp(url, on_message=on_message, on_close=on_close).run_forever(**ws_proxy_params)
 
 def arbitraj_tarama_dongusu():
@@ -207,9 +199,9 @@ def arbitraj_tarama_dongusu():
     while True:
         try:
             en_yuksek_makaslar = []
-            tarama_listesi = SYMBOLS[:50]
             
-            for symbol in tarama_listesi:
+            # 🎯 Sınır kaldırıldı: Tarama listesi tüm koin havuzunu kapsıyor
+            for symbol in SYMBOLS:
                 if symbol not in piyasa_verisi: continue
                 
                 spot_fiyat = piyasa_verisi[symbol]["spot_price"]
@@ -241,7 +233,7 @@ def arbitraj_tarama_dongusu():
 
             if en_yuksek_makaslar:
                 en_yuksek_makaslar.sort(key=lambda x: x[1], reverse=True)
-                print("\n📊 --- CANLI PİYASA EN YÜKSEK 3 MAKAS ---")
+                print(f"\n📊 --- CANLI PİYASA EN YÜKSEK 3 MAKAS (Toplam Koin: {len(SYMBOLS)}) ---")
                 for i, item in enumerate(en_yuksek_makaslar[:3]):
                     print(f"{i+1}. [{item[0]}] +%{item[1]:.4f} | Spot: {item[2]} | Futures: {item[3]}")
         except Exception as e:
@@ -249,7 +241,7 @@ def arbitraj_tarama_dongusu():
         time.sleep(1)
 
 if __name__ == "__main__":
-    print("⏳ Canlı piyasa altyapısı ve Demo Hesap bağlantısı kuruluyor...")
+    print("⏳ Tüm canlı piyasa koin altyapısı ve Demo Hesap bağlantısı kuruluyor...")
     SYMBOLS = get_all_futures_symbols()
     
     for symbol in SYMBOLS:
@@ -258,7 +250,7 @@ if __name__ == "__main__":
     
     set_all_leverages()
     
-    telegram_bildir(f"🚀 <b>Sanal İşlemler (Mock Trading) Botu Başlatıldı!</b>\n🎯 <b>Tarama:</b> Canlı Canlı 50 Koin\n📊 <b>Giriş Eşiği:</b> +%{GIRIS_MAKAS_YUZDE}")
+    telegram_bildir(f"🚀 <b>Tam Kapasite Arbitraj Robotu Başlatıldı!</b>\n🎯 <b>Tarama Havuzu:</b> {len(SYMBOLS)} Aktif Koin (Eksiksiz)\n📊 <b>Giriş Eşiği:</b> +%{GIRIS_MAKAS_YUZDE}")
     
     threading.Thread(target=start_multi_spot_ws, daemon=True).start()
     threading.Thread(target=start_multi_futures_ws, daemon=True).start()
