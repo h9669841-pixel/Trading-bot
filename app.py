@@ -49,7 +49,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY)
 
 # --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
-GIRIS_MAKAS_YUZDE = 0.41  
+GIRIS_MAKAS_YUZDE = 0.31  
 CIKIS_MAKAS_YUZDE = 0.02  
 
 SPOT_BAKIYE = 15.0       # 🎯 Minimum emir limitine (MIN_NOTIONAL) takılmamak için 15 USDT
@@ -87,10 +87,11 @@ def set_all_leverages():
     for symbol in SYMBOLS[:150]:
         try:
             client.futures_change_leverage(symbol=symbol.upper(), leverage=3)
-            time.sleep(0.05) # Rate limit koruması (Hızlandırıldı)
+            time.sleep(0.05) # Rate limit koruması
         except Exception:
             pass
 
+# 🛠️ GÜNCELLEME: "list index out of range" hatasını kökten çözen güvenli fonksiyon
 def tum_hassasiyetleri_yukle():
     print("⏳ Tüm sembollerin lot hassasiyetleri borsadan çekiliyor ve önbelleğe alınıyor...")
     try:
@@ -100,12 +101,26 @@ def tum_hassasiyetleri_yukle():
             if sym in SYMBOLS:
                 for f in market['filters']:
                     if f['filterType'] == 'LOT_SIZE':
-                        step_size = float(f['stepSize'])
-                        precision = 0 if step_size >= 1.0 else len(str(step_size).split('.')[1].rstrip('0'))
+                        step_size_str = str(f['stepSize']).rstrip('0')
+                        
+                        # Nokta yoksa veya tam sayıysa hassasiyet direkt 0'dır
+                        if '.' not in step_size_str:
+                            precision = 0
+                        else:
+                            # Hata vermeyen güvenli parçalama mekanizması
+                            parts = step_size_str.split('.')
+                            if len(parts) > 1:
+                                precision = len(parts[1])
+                            else:
+                                precision = 0
+                                
                         SEMBOL_HASSASIYETLERI[sym] = precision
-        print("✅ Tüm sembol hassasiyetleri RAM belleğe başarıyla kaydedildi.")
+        print(f"✅ Toplam {len(SEMBOL_HASSASIYETLERI)} sembolün hassasiyet haritası RAM belleğe güvenle kaydedildi.")
     except Exception as e:
-        print(f"❌ Hassasiyet haritası çıkarılırken hata oluştu (Varsayılanlar kullanılacak): {e}")
+        print(f"❌ Hassasiyet haritası çıkarılırken hata oluştu (Yedek mekanizma devrede): {e}")
+        # Yedek Koruma: API gecikirse botun durmaması için temel varsayılan atama
+        for sym in SYMBOLS:
+            SEMBOL_HASSASIYETLERI[sym] = 0 if "usdt" in sym else 2
 
 def telegram_bildir(mesaj):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -135,7 +150,7 @@ def _hizli_emir_gonder_spot(coin_label, quantity, sonuclar):
 
 def _hizli_emir_gonder_futures(coin_label, quantity, sonuclar):
     try:
-        # 🛠️ ÇÖZÜM: Bakiye tıkanıklığını aşmak için kaldıraç 3x yapıldı (Teminat yükü azaltıldı)
+        # Bakiye sıkışmasını önlemek için kaldıraç 3x olarak güncelleniyor
         client.futures_change_leverage(symbol=coin_label, leverage=3)
         sonuclar['futures'] = client.futures_create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=quantity)
     except Exception as e:
@@ -165,11 +180,11 @@ def execute_arbitrage_entry(symbol, spot_price, futures_price):
         raw_spot_qty = SPOT_BAKIYE / spot_price
         raw_futures_qty = FUTURES_BAKIYE / futures_price
         
-        # 🛠️ ÇÖZÜM: Filter failure: LOT_SIZE hatasını yok eden matematiksel kesin kırpma yapısı
+        # 🛠️ GÜNCELLEME: Kusursuz aşağı yuvarlayan ve LOT_SIZE hatasını kaldıran matematiksel yapı
         spot_quantity = float(int(raw_spot_qty * (10 ** precision))) / (10 ** precision) if precision > 0 else int(raw_spot_qty)
         futures_quantity = float(int(raw_futures_qty * (10 ** precision))) / (10 ** precision) if precision > 0 else int(raw_futures_qty)
 
-        # Eğer hassasiyet tam sayı ise (Örn: ONE, BTT vb.) tipi kesin olarak int yapıyoruz
+        # Eğer hassasiyet 0 ise (tam sayı), borsa kuralları gereği tipi int yapıyoruz
         if precision == 0:
             spot_quantity = int(spot_quantity)
             futures_quantity = int(futures_quantity)
@@ -321,7 +336,7 @@ if __name__ == "__main__":
     set_all_leverages()
     tum_hassasiyetleri_yukle()
     
-    telegram_bildir(f"🤖 <b>Geliştirilmiş Arbitraj Robotu Başlatıldı!</b>\n🎯 <b>Giriş Eşiği:</b> +%{GIRIS_MAKAS_YUZDE}")
+    telegram_bildir(f"🤖 <b>Kusursuz Filtreli Arbitraj Robotu Başlatıldı!</b>\n🎯 <b>Giriş Eşiği:</b> +%{GIRIS_MAKAS_YUZDE}")
     
     threading.Thread(target=start_multi_spot_ws, daemon=True).start()
     threading.Thread(target=start_multi_futures_ws, daemon=True).start()
