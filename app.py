@@ -46,7 +46,6 @@ BINANCE_SECRET_KEY = os.environ.get("BINANCE_SECRET_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# 🎯 DEMO (TESTNET) AYARI
 USE_TESTNET = True 
 
 client = Client(
@@ -84,6 +83,7 @@ def get_all_futures_symbols():
             symbols = []
             for market in data.get("symbols", []):
                 if market.get("quoteAsset") == "USDT" and market.get("status") == "TRADING":
+                    # 🎯 Tüm semboller kesin olarak küçük harfe çevriliyor
                     symbols.append(market.get("symbol").lower())
             return symbols
     except Exception as e:
@@ -98,9 +98,9 @@ def set_all_leverages():
             client.futures_change_leverage(symbol=symbol.upper(), leverage=1)
             time.sleep(0.1) 
         except BinanceAPIException as b_err:
-            print(f"⚠️ {symbol.upper()} kaldıraç değiştirilemedi: {b_err.message}")
+            pass  # Testnet üzerinde bazı kaldıraç hatalarını gizle log kirlenmesin
         except Exception as e:
-            print(f"❌ Kaldıraç ayar hatası ({symbol.upper()}): {e}")
+            pass
 
 def telegram_bildir(mesaj):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -154,13 +154,11 @@ def execute_arbitrage_entry(symbol, spot_price, futures_price):
     except BinanceAPIException as e:
         err_msg = f"❌ <b>{coin_label} BORSASAL GİRİŞ HATASI:</b>\nKod: {e.code}\nMesaj: {e.message}"
         print(err_msg)
-        traceback.print_exc()
         telegram_bildir(err_msg)
         return False, 0, 0
     except Exception as e:
         err_msg = f"❌ {coin_label} SİSTEMSEL GİRİŞ HATASI: {e}"
         print(err_msg)
-        traceback.print_exc()
         telegram_bildir(err_msg)
         return False, 0, 0
 
@@ -173,50 +171,45 @@ def execute_arbitrage_exit(symbol, spot_qty, futures_qty):
     except BinanceAPIException as e:
         err_msg = f"❌ <b>{coin_label} BORSASAL ÇIKIŞ HATASI (BACAK AÇIK KALDI!):</b>\nKod: {e.code}\nMesaj: {e.message}"
         print(err_msg)
-        traceback.print_exc()
         telegram_bildir(err_msg)
         return False
     except Exception as e:
         err_msg = f"❌ {coin_label} SİSTEMSEL ÇIKIŞ HATASI: {e}"
         print(err_msg)
-        traceback.print_exc()
         telegram_bildir(err_msg)
         return False
 
-# --- 🌐 GLOBAL WEBSOCKET AKIŞLARI (KÖKTEN ÇÖZÜM SÜRÜMÜ) ---
+# --- 🌐 GLOBAL WEBSOCKET AKIŞLARI ---
 
-# 🎯 Spot Testnet'in 404 hatasını ezmek için tekli bağlantı işleyicisi
 def connect_single_spot_ws(symbol):
     def on_message(ws, message):
         data = json.loads(message)
-        # Tekli stream yapısında veri doğrudan veya 'p' içinde gelebilir
         price = data.get("p") or data.get("data", {}).get("p")
         if price:
-            piyasa_verisi[symbol]["spot_price"] = float(price)
+            # 🎯 Sembol isminin kesinlikle küçük harf olması garanti ediliyor
+            piyasa_verisi[symbol.lower()]["spot_price"] = float(price)
 
     def on_error(ws, error):
-        pass # Log kirliliği olmaması için sessizce geçilir
+        pass
         
     def on_close(ws, c_code, c_msg):
         time.sleep(5)
         connect_single_spot_ws(symbol)
 
-    url = f"wss://testnet.binance.vision/ws/{symbol}@trade"
+    url = f"wss://testnet.binancevision.com/ws/{symbol.lower()}@trade"
     WebSocketApp(url, on_message=on_message, on_error=on_error, on_close=on_close).run_forever(**ws_proxy_params)
 
 def start_multi_spot_ws():
     if USE_TESTNET:
-        # 🎯 Testnet modunda 404 yememek için koinleri tek tek Thread olarak ayağa kaldırıyoruz
         active_symbols = ["btcusdt", "ethusdt", "solusdt", "xrpusdt", "bnbusdt", "adausdt", "dogeusdt", "trxusdt", "linkusdt", "dotusdt"]
         print(f"📡 Spot (TESTNET): {len(active_symbols)} koin için izole tüneller açılıyor...")
         for symbol in active_symbols:
             threading.Thread(target=connect_single_spot_ws, args=(symbol,), daemon=True).start()
-            time.sleep(0.2) # Proxy'yi boğmamak için küçük bir nefes payı
+            time.sleep(0.1)
     else:
-        # Canlı ortamda devasa toplu stream mimarisi
         def on_message(ws, message):
             data = json.loads(message)
-            symbol = data.get("stream", "").split("@")[0]
+            symbol = data.get("stream", "").split("@")[0].lower()
             if symbol in piyasa_verisi:
                 piyasa_verisi[symbol]["spot_price"] = float(data.get("data", {}).get("p", 0))
 
@@ -233,10 +226,14 @@ def start_multi_spot_ws():
 def start_multi_futures_ws():
     def on_message(ws, message):
         data = json.loads(message)
-        stream_name = data.get("stream", "") or data.get("stream")
-        symbol = stream_name.split("@")[0] if stream_name else symbol
-        # Eğer veri düz formatta geldiyse ayıkla
-        price = data.get("data", {}).get("p") or data.get("p")
+        stream_name = data.get("stream", "")
+        if not stream_name and "e" in data:  # Tekli/Düz format gelirse koruma
+            symbol = data.get("s", "").lower()
+            price = data.get("p")
+        else:
+            symbol = stream_name.split("@")[0].lower()
+            price = data.get("data", {}).get("p") or data.get("p")
+
         if symbol in piyasa_verisi and price:
             piyasa_verisi[symbol]["futures_price"] = float(price)
 
@@ -264,7 +261,10 @@ def arbitraj_tarama_dongusu():
     while True:
         try:
             en_yuksek_makaslar = []
-            for symbol in SYMBOLS[:150]:
+            # Tarama listesini testnet ve canlıya göre güvenli yapıyoruz
+            tarama_listesi = ["btcusdt", "ethusdt", "solusdt", "xrpusdt", "bnbusdt", "adausdt", "dogeusdt", "trxusdt", "linkusdt", "dotusdt"] if USE_TESTNET else SYMBOLS[:100]
+            
+            for symbol in tarama_listesi:
                 if symbol not in piyasa_verisi: continue
                 
                 spot_fiyat = piyasa_verisi[symbol]["spot_price"]
@@ -305,9 +305,19 @@ def arbitraj_tarama_dongusu():
         time.sleep(2)
 
 if __name__ == "__main__":
+    # Garanti olması açısından temel testnet havuzunu hemen hazırlıyoruz
+    base_symbols = ["btcusdt", "ethusdt", "solusdt", "xrpusdt", "bnbusdt", "adausdt", "dogeusdt", "trxusdt", "linkusdt", "dotusdt"]
+    for s in base_symbols:
+        piyasa_verisi[s] = {"spot_price": None, "futures_price": None}
+        arbitraj_pozisyonlari[s] = {"aktif": False, "giris_makas": 0.0, "spot_adet": 0.0, "futures_adet": 0.0}
+
     SYMBOLS = get_all_futures_symbols()
-    piyasa_verisi = {symbol: {"spot_price": None, "futures_price": None} for symbol in SYMBOLS}
-    arbitraj_pozisyonlari = {symbol: {"aktif": False, "giris_makas": 0.0, "spot_adet": 0.0, "futures_adet": 0.0} for symbol in SYMBOLS}
+    
+    # Ekstra gelen koinler varsa onları da havuzumuza ekliyoruz
+    for symbol in SYMBOLS:
+        if symbol not in piyasa_verisi:
+            piyasa_verisi[symbol] = {"spot_price": None, "futures_price": None}
+            arbitraj_pozisyonlari[symbol] = {"aktif": False, "giris_makas": 0.0, "spot_adet": 0.0, "futures_adet": 0.0}
     
     set_all_leverages()
     
