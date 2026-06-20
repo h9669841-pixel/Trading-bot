@@ -6,7 +6,7 @@ import threading
 import traceback
 from binance.client import Client
 from binance.enums import *
-from binance.exceptions import BinanceAPIException
+from binance.exceptions import BinanceAPIException, BinanceRequestException
 from websocket import WebSocketApp
 from urllib.parse import urlparse, unquote
 
@@ -54,7 +54,7 @@ client.MARGIN_API_URL = 'https://vapi.binance.com/nvapi'
 client.FUTURES_API_URL = 'https://vapi.binance.com/fapi' 
 
 # --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
-GIRIS_MAKAS_YUZDE = 10.41  
+GIRIS_MAKAS_YUZDE = 0.41  
 CIKIS_MAKAS_YUZDE = 0.02  
 
 SPOT_BAKIYE = 100.0       
@@ -83,13 +83,13 @@ def get_all_futures_symbols():
     return ["btcusdt", "ethusdt", "solusdt", "xrpusdt"]
 
 def set_all_leverages():
-    # 🎯 Sınır kaldırıldı: Borsadaki TÜM aktif koinlerin kaldıracı ayarlanıyor
     print(f"⏳ Sanal hesaptaki {len(SYMBOLS)} koinin kaldıracı 1x olarak senkronize ediliyor...")
     for symbol in SYMBOLS:
         try:
             client.futures_change_leverage(symbol=symbol.upper(), leverage=1)
-            time.sleep(0.15) # Hızlı döngüde borsa rate limit yememek için ideal süre
-        except Exception as e:
+            time.sleep(0.25) # 🎯 ÇÖZÜM: Süre 0.25 saniyeye çıkarılarak Invalid JSON / Yoğunluk hatası engellendi
+        except (BinanceAPIException, BinanceRequestException, Exception) as e:
+            # Kaldıraç değiştirilemeyen veya Sanal borsada (vapi) tanımlı olmayan koinleri sessizce geç
             pass
 
 def telegram_bildir(mesaj):
@@ -117,7 +117,8 @@ def get_lot_size_precision(symbol):
                     step_size = float(f['stepSize'])
                     if step_size >= 1.0: return 0
                     return len(str(step_size).split('.')[1].rstrip('0'))
-    except Exception as e:
+    except (BinanceAPIException, BinanceRequestException, Exception) as e:
+        # Sanal borsadan (vapi) hatalı/bozuk JSON yanıt dönerse çökmesini engelle
         pass
     return 2
 
@@ -137,12 +138,10 @@ def execute_arbitrage_entry(symbol, spot_price, futures_price):
         spot_order = client.create_order(symbol=coin_label, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=spot_quantity)
         futures_order = client.futures_create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=futures_quantity)
         return True, spot_quantity, futures_quantity
-    except BinanceAPIException as e:
-        err_msg = f"❌ <b>Sanal Hesap İşlem Hatası ({coin_label}):</b>\n{e.message}"
+    except (BinanceAPIException, BinanceRequestException, Exception) as e:
+        err_msg = f"❌ <b>Sanal Hesap İşlem Hatası ({coin_label}):</b>\nEmir gönderilemedi veya koin vapi'de aktif değil."
         print(err_msg)
         telegram_bildir(err_msg)
-        return False, 0, 0
-    except Exception as e:
         return False, 0, 0
 
 def execute_arbitrage_exit(symbol, spot_qty, futures_qty):
@@ -155,20 +154,22 @@ def execute_arbitrage_exit(symbol, spot_qty, futures_qty):
         print(f"❌ Sanal Çıkış Hatası ({coin_label}): {e}")
         return False
 
-# --- 🌐 LIVE WEBSOCKET AKIŞLARI (SINIRSIZ TÜM KOİNLER HAVUZU) ---
+# --- 🌐 LIVE WEBSOCKET AKIŞLARI ---
 def start_multi_spot_ws():
     def on_message(ws, message):
-        data = json.loads(message)
-        symbol = data.get("stream", "").split("@")[0].lower()
-        price = data.get("data", {}).get("p")
-        if symbol in piyasa_verisi and price:
-            piyasa_verisi[symbol]["spot_price"] = float(price)
+        try:
+            data = json.loads(message)
+            symbol = data.get("stream", "").split("@")[0].lower()
+            price = data.get("data", {}).get("p")
+            if symbol in piyasa_verisi and price:
+                piyasa_verisi[symbol]["spot_price"] = float(price)
+        except Exception:
+            pass
 
     def on_close(ws, c_code, c_msg):
         time.sleep(2)
         start_multi_spot_ws()
 
-    # 🎯 Sınır kaldırıldı: SYMBOLS içindeki istisnasız TÜM koinler dinleniyor
     streams = "/".join([f"{symbol}@trade" for symbol in SYMBOLS])
     url = f"wss://stream.binance.com:9443/stream?streams={streams}"
     
@@ -177,17 +178,19 @@ def start_multi_spot_ws():
 
 def start_multi_futures_ws():
     def on_message(ws, message):
-        data = json.loads(message)
-        symbol = data.get("stream", "").split("@")[0].lower()
-        price = data.get("data", {}).get("p")
-        if symbol in piyasa_verisi and price:
-            piyasa_verisi[symbol]["futures_price"] = float(price)
+        try:
+            data = json.loads(message)
+            symbol = data.get("stream", "").split("@")[0].lower()
+            price = data.get("data", {}).get("p")
+            if symbol in piyasa_verisi and price:
+                piyasa_verisi[symbol]["futures_price"] = float(price)
+        except Exception:
+            pass
 
     def on_close(ws, c_code, c_msg):
         time.sleep(2)
         start_multi_futures_ws()
 
-    # 🎯 Sınır kaldırıldı: SYMBOLS içindeki istisnasız TÜM koinler dinleniyor
     streams = "/".join([f"{symbol}@trade" for symbol in SYMBOLS])
     url = f"wss://fstream.binance.com/stream?streams={streams}"
     
@@ -200,7 +203,6 @@ def arbitraj_tarama_dongusu():
         try:
             en_yuksek_makaslar = []
             
-            # 🎯 Sınır kaldırıldı: Tarama listesi tüm koin havuzunu kapsıyor
             for symbol in SYMBOLS:
                 if symbol not in piyasa_verisi: continue
                 
