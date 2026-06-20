@@ -54,7 +54,7 @@ client.MARGIN_API_URL = 'https://vapi.binance.com/nvapi'
 client.FUTURES_API_URL = 'https://vapi.binance.com/fapi' 
 
 # --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
-GIRIS_MAKAS_YUZDE = 10.41  
+GIRIS_MAKAS_YUZDE = 0.41  
 CIKIS_MAKAS_YUZDE = 0.02  
 
 SPOT_BAKIYE = 100.0       
@@ -87,9 +87,8 @@ def set_all_leverages():
     for symbol in SYMBOLS:
         try:
             client.futures_change_leverage(symbol=symbol.upper(), leverage=1)
-            time.sleep(0.25) # 🎯 ÇÖZÜM: Süre 0.25 saniyeye çıkarılarak Invalid JSON / Yoğunluk hatası engellendi
+            time.sleep(0.25)
         except (BinanceAPIException, BinanceRequestException, Exception) as e:
-            # Kaldıraç değiştirilemeyen veya Sanal borsada (vapi) tanımlı olmayan koinleri sessizce geç
             pass
 
 def telegram_bildir(mesaj):
@@ -118,7 +117,6 @@ def get_lot_size_precision(symbol):
                     if step_size >= 1.0: return 0
                     return len(str(step_size).split('.')[1].rstrip('0'))
     except (BinanceAPIException, BinanceRequestException, Exception) as e:
-        # Sanal borsadan (vapi) hatalı/bozuk JSON yanıt dönerse çökmesini engelle
         pass
     return 2
 
@@ -139,9 +137,9 @@ def execute_arbitrage_entry(symbol, spot_price, futures_price):
         futures_order = client.futures_create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=futures_quantity)
         return True, spot_quantity, futures_quantity
     except (BinanceAPIException, BinanceRequestException, Exception) as e:
-        err_msg = f"❌ <b>Sanal Hesap İşlem Hatası ({coin_label}):</b>\nEmir gönderilemedi veya koin vapi'de aktif değil."
+        # 🎯 ÇÖZÜM: Telegram bildirimi kaldırıldı, sadece konsol loguna basılıyor.
+        err_msg = f"❌ [Pas Geçildi] Sanal Hesap İşlem Hatası ({coin_label}): Emir gönderilemedi veya koin vapi'de aktif değil."
         print(err_msg)
-        telegram_bildir(err_msg)
         return False, 0, 0
 
 def execute_arbitrage_exit(symbol, spot_qty, futures_qty):
