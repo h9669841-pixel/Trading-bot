@@ -1,28 +1,16 @@
-import os
-import json
-import time
-import requests
-import threading
-import traceback
-import socket  # 🎯 Python'ın yerel soket kütüphanesi
-from binance.client import Client
+
+import 
+import socket  # 🎯 Pyt
 from binance.enums import *
-from binance.exceptions import BinanceAPIException
-from websocket import WebSocketApp
+from binance.exceptions import BinanceAPIE
 
 # --- 🌐 GLOBAL SOCKS5 ENJEKSİYONU (ÇEKİRDEK SEVİYESİNDE) ---
 PROXY_URL = os.environ.get("PROXY_URL") 
 
-if PROXY_URL:
-    try:
-        import socks
-        from urllib.parse import urlparse, unquote
+if PROXYmport urlparse, unquote
         
         parsed_proxy = urlparse(PROXY_URL)
-        proxy_host = parsed_proxy.hostname
-        proxy_port = parsed_proxy.port
-        proxy_user = unquote(parsed_proxy.username) if parsed_proxy.username else None
-        proxy_pass = unquote(parsed_proxy.password) if parsed_proxy.password else None
+y_pass = unquote(parsed_proxy.password) if parsed_proxy.password else None
 
         print(f"🌐 SOCKS5 Protokolü Çekirdeğe Enjekte Ediliyor: {proxy_host}:{proxy_port}")
         
