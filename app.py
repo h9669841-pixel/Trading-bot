@@ -46,10 +46,13 @@ BINANCE_SECRET_KEY = os.environ.get("BINANCE_SECRET_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY)
+# 🎯 DEMO (TESTNET) AYARI: demo.binance.com anahtarlarının çalışması için testnet=True yapıldı.
+# İleride gerçek parayla canlı hesaba geçmek istersen sadece testnet=False yapman yeterli!
+USE_TESTNET = True 
+client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY, testnet=USE_TESTNET)
 
 # --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
-GIRIS_MAKAS_YUZDE = 0.31  # 🎯 41 olan değer %0.41 olarak düzeltildi
+GIRIS_MAKAS_YUZDE = 0.41  # 🎯 41 olan değer makul arbitraj seviyesi olan %0.41'e düzeltildi
 CIKIS_MAKAS_YUZDE = 0.02  
 
 SPOT_BAKIYE = 15.0       # 🎯 Binance minimum emir limitine (MIN_NOTIONAL) takılmamak için 15 USDT yapıldı
@@ -65,7 +68,12 @@ arbitraj_pozisyonlari = {}
 
 def get_all_futures_symbols():
     try:
-        url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
+        # Testnet moduna göre exchange info endpoint'ini seçiyoruz
+        if USE_TESTNET:
+            url = "https://testnet.binancefuture.com/fapi/v1/exchangeInfo"
+        else:
+            url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
+            
         r = requests.get(url, timeout=10)
         if r.status_code == 200:
             data = r.json()
@@ -86,6 +94,7 @@ def set_all_leverages():
             client.futures_change_leverage(symbol=symbol.upper(), leverage=1)
             time.sleep(0.1) # Rate limit koruması
         except BinanceAPIException as b_err:
+            # Testnet ortamında bazı koinlerin kaldıracı değiştirilemeyebilir, loglayıp geçiyoruz
             print(f"⚠️ {symbol.upper()} kaldıraç değiştirilemedi: {b_err.message}")
         except Exception as e:
             print(f"❌ Kaldıraç ayar hatası ({symbol.upper()}): {e}")
@@ -120,7 +129,6 @@ def get_lot_size_precision(symbol):
                     step_size = float(f['stepSize'])
                     if step_size >= 1.0:
                         return 0
-                    # Virgülden sonraki hane sayısını string üzerinden dinamik hesaplar
                     return len(str(step_size).split('.')[1].rstrip('0'))
     except Exception as e:
         print(f"⚠️ {symbol} için LOT_SIZE hassasiyeti alınamadı, varsayılan 2 kullanılacak: {e}")
@@ -130,20 +138,19 @@ def get_lot_size_precision(symbol):
 def execute_arbitrage_entry(symbol, spot_price, futures_price):
     coin_label = symbol.upper()
     try:
-        # 🎯 LOT_SIZE filtresine göre dinamik basamak hassasiyeti alınıyor
         precision = get_lot_size_precision(coin_label)
         
         raw_spot_qty = SPOT_BAKIYE / spot_price
         raw_futures_qty = FUTURES_BAKIYE / futures_price
         
-        # 🎯 Matematiksel Kırpma (Truncate) -> round() yerine güvenli aşağı yuvarlama
+        # 🎯 LOT_SIZE Hatası Almamak İçin Güvenli Aşağı Yuvarlama (Truncate)
         factor = 10 ** precision
         spot_quantity = int(raw_spot_qty * factor) / factor if precision > 0 else int(raw_spot_qty)
         futures_quantity = int(raw_futures_qty * factor) / factor if precision > 0 else int(raw_futures_qty)
 
         print(f"⚙️ {coin_label} Hassasiyet: {precision} | Emir Adetleri -> Spot: {spot_quantity}, Futures: {futures_quantity}")
 
-        # Emirler ardı ardına asenkron hıza yakın şekilde fırlatılır
+        # Emirler fırlatılıyor
         spot_order = client.create_order(symbol=coin_label, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=spot_quantity)
         futures_order = client.futures_create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=futures_quantity)
         return True, spot_quantity, futures_quantity
@@ -197,7 +204,12 @@ def start_multi_spot_ws():
         start_multi_spot_ws()
 
     streams = "/".join([f"{symbol}@trade" for symbol in SYMBOLS[:150]])
-    url = f"wss://stream.binance.com:9443/stream?streams={streams}"
+    
+    # 🎯 Testnet durumuna göre WebSocket ana akış adresini seçiyoruz
+    if USE_TESTNET:
+        url = f"wss://testnet.binance.vision/stream?streams={streams}"
+    else:
+        url = f"wss://stream.binance.com:9443/stream?streams={streams}"
     
     WebSocketApp(url, on_message=on_message, on_error=on_error, on_close=on_close).run_forever()
 
@@ -218,7 +230,12 @@ def start_multi_futures_ws():
         start_multi_futures_ws()
 
     streams = "/".join([f"{symbol}@trade" for symbol in SYMBOLS[:150]])
-    url = f"wss://fstream.binance.com/stream?streams={streams}"
+    
+    # 🎯 Testnet durumuna göre Vadeli İşlemler WebSocket adresini seçiyoruz
+    if USE_TESTNET:
+        url = f"wss://fstream.binancefuture.com/stream?streams={streams}"
+    else:
+        url = f"wss://fstream.binance.com/stream?streams={streams}"
     
     WebSocketApp(url, on_message=on_message, on_error=on_error, on_close=on_close).run_forever()
 
@@ -247,12 +264,12 @@ def arbitraj_tarama_dongusu():
                         basarili, s_qty, f_qty = execute_arbitrage_entry(symbol, spot_fiyat, futures_fiyat)
                         if basarili:
                             pos.update({"aktif": True, "giris_makas": anlik_makas, "spot_adet": s_qty, "futures_adet": f_qty})
-                            telegram_bildir(f"🤖 <b>İŞLEME GİRİLDİ</b>\n\n📊 <b>Koin:</b> {coin_label}\n⚡ <b>Makas:</b> +%{anlik_makas:.4f}\n💵 <b>Tahmini Net Kâr:</b> {net:.4f} USDT")
+                            telegram_bildir(f"🤖 <b>İŞLEME GİRİLDİ (TESTNET)</b>\n\n📊 <b>Koin:</b> {coin_label}\n⚡ <b>Makas:</b> +%{anlik_makas:.4f}\n💵 <b>Tahmini Net Kâr:</b> {net:.4f} USDT")
                 else:
                     if anlik_makas <= CIKIS_MAKAS_YUZDE:
                         if execute_arbitrage_exit(symbol, pos["spot_adet"], pos["futures_adet"]):
                             brut, kesinti, net = net_kar_hesapla(pos["giris_makas"], anlik_makas)
-                            telegram_bildir(f"🤝 <b>🔒 POZİSYON KAPATILDI</b>\n\n🎉 <b>NET REALİZE KÂR:</b> {net:.4f} USDT")
+                            telegram_bildir(f"🤝 <b>🔒 POZİSYON KAPATILDI (TESTNET)</b>\n\n🎉 <b>NET REALİZE KÂR:</b> {net:.4f} USDT")
                             pos["aktif"] = False
 
             if en_yuksek_makaslar:
@@ -270,10 +287,10 @@ if __name__ == "__main__":
     piyasa_verisi = {symbol: {"spot_price": None, "futures_price": None} for symbol in SYMBOLS}
     arbitraj_pozisyonlari = {symbol: {"aktif": False, "giris_makas": 0.0, "spot_adet": 0.0, "futures_adet": 0.0} for symbol in SYMBOLS}
     
-    # Kaldıraç ayarları başlangıçta bir kez yapılır
+    # Kaldıraç ayarları başlangıçta testnet modunda yapılır
     set_all_leverages()
     
-    telegram_bildir(f"🤖 <b>SOCKS5 Enjeksiyonlu Robot Başlatıldı!</b>\n🎯 <b>Giriş Eşiği:</b> +%{GIRIS_MAKAS_YUZDE}")
+    telegram_bildir(f"🤖 <b>SOCKS5 Enjeksiyonlu Demo Robotu Başlatıldı!</b>\n🎯 <b>Giriş Eşiği:</b> +%{GIRIS_MAKAS_YUZDE}")
     
     threading.Thread(target=start_multi_spot_ws, daemon=True).start()
     threading.Thread(target=start_multi_futures_ws, daemon=True).start()
