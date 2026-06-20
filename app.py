@@ -10,7 +10,7 @@ from binance.exceptions import BinanceAPIException
 from websocket import WebSocketApp
 from urllib.parse import urlparse, unquote
 
-# --- 🌐 PROXY CONFIGURATION (Python 3.13 Tam Uyumlu Kararlı Mod) ---
+# --- 🌐 PROXY CONFIGURATION ---
 PROXY_URL = os.environ.get("PROXY_URL") 
 
 requests_proxies = None
@@ -26,13 +26,11 @@ if PROXY_URL:
 
         print(f"🌐 Proxy Bilgileri Ayarlanıyor: {proxy_host}:{proxy_port}")
         
-        # 1. REST API için proxy sözlüğü (requests kütüphanesi için)
         requests_proxies = {
             "http": PROXY_URL,
             "https": PROXY_URL
         }
         
-        # 2. WebSocketApp için Protokol ve El Sıkışma Hatalarını Çözen Parametreler
         ws_proxy_params = {
             "http_proxy_host": proxy_host,
             "http_proxy_port": proxy_port,
@@ -48,7 +46,7 @@ BINANCE_SECRET_KEY = os.environ.get("BINANCE_SECRET_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# 🎯 DEMO (TESTNET) AYARI: demo.binance.com anahtarlarının çalışması için True kalmalı.
+# 🎯 DEMO (TESTNET) AYARI
 USE_TESTNET = True 
 
 client = Client(
@@ -59,10 +57,10 @@ client = Client(
 )
 
 # --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
-GIRIS_MAKAS_YUZDE = 0.41  # 🎯 Makul arbitraj giriş eşiği %0.41 seviyesine çekildi
+GIRIS_MAKAS_YUZDE = 0.41  
 CIKIS_MAKAS_YUZDE = 0.02  
 
-SPOT_BAKIYE = 15.0       # 🎯 Minimum emir limiti (MIN_NOTIONAL) koruması
+SPOT_BAKIYE = 15.0       
 FUTURES_BAKIYE = 15.0    
 
 SPOT_FEE_RATE = 0.0750 / 100     
@@ -123,7 +121,6 @@ def net_kar_hesapla(giris_makas, kapanis_makas):
     net_kazanc_usdt = brut_kazanc_usdt - toplam_kesinti_usdt
     return brut_kazanc_usdt, toplam_kesinti_usdt, net_kazanc_usdt
 
-# --- 🎯 DİNAMİK LOT SIZE HESAPLAMA FONKSİYONU ---
 def get_lot_size_precision(symbol):
     try:
         info = client.get_symbol_info(symbol.upper())
@@ -138,7 +135,6 @@ def get_lot_size_precision(symbol):
         print(f"⚠️ {symbol} için LOT_SIZE hassasiyeti alınamadı, varsayılan 2 kullanılacak: {e}")
     return 2
 
-# --- 🎯 AKTİF EMİR YÖNETİM MOTORU ---
 def execute_arbitrage_entry(symbol, spot_price, futures_price):
     coin_label = symbol.upper()
     try:
@@ -187,66 +183,77 @@ def execute_arbitrage_exit(symbol, spot_qty, futures_qty):
         telegram_bildir(err_msg)
         return False
 
-# --- 🌐 GLOBAL WEBSOCKET AKIŞLARI (TESTNET UYUMLU KESİN SÜRÜM) ---
-def start_multi_spot_ws():
+# --- 🌐 GLOBAL WEBSOCKET AKIŞLARI (KÖKTEN ÇÖZÜM SÜRÜMÜ) ---
+
+# 🎯 Spot Testnet'in 404 hatasını ezmek için tekli bağlantı işleyicisi
+def connect_single_spot_ws(symbol):
     def on_message(ws, message):
         data = json.loads(message)
-        stream_name = data.get("stream", "")
-        symbol = stream_name.split("@")[0]
-        if symbol in piyasa_verisi:
-            piyasa_verisi[symbol]["spot_price"] = float(data.get("data", {}).get("p", 0))
+        # Tekli stream yapısında veri doğrudan veya 'p' içinde gelebilir
+        price = data.get("p") or data.get("data", {}).get("p")
+        if price:
+            piyasa_verisi[symbol]["spot_price"] = float(price)
 
-    def on_error(ws, error): 
-        print(f"❌ Global Spot WS Hatası: {error}")
+    def on_error(ws, error):
+        pass # Log kirliliği olmaması için sessizce geçilir
         
-    def on_close(ws, c_code, c_msg): 
-        print(f"🔄 Spot WS kapandı. 5 saniye sonra yeniden bağlanıyor...")
+    def on_close(ws, c_code, c_msg):
         time.sleep(5)
-        start_multi_spot_ws()
+        connect_single_spot_ws(symbol)
 
-    # 🎯 TESTNET GARANTİ LİSTE: Spot testnet sunucusunda 404 hatasını önleyen güvenli liste
-    if USE_TESTNET:
-        active_symbols = ["btcusdt", "ethusdt", "solusdt", "xrpusdt", "bnbusdt", "adausdt", "dogeusdt", "trxusdt", "linkusdt", "dotusdt"]
-    else:
-        active_symbols = [s for s in SYMBOLS[:100]] 
-
-    streams = "/".join([f"{symbol}@trade" for symbol in active_symbols])
-    
-    if USE_TESTNET:
-        url = f"wss://testnet.binance.vision/stream?streams={streams}"
-    else:
-        url = f"wss://stream.binance.com:9443/stream?streams={streams}"
-    
-    print(f"📡 Spot WS Bağlantısı Açılıyor: {len(active_symbols)} koin dinleniyor...")
+    url = f"wss://testnet.binance.vision/ws/{symbol}@trade"
     WebSocketApp(url, on_message=on_message, on_error=on_error, on_close=on_close).run_forever(**ws_proxy_params)
+
+def start_multi_spot_ws():
+    if USE_TESTNET:
+        # 🎯 Testnet modunda 404 yememek için koinleri tek tek Thread olarak ayağa kaldırıyoruz
+        active_symbols = ["btcusdt", "ethusdt", "solusdt", "xrpusdt", "bnbusdt", "adausdt", "dogeusdt", "trxusdt", "linkusdt", "dotusdt"]
+        print(f"📡 Spot (TESTNET): {len(active_symbols)} koin için izole tüneller açılıyor...")
+        for symbol in active_symbols:
+            threading.Thread(target=connect_single_spot_ws, args=(symbol,), daemon=True).start()
+            time.sleep(0.2) # Proxy'yi boğmamak için küçük bir nefes payı
+    else:
+        # Canlı ortamda devasa toplu stream mimarisi
+        def on_message(ws, message):
+            data = json.loads(message)
+            symbol = data.get("stream", "").split("@")[0]
+            if symbol in piyasa_verisi:
+                piyasa_verisi[symbol]["spot_price"] = float(data.get("data", {}).get("p", 0))
+
+        def on_close(ws, c_code, c_msg):
+            time.sleep(5)
+            start_multi_spot_ws()
+
+        active_symbols = [s for s in SYMBOLS[:100]]
+        streams = "/".join([f"{symbol}@trade" for symbol in active_symbols])
+        url = f"wss://stream.binance.com:9443/stream?streams={streams}"
+        print(f"📡 Spot (CANLI): {len(active_symbols)} koin havuzdan dinleniyor...")
+        WebSocketApp(url, on_message=on_message, on_close=on_close).run_forever(**ws_proxy_params)
 
 def start_multi_futures_ws():
     def on_message(ws, message):
         data = json.loads(message)
-        stream_name = data.get("stream", "")
-        symbol = stream_name.split("@")[0]
-        if symbol in piyasa_verisi:
-            piyasa_verisi[symbol]["futures_price"] = float(data.get("data", {}).get("p", 0))
+        stream_name = data.get("stream", "") or data.get("stream")
+        symbol = stream_name.split("@")[0] if stream_name else symbol
+        # Eğer veri düz formatta geldiyse ayıkla
+        price = data.get("data", {}).get("p") or data.get("p")
+        if symbol in piyasa_verisi and price:
+            piyasa_verisi[symbol]["futures_price"] = float(price)
 
     def on_error(ws, error): 
         print(f"❌ Global Futures WS Hatası: {error}")
         
     def on_close(ws, c_code, c_msg): 
-        print(f"🔄 Futures WS kapandı. 5 saniye sonra yeniden bağlanıyor...")
         time.sleep(5)
         start_multi_futures_ws()
 
-    # 🎯 TESTNET GARANTİ LİSTE: Futures testnet sunucusunda 404 hatasını önleyen güvenli liste
     if USE_TESTNET:
         active_symbols = ["btcusdt", "ethusdt", "solusdt", "xrpusdt", "bnbusdt", "adausdt", "dogeusdt", "trxusdt", "linkusdt", "dotusdt"]
-    else:
-        active_symbols = [s for s in SYMBOLS[:100]]
-
-    streams = "/".join([f"{symbol}@trade" for symbol in active_symbols])
-    
-    if USE_TESTNET:
+        streams = "/".join([f"{symbol}@trade" for symbol in active_symbols])
         url = f"wss://fstream.binancefuture.com/stream?streams={streams}"
     else:
+        active_symbols = [s for s in SYMBOLS[:100]]
+        streams = "/".join([f"{symbol}@trade" for symbol in active_symbols])
         url = f"wss://fstream.binance.com/stream?streams={streams}"
     
     print(f"📡 Futures WS Bağlantısı Açılıyor: {len(active_symbols)} koin dinleniyor...")
