@@ -83,7 +83,6 @@ def get_all_futures_symbols():
             symbols = []
             for market in data.get("symbols", []):
                 if market.get("quoteAsset") == "USDT" and market.get("status") == "TRADING":
-                    # 🎯 Tüm semboller kesin olarak küçük harfe çevriliyor
                     symbols.append(market.get("symbol").lower())
             return symbols
     except Exception as e:
@@ -98,7 +97,7 @@ def set_all_leverages():
             client.futures_change_leverage(symbol=symbol.upper(), leverage=1)
             time.sleep(0.1) 
         except BinanceAPIException as b_err:
-            pass  # Testnet üzerinde bazı kaldıraç hatalarını gizle log kirlenmesin
+            pass  
         except Exception as e:
             pass
 
@@ -179,14 +178,14 @@ def execute_arbitrage_exit(symbol, spot_qty, futures_qty):
         telegram_bildir(err_msg)
         return False
 
-# --- 🌐 GLOBAL WEBSOCKET AKIŞLARI ---
+# --- 🌐 GLOBAL WEBSOCKET AKIŞLARI (@ticker GÜNCELLEMESİ) ---
 
 def connect_single_spot_ws(symbol):
     def on_message(ws, message):
         data = json.loads(message)
-        price = data.get("p") or data.get("data", {}).get("p")
+        # ticker stream'inde son fiyat 'c' (current/close price) içinde gelir
+        price = data.get("c") or data.get("data", {}).get("c")
         if price:
-            # 🎯 Sembol isminin kesinlikle küçük harf olması garanti ediliyor
             piyasa_verisi[symbol.lower()]["spot_price"] = float(price)
 
     def on_error(ws, error):
@@ -196,7 +195,8 @@ def connect_single_spot_ws(symbol):
         time.sleep(5)
         connect_single_spot_ws(symbol)
 
-    url = f"wss://testnet.binancevision.com/ws/{symbol.lower()}@trade"
+    # 🎯 TESTNET İÇİN @ticker AKIŞINA GEÇİLDİ (Sürekli fiyat akışı sağlar)
+    url = f"wss://testnet.binancevision.com/ws/{symbol.lower()}@ticker"
     WebSocketApp(url, on_message=on_message, on_error=on_error, on_close=on_close).run_forever(**ws_proxy_params)
 
 def start_multi_spot_ws():
@@ -227,12 +227,15 @@ def start_multi_futures_ws():
     def on_message(ws, message):
         data = json.loads(message)
         stream_name = data.get("stream", "")
-        if not stream_name and "e" in data:  # Tekli/Düz format gelirse koruma
+        
+        # Ticker veya normal veri formatına göre fiyatı ayıkla
+        if not stream_name:
             symbol = data.get("s", "").lower()
-            price = data.get("p")
+            price = data.get("c") or data.get("p")
         else:
             symbol = stream_name.split("@")[0].lower()
-            price = data.get("data", {}).get("p") or data.get("p")
+            inner_data = data.get("data", {})
+            price = inner_data.get("c") or inner_data.get("p") or data.get("p")
 
         if symbol in piyasa_verisi and price:
             piyasa_verisi[symbol]["futures_price"] = float(price)
@@ -246,7 +249,8 @@ def start_multi_futures_ws():
 
     if USE_TESTNET:
         active_symbols = ["btcusdt", "ethusdt", "solusdt", "xrpusdt", "bnbusdt", "adausdt", "dogeusdt", "trxusdt", "linkusdt", "dotusdt"]
-        streams = "/".join([f"{symbol}@trade" for symbol in active_symbols])
+        # Futures testnet için de garantili @ticker yapısına geçiyoruz
+        streams = "/".join([f"{symbol}@ticker" for symbol in active_symbols])
         url = f"wss://fstream.binancefuture.com/stream?streams={streams}"
     else:
         active_symbols = [s for s in SYMBOLS[:100]]
@@ -261,7 +265,6 @@ def arbitraj_tarama_dongusu():
     while True:
         try:
             en_yuksek_makaslar = []
-            # Tarama listesini testnet ve canlıya göre güvenli yapıyoruz
             tarama_listesi = ["btcusdt", "ethusdt", "solusdt", "xrpusdt", "bnbusdt", "adausdt", "dogeusdt", "trxusdt", "linkusdt", "dotusdt"] if USE_TESTNET else SYMBOLS[:100]
             
             for symbol in tarama_listesi:
@@ -305,7 +308,6 @@ def arbitraj_tarama_dongusu():
         time.sleep(2)
 
 if __name__ == "__main__":
-    # Garanti olması açısından temel testnet havuzunu hemen hazırlıyoruz
     base_symbols = ["btcusdt", "ethusdt", "solusdt", "xrpusdt", "bnbusdt", "adausdt", "dogeusdt", "trxusdt", "linkusdt", "dotusdt"]
     for s in base_symbols:
         piyasa_verisi[s] = {"spot_price": None, "futures_price": None}
@@ -313,7 +315,6 @@ if __name__ == "__main__":
 
     SYMBOLS = get_all_futures_symbols()
     
-    # Ekstra gelen koinler varsa onları da havuzumuza ekliyoruz
     for symbol in SYMBOLS:
         if symbol not in piyasa_verisi:
             piyasa_verisi[symbol] = {"spot_price": None, "futures_price": None}
