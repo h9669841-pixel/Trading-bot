@@ -1,4 +1,4 @@
 requests
-PySocks
 websocket-client
 python-binance
+python-socks
