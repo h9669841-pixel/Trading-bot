@@ -46,7 +46,7 @@ client = Client(
 )
 
 # --- 📊 ARBİTRAJ STRATEJİ AYARLARI (GERÇEK HESAP) ---
-GIRIS_MAKAS_YUZDE = 10.41  
+GIRIS_MAKAS_YUZDE = 0.41  
 CIKIS_MAKAS_YUZDE = 0.02  
 
 # ⚠️ Burayı cüzdanındaki bütçeye göre ayarlayabilirsin (Örn: 10.0 dolar)
