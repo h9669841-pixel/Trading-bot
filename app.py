@@ -4,41 +4,43 @@ import time
 import requests
 import threading
 import traceback
-import socket  # 🎯 Python'ın yerel soket kütüphanesi
 from binance.client import Client
 from binance.enums import *
 from binance.exceptions import BinanceAPIException
 from websocket import WebSocketApp
+from urllib.parse import urlparse, unquote
 
-# --- 🌐 GLOBAL SOCKS5 ENJEKSİYONU (ÇEKİRDEK SEVİYESİNDE) ---
+# --- 🌐 PROXY CONFIGURATION (Python 3.13 Native Mod) ---
 PROXY_URL = os.environ.get("PROXY_URL") 
+
+requests_proxies = None
+ws_proxy_params = {}
 
 if PROXY_URL:
     try:
-        import socks
-        from urllib.parse import urlparse, unquote
-        
         parsed_proxy = urlparse(PROXY_URL)
         proxy_host = parsed_proxy.hostname
         proxy_port = parsed_proxy.port
         proxy_user = unquote(parsed_proxy.username) if parsed_proxy.username else None
         proxy_pass = unquote(parsed_proxy.password) if parsed_proxy.password else None
 
-        print(f"🌐 SOCKS5 Protokolü Çekirdeğe Enjekte Ediliyor: {proxy_host}:{proxy_port}")
+        print(f"🌐 Proxy Bilgileri Ayarlanıyor: {proxy_host}:{proxy_port}")
         
-        # Python'ın tüm soket trafiğini (REST ve WS) global olarak SOCKS5 proxy'sine gömüyoruz.
-        socks.set_default_proxy(
-            socks.SOCKS5, 
-            addr=proxy_host, 
-            port=proxy_port, 
-            username=proxy_user, 
-            password=proxy_pass,
-            rdns=True # DNS sorgularını da proxy üzerinden güvenli çözümler
-        )
-        socket.socket = socks.socksocket # Tüm sistemi SOCKS5 soketine yamala
+        # 1. REST API (requests) için proxy sözlüğü (python-binance içinden requests'e beslenecek)
+        requests_proxies = {
+            "http": PROXY_URL,
+            "https": PROXY_URL
+        }
         
-    except ImportError:
-        print("❌ HATA: SOCKS5 aktif edilemedi. Lütfen terminalde 'pip install PySocks' çalıştırın.")
+        # 2. WebSocketApp için özel proxy parametreleri
+        ws_proxy_params = {
+            "http_proxy_host": proxy_host,
+            "http_proxy_port": proxy_port,
+            "http_proxy_auth": (proxy_user, proxy_pass) if proxy_user else None,
+            "proxy_type": "socks5"  # 🎯 WebSocket kütüphanesine doğrudan SOCKS5 olduğunu dikte ediyoruz
+        }
+    except Exception as e:
+        print(f"❌ Proxy ayrıştırma hatası: {e}")
 
 # --- 🔑 GÜVENLİK VE API AYARLARI ---
 BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")
@@ -46,16 +48,21 @@ BINANCE_SECRET_KEY = os.environ.get("BINANCE_SECRET_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# 🎯 DEMO (TESTNET) AYARI: demo.binance.com anahtarlarının çalışması için testnet=True yapıldı.
-# İleride gerçek parayla canlı hesaba geçmek istersen sadece testnet=False yapman yeterli!
 USE_TESTNET = True 
-client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY, testnet=USE_TESTNET)
+
+# 🎯 REST API istekleri için proxy parametresini buraya gömüyoruz
+client = Client(
+    BINANCE_API_KEY, 
+    BINANCE_SECRET_KEY, 
+    testnet=USE_TESTNET,
+    requests_params={"proxies": requests_proxies} if requests_proxies else {}
+)
 
 # --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
-GIRIS_MAKAS_YUZDE = 0.41  # 🎯 41 olan değer makul arbitraj seviyesi olan %0.41'e düzeltildi
+GIRIS_MAKAS_YUZDE = 0.41  
 CIKIS_MAKAS_YUZDE = 0.02  
 
-SPOT_BAKIYE = 15.0       # 🎯 Binance minimum emir limitine (MIN_NOTIONAL) takılmamak için 15 USDT yapıldı
+SPOT_BAKIYE = 15.0       
 FUTURES_BAKIYE = 15.0    
 
 SPOT_FEE_RATE = 0.0750 / 100     
@@ -68,13 +75,13 @@ arbitraj_pozisyonlari = {}
 
 def get_all_futures_symbols():
     try:
-        # Testnet moduna göre exchange info endpoint'ini seçiyoruz
         if USE_TESTNET:
             url = "https://testnet.binancefuture.com/fapi/v1/exchangeInfo"
         else:
             url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
             
-        r = requests.get(url, timeout=10)
+        # 🎯 Doğrudan proxy parametresiyle güvenli istek
+        r = requests.get(url, proxies=requests_proxies, timeout=10)
         if r.status_code == 200:
             data = r.json()
             symbols = []
@@ -92,9 +99,8 @@ def set_all_leverages():
     for symbol in SYMBOLS[:150]:
         try:
             client.futures_change_leverage(symbol=symbol.upper(), leverage=1)
-            time.sleep(0.1) # Rate limit koruması
+            time.sleep(0.1) 
         except BinanceAPIException as b_err:
-            # Testnet ortamında bazı koinlerin kaldıracı değiştirilemeyebilir, loglayıp geçiyoruz
             print(f"⚠️ {symbol.upper()} kaldıraç değiştirilemedi: {b_err.message}")
         except Exception as e:
             print(f"❌ Kaldıraç ayar hatası ({symbol.upper()}): {e}")
@@ -105,7 +111,8 @@ def telegram_bildir(mesaj):
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": mesaj, "parse_mode": "HTML"}, timeout=5)
+        # 🎯 Telegram engellenebilecek ülkelerde proxy üzerinden gitsin diye ekledik
+        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": mesaj, "parse_mode": "HTML"}, proxies=requests_proxies, timeout=5)
     except Exception as e:
         print(f"❌ Telegram hatası: {e}")
 
@@ -118,9 +125,7 @@ def net_kar_hesapla(giris_makas, kapanis_makas):
     net_kazanc_usdt = brut_kazanc_usdt - toplam_kesinti_usdt
     return brut_kazanc_usdt, toplam_kesinti_usdt, net_kazanc_usdt
 
-# --- 🎯 DİNAMİK LOT SIZE HESAPLAMA FONKSİYONU ---
 def get_lot_size_precision(symbol):
-    """Koinin borsadaki izin verilen maksimum virgülden sonraki hane sayısını (Step Size) bulur"""
     try:
         info = client.get_symbol_info(symbol.upper())
         if info and 'filters' in info:
@@ -134,23 +139,19 @@ def get_lot_size_precision(symbol):
         print(f"⚠️ {symbol} için LOT_SIZE hassasiyeti alınamadı, varsayılan 2 kullanılacak: {e}")
     return 2
 
-# --- 🎯 AKTİF EMİR YÖNETİM MOTORU ---
 def execute_arbitrage_entry(symbol, spot_price, futures_price):
     coin_label = symbol.upper()
     try:
         precision = get_lot_size_precision(coin_label)
-        
         raw_spot_qty = SPOT_BAKIYE / spot_price
         raw_futures_qty = FUTURES_BAKIYE / futures_price
         
-        # 🎯 LOT_SIZE Hatası Almamak İçin Güvenli Aşağı Yuvarlama (Truncate)
         factor = 10 ** precision
         spot_quantity = int(raw_spot_qty * factor) / factor if precision > 0 else int(raw_spot_qty)
         futures_quantity = int(raw_futures_qty * factor) / factor if precision > 0 else int(raw_futures_qty)
 
         print(f"⚙️ {coin_label} Hassasiyet: {precision} | Emir Adetleri -> Spot: {spot_quantity}, Futures: {futures_quantity}")
 
-        # Emirler fırlatılıyor
         spot_order = client.create_order(symbol=coin_label, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=spot_quantity)
         futures_order = client.futures_create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=futures_quantity)
         return True, spot_quantity, futures_quantity
@@ -205,13 +206,13 @@ def start_multi_spot_ws():
 
     streams = "/".join([f"{symbol}@trade" for symbol in SYMBOLS[:150]])
     
-    # 🎯 Testnet durumuna göre WebSocket ana akış adresini seçiyoruz
     if USE_TESTNET:
         url = f"wss://testnet.binance.vision/stream?streams={streams}"
     else:
         url = f"wss://stream.binance.com:9443/stream?streams={streams}"
     
-    WebSocketApp(url, on_message=on_message, on_error=on_error, on_close=on_close).run_forever()
+    # 🎯 Çözüm Burası: SOCKS5 parametrelerini run_forever içerisine açarak (unpack) veriyoruz
+    WebSocketApp(url, on_message=on_message, on_error=on_error, on_close=on_close).run_forever(**ws_proxy_params)
 
 def start_multi_futures_ws():
     def on_message(ws, message):
@@ -231,13 +232,13 @@ def start_multi_futures_ws():
 
     streams = "/".join([f"{symbol}@trade" for symbol in SYMBOLS[:150]])
     
-    # 🎯 Testnet durumuna göre Vadeli İşlemler WebSocket adresini seçiyoruz
     if USE_TESTNET:
         url = f"wss://fstream.binancefuture.com/stream?streams={streams}"
     else:
         url = f"wss://fstream.binance.com/stream?streams={streams}"
     
-    WebSocketApp(url, on_message=on_message, on_error=on_error, on_close=on_close).run_forever()
+    # 🎯 Çözüm Burası: SOCKS5 parametrelerini run_forever içerisine açarak (unpack) veriyoruz
+    WebSocketApp(url, on_message=on_message, on_error=on_error, on_close=on_close).run_forever(**ws_proxy_params)
 
 def arbitraj_tarama_dongusu():
     global arbitraj_pozisyonlari
@@ -287,10 +288,9 @@ if __name__ == "__main__":
     piyasa_verisi = {symbol: {"spot_price": None, "futures_price": None} for symbol in SYMBOLS}
     arbitraj_pozisyonlari = {symbol: {"aktif": False, "giris_makas": 0.0, "spot_adet": 0.0, "futures_adet": 0.0} for symbol in SYMBOLS}
     
-    # Kaldıraç ayarları başlangıçta testnet modunda yapılır
     set_all_leverages()
     
-    telegram_bildir(f"🤖 <b>SOCKS5 Enjeksiyonlu Demo Robotu Başlatıldı!</b>\n🎯 <b>Giriş Eşiği:</b> +%{GIRIS_MAKAS_YUZDE}")
+    telegram_bildir(f"🤖 <b>SOCKS5 Destekli Demo Robotu Başlatıldı!</b>\n🎯 <b>Giriş Eşiği:</b> +%{GIRIS_MAKAS_YUZDE}")
     
     threading.Thread(target=start_multi_spot_ws, daemon=True).start()
     threading.Thread(target=start_multi_futures_ws, daemon=True).start()
