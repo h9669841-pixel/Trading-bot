@@ -37,7 +37,7 @@ if PROXY_URL:
             "http_proxy_host": proxy_host,
             "http_proxy_port": proxy_port,
             "http_proxy_auth": (proxy_user, proxy_pass) if proxy_user else None,
-            "proxy_type": "socks5"  # 🎯 Protokol eşleşme hatasını kesin olarak çözen satır
+            "proxy_type": "socks5"  
         }
     except Exception as e:
         print(f"❌ Proxy ayrıştırma hatası: {e}")
@@ -146,7 +146,6 @@ def execute_arbitrage_entry(symbol, spot_price, futures_price):
         raw_spot_qty = SPOT_BAKIYE / spot_price
         raw_futures_qty = FUTURES_BAKIYE / futures_price
         
-        # 🎯 LOT_SIZE Hatası Almamak İçin Güvenli Aşağı Yuvarlama (Truncate)
         factor = 10 ** precision
         spot_quantity = int(raw_spot_qty * factor) / factor if precision > 0 else int(raw_spot_qty)
         futures_quantity = int(raw_futures_qty * factor) / factor if precision > 0 else int(raw_futures_qty)
@@ -188,7 +187,7 @@ def execute_arbitrage_exit(symbol, spot_qty, futures_qty):
         telegram_bildir(err_msg)
         return False
 
-# --- 🌐 GLOBAL WEBSOCKET AKIŞLARI (TESTNET UYUMLU SEVİYE) ---
+# --- 🌐 GLOBAL WEBSOCKET AKIŞLARI (TESTNET UYUMLU KESİN SÜRÜM) ---
 def start_multi_spot_ws():
     def on_message(ws, message):
         data = json.loads(message)
@@ -205,10 +204,11 @@ def start_multi_spot_ws():
         time.sleep(5)
         start_multi_spot_ws()
 
-    # 🎯 Testnet'te 404 hatası almamak için varlığı kesin olan ana koinleri dinliyoruz
-    active_symbols = [s for s in SYMBOLS if s in ["btcusdt", "ethusdt", "solusdt", "xrpusdt", "bnbusdt", "adausdt", "dogeusdt", "trxusdt", "linkusdt", "dotusdt"]]
-    if not active_symbols:
-        active_symbols = ["btcusdt", "ethusdt", "solusdt", "xrpusdt"]
+    # 🎯 TESTNET GARANTİ LİSTE: Spot testnet sunucusunda 404 hatasını önleyen güvenli liste
+    if USE_TESTNET:
+        active_symbols = ["btcusdt", "ethusdt", "solusdt", "xrpusdt", "bnbusdt", "adausdt", "dogeusdt", "trxusdt", "linkusdt", "dotusdt"]
+    else:
+        active_symbols = [s for s in SYMBOLS[:100]] 
 
     streams = "/".join([f"{symbol}@trade" for symbol in active_symbols])
     
@@ -236,9 +236,11 @@ def start_multi_futures_ws():
         time.sleep(5)
         start_multi_futures_ws()
 
-    active_symbols = [s for s in SYMBOLS if s in ["btcusdt", "ethusdt", "solusdt", "xrpusdt", "bnbusdt", "adausdt", "dogeusdt", "trxusdt", "linkusdt", "dotusdt"]]
-    if not active_symbols:
-        active_symbols = ["btcusdt", "ethusdt", "solusdt", "xrpusdt"]
+    # 🎯 TESTNET GARANTİ LİSTE: Futures testnet sunucusunda 404 hatasını önleyen güvenli liste
+    if USE_TESTNET:
+        active_symbols = ["btcusdt", "ethusdt", "solusdt", "xrpusdt", "bnbusdt", "adausdt", "dogeusdt", "trxusdt", "linkusdt", "dotusdt"]
+    else:
+        active_symbols = [s for s in SYMBOLS[:100]]
 
     streams = "/".join([f"{symbol}@trade" for symbol in active_symbols])
     
@@ -256,6 +258,8 @@ def arbitraj_tarama_dongusu():
         try:
             en_yuksek_makaslar = []
             for symbol in SYMBOLS[:150]:
+                if symbol not in piyasa_verisi: continue
+                
                 spot_fiyat = piyasa_verisi[symbol]["spot_price"]
                 futures_fiyat = piyasa_verisi[symbol]["futures_price"]
                 
