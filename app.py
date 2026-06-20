@@ -36,7 +36,7 @@ if PROXY_URL:
     except Exception as e:
         print(f"❌ Proxy ayrıştırma hatası: {e}")
 
-# --- 🔑 SİMÜLASYON (MOCK) API ANAHTARLARI ---
+# --- 🔑 DEMO/TESTNET API ANAHTARLARI ---
 BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")
 BINANCE_SECRET_KEY = os.environ.get("BINANCE_SECRET_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -48,19 +48,17 @@ client = Client(
     requests_params={"proxies": requests_proxies} if requests_proxies else {}
 )
 
-# 🎯 SİMÜLASYON (MOCK TRADING) UÇ NOKTALARI
-client.API_URL = 'https://vapi.binance.com/api'          
-client.MARGIN_API_URL = 'https://vapi.binance.com/nvapi'
-client.FUTURES_API_URL = 'https://vapi.binance.com/fapi' 
+# 🎯 ÇÖZÜM: Hatalı vapi sunucuları iptal edildi, resmi ve güncel Binance Testnet altyapısına geçildi.
+client.API_URL = 'https://testnet.binance.vision/api'          
+client.FUTURE_URL = 'https://testnet.binancefuture.com'
+client.FUTURES_API_URL = 'https://testnet.binancefuture.com/fapi' 
 
 # --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
 GIRIS_MAKAS_YUZDE = 0.41  
 CIKIS_MAKAS_YUZDE = 0.02  
 
-# 💰 İŞLEM HACMİ AYARI
-# Eğer bakiye yetersiz hatası alırsan demo panelinden Spot cüzdanına USDT aktar veya bu tutarları düşür.
-SPOT_BAKIYE = 50.0       
-FUTURES_BAKIYE = 50.0    
+SPOT_BAKIYE = 100.0       
+FUTURES_BAKIYE = 100.0    
 
 SPOT_FEE_RATE = 0.0750 / 100     
 FUTURES_FEE_RATE = 0.0450 / 100  
@@ -73,6 +71,7 @@ symbol_precisions = {}
 def get_all_futures_symbols_and_precisions():
     global symbol_precisions
     try:
+        # Piyasa verilerini ve koin listesini her zaman hatasız olan CANLI borsadan çekiyoruz
         url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
         r = requests.get(url, proxies=requests_proxies, timeout=10)
         if r.status_code == 200:
@@ -133,16 +132,15 @@ def execute_arbitrage_entry(symbol, spot_price, futures_price):
     spot_quantity = int(raw_spot_qty * factor) / factor if precision > 0 else int(raw_spot_qty)
     futures_quantity = int(raw_futures_qty * factor) / factor if precision > 0 else int(raw_futures_qty)
 
-    # Adet sıfır çıkarsa işlemi iptal et (Çok pahalı koinlerde düşük bütçe kalırsa)
     if spot_quantity <= 0 or futures_quantity <= 0:
         print(f"⚠️ {coin_label} için hesaplanan adet yetersiz (0). İşlem pas geçildi.")
         return False, 0, 0
 
-    # 1. ADIM: SPOT ALIM DENEMESİ
+    # 1. ADIM: GÜNCEL TESTNET SPOT ALIMI
     spot_basarili = False
     for deneme in range(2):
         try:
-            print(f"🛒 [SPOT BUY] {coin_label} -> Adet: {spot_quantity} (Deneme {deneme+1})")
+            print(f"🛒 [SPOT BUY] {coin_label} -> Adet: {spot_quantity}")
             spot_order = client.create_order(symbol=coin_label, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=spot_quantity)
             print(f"✅ [SPOT BAŞARILI] {coin_label} alındı.")
             spot_basarili = True
@@ -152,14 +150,13 @@ def execute_arbitrage_entry(symbol, spot_price, futures_price):
             time.sleep(1)
 
     if not spot_basarili:
-        print(f"⛔ Spot alımı başarısız olduğu için Futures bacağı açılmadı, döngü kırıldı.")
         return False, 0, 0
 
-    # 2. ADIM: FUTURES SATIŞ (SHORT) DENEMESİ
+    # 2. ADIM: GÜNCEL TESTNET FUTURES SHORT AÇMA
     futures_basarili = False
     for deneme in range(2):
         try:
-            print(f"📉 [FUTURES SELL] {coin_label} -> Adet: {futures_quantity} (Deneme {deneme+1})")
+            print(f"📉 [FUTURES SELL] {coin_label} -> Adet: {futures_quantity}")
             futures_order = client.futures_create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=futures_quantity)
             print(f"✅ [FUTURES BAŞARILI] {coin_label} short pozisyon açıldı.")
             futures_basarili = True
@@ -169,12 +166,11 @@ def execute_arbitrage_entry(symbol, spot_price, futures_price):
             time.sleep(1)
 
     if spot_basarili and not futures_basarili:
-        # Tek taraflı kalmamak için acil durum spot satışı tetikle
-        print(f"🚨 ACİL DURUM: Futures açılamadı! Alınan spot mallar piyasaya geri satılıyor...")
+        print(f"🚨 ACİL DURUM: Futures açılamadı! Alınan spot mallar geri satılıyor...")
         try:
             client.create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=spot_quantity)
         except Exception as ex:
-            print(f"❌ Acil durum satışı da başarısız: {ex}")
+            print(f"❌ Acil durum satışı başarısız: {ex}")
         return False, 0, 0
 
     return True, spot_quantity, futures_quantity
@@ -256,12 +252,12 @@ def arbitraj_tarama_dongusu():
                         basarili, s_qty, f_qty = execute_arbitrage_entry(symbol, spot_fiyat, futures_fiyat)
                         if basarili:
                             pos.update({"aktif": True, "giris_makas": anlik_makas, "spot_adet": s_qty, "futures_adet": f_qty})
-                            telegram_bildir(f"🤖 <b>DEMO HESAP: İŞLEME GİRİLDİ</b>\n\n📊 <b>Koin:</b> {coin_label}\n⚡ <b>Canlı Makas:</b> +%{anlik_makas:.4f}\n💵 <b>Tahmini Net Kâr:</b> {net:.4f} USDT")
+                            telegram_bildir(f"🤖 <b>TESTNET HESAP: İİŞLEME GİRİLDİ</b>\n\n📊 <b>Koin:</b> {coin_label}\n⚡ <b>Canlı Makas:</b> +%{anlik_makas:.4f}\n💵 <b>Tahmini Net Kâr:</b> {net:.4f} USDT")
                 else:
                     if anlik_makas <= CIKIS_MAKAS_YUZDE:
                         if execute_arbitrage_exit(symbol, pos["spot_adet"], pos["futures_adet"]):
                             brut, kesinti, net = net_kar_hesapla(pos["giris_makas"], anlik_makas)
-                            telegram_bildir(f"🤝 <b>🔒 DEMO HESAP: POZİSYON KAPATILDI</b>\n\n🎉 <b>NET REALİZE KÂR:</b> {net:.4f} USDT")
+                            telegram_bildir(f"🤝 <b>🔒 TESTNET HESAP: POZİSYON KAPATILDI</b>\n\n🎉 <b>NET REALİZE KÂR:</b> {net:.4f} USDT")
                             pos["aktif"] = False
 
             if en_yuksek_makaslar:
@@ -274,7 +270,7 @@ def arbitraj_tarama_dongusu():
         time.sleep(1)
 
 if __name__ == "__main__":
-    print("⏳ Detaylı loglama motoru ayağa kaldırılıyor...")
+    print("⏳ Kusursuz Testnet entegrasyonu başlatılıyor...")
     SYMBOLS = get_all_futures_symbols_and_precisions()
     
     for symbol in SYMBOLS:
@@ -283,7 +279,7 @@ if __name__ == "__main__":
     
     set_all_leverages()
     
-    telegram_bildir(f"🚀 <b>Derin Analiz Botu Başlatıldı</b>\n🎯 Havuz: {len(SYMBOLS)} Koin")
+    telegram_bildir(f"🚀 <b>Resmi Testnet Arbitraj Robotu Aktif!</b>\n🎯 Havuz: {len(SYMBOLS)} Koin")
     
     threading.Thread(target=start_multi_spot_ws, daemon=True).start()
     threading.Thread(target=start_multi_futures_ws, daemon=True).start()
