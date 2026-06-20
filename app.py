@@ -48,7 +48,7 @@ client = Client(
     requests_params={"proxies": requests_proxies} if requests_proxies else {}
 )
 
-# 🎯 Resimdeki Demo Trading Anahtarları İçin Doğru Sunucu Adresleri:
+# 🎯 Demo Trading Sunucu Adresleri:
 client.API_URL = 'https://vapi.binance.com/api'          
 client.MARGIN_API_URL = 'https://vapi.binance.com/nvapi'
 client.FUTURES_API_URL = 'https://vapi.binance.com/fapi' 
@@ -104,6 +104,16 @@ def set_all_leverages():
         except Exception:
             pass
 
+def telegram_bildir(mesaj):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print(f"📢 [Telegram] -> {mesaj}")
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    try:
+        requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": mesaj, "parse_mode": "HTML"}, proxies=requests_proxies, timeout=5)
+    except Exception as e:
+        print(f"❌ Telegram hatası: {e}")
+
 def execute_arbitrage_entry(symbol, spot_price, futures_price):
     coin_label = symbol.upper()
     precision = symbol_precisions.get(coin_label, 2)
@@ -117,29 +127,37 @@ def execute_arbitrage_entry(symbol, spot_price, futures_price):
     if spot_quantity <= 0 or futures_quantity <= 0:
         return False, 0, 0
 
+    log_mesaj = f"🧪 <b>[TEST BAŞLADI] {coin_label} İşlemi Deneniyor</b>\n\n"
+    telegram_bildir(log_mesaj + f"⏳ Spot'tan market fiyatıyla {spot_quantity} adet alım emri ve Vadeli'den {futures_quantity} adet Short emri borsaya gönderiliyor...")
+
+    # 1. ADIM: SPOT ALIM
     try:
         print(f"🛒 [DEMO SPOT BUY] {coin_label} -> Adet: {spot_quantity}")
         client.create_order(symbol=coin_label, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=spot_quantity)
         print(f"✅ [SPOT BAŞARILI] {coin_label} alındı.")
+        telegram_bildir(f"✅ <b>[SPOT ALIM BAŞARILI]</b>\n{coin_label} market emriyle demo cüzdana satın alındı.")
+    except Exception as e:
+        print(f"❌ [SPOT HATASI] {coin_label} Alınamadı: {e}")
+        telegram_bildir(f"❌ <b>[SPOT ALIM HATASI]</b>\n{coin_label} alınamadı!\nDetay: {e}")
+        return False, 0, 0
         
+    # 2. ADIM: FUTURES SHORT
+    try:
         print(f"📉 [DEMO FUTURES SELL] {coin_label} -> Adet: {futures_quantity}")
         client.futures_create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=futures_quantity)
         print(f"✅ [FUTURES BAŞARILI] {coin_label} short pozisyon açıldı.")
-        
+        telegram_bildir(f"✅ <b>[FUTURES SHORT BAŞARILI]</b>\n{coin_label} Short (Satış) pozisyonu açıldı.\n\n📌 <b>NOT:</b> İstediğin üzerine bu pozisyonlar <u>kapatılmadı</u>, siteden kontrol etmen için açık bırakıldı!")
         return True, spot_quantity, futures_quantity
     except Exception as e:
-        print(f"❌ [İŞLEM BAŞARISIZ] {coin_label} emir hatası: {e}")
+        print(f"❌ [FUTURES HATASI] {coin_label} Short Açamadı: {e}")
+        telegram_bildir(f"❌ <b>[FUTURES SHORT HATASI]</b>\n{coin_label} Short pozisyon açılamadı!\nDetay: {e}")
         return False, 0, 0
 
 def execute_arbitrage_exit(symbol, spot_qty, futures_qty):
     coin_label = symbol.upper()
     try:
-        print(f"🛒 [DEMO SPOT SELL] {coin_label} -> Kapatma Adeti: {spot_qty}")
         client.create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=spot_qty)
-        
-        print(f"📈 [DEMO FUTURES BUY] {coin_label} -> Kapatma Adeti: {futures_qty}")
         client.futures_create_order(symbol=coin_label, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=futures_qty)
-        print(f"🤝 [KAPATMA BAŞARILI] {coin_label} pozisyonları sıfırlandı.")
         return True
     except Exception as e:
         print(f"❌ Kapatma Hatası: {e}")
@@ -148,31 +166,17 @@ def execute_arbitrage_exit(symbol, spot_qty, futures_qty):
 # 🧪 SADECE KODUN ÇALIŞTIĞINI GÖRMEK İÇİN ANLIK MECBURİ TEST FONKSİYONU
 def run_instant_btc_test():
     print("\n⚡⚡⚡ [TEST MODU] BTCUSDT MECBURİ EMİR TESTİ BAŞLATILIYOR... ⚡⚡⚡")
-    print("⏳ Güncel BTC fiyatı çekiliyor...")
     try:
-        # Canlı fiyata yakın bir değer almak için Binance ham fiyata soralım
         ticker = client.get_symbol_ticker(symbol="BTCUSDT")
         btc_price = float(ticker['price'])
-        
-        # Hassasiyeti ayarla (BTC için genelde lot size 3 veya 4 basamaktır, manuel 3 verelim garanti olsun)
         symbol_precisions["BTCUSDT"] = 3
         
-        print(f" Fiyat Bulundu: {btc_price} USDT. Zararına da olsa deneme emri gönderiliyor...")
-        success, s_qty, f_qty = execute_arbitrage_entry("btcusdt", btc_price, btc_price)
-        
-        if success:
-            print("🎉 BAŞARILI! Bot sorunsuz şekilde cüzdandan BTC aldı ve Short açtı.")
-            print("⏳ Pozisyonun arayüzde görünmesi ve kapanması için 5 saniye bekleniyor...")
-            time.sleep(5)
-            
-            print("🤝 Şimdi açılan test pozisyonu piyasa fiyatından kapatılıyor...")
-            execute_arbitrage_exit("btcusdt", s_qty, f_qty)
-            print("⚙️ [TEST TAMAMLANDI] Sistem normal tarama moduna geçiş yapıyor.\n")
-        else:
-            print("❌ Test başarısız oldu. Yukarıdaki hata detayını kontrol et.\n")
+        # Emirleri tetikle (Bu fonksiyon kendi içinde Telegram loglarını atacaktır)
+        execute_arbitrage_entry("btcusdt", btc_price, btc_price)
             
     except Exception as e:
         print(f"❌ Test fonksiyonu yürütülürken hata oluştu: {e}\n")
+        telegram_bildir(f"❌ <b>[TEST SİSTEM HATASI]</b>\nTest yürütülürken genel hata oluştu: {e}")
 
 # --- 🌐 LIVE WEBSOCKET AKIŞLARI ---
 def start_multi_spot_ws():
@@ -231,6 +235,8 @@ def arbitraj_tarama_dongusu():
                 pos = arbitraj_pozisyonlari[symbol]
                 if not pos["aktif"]:
                     if anlik_makas >= GIRIS_MAKAS_YUZDE:
+                        # Test bittiği ve normal moda geçildiği için ana döngü sadece gerçek fırsat gelirse işlem açar
+                        if symbol.upper() == "BTCUSDT": continue # Test pozumuz açık olduğu için ana döngü BTC'yi ellemesin
                         basarili, s_qty, f_qty = execute_arbitrage_entry(symbol, spot_fiyat, futures_fiyat)
                         if basarili:
                             pos.update({"aktif": True, "giris_makas": anlik_makas, "spot_adet": s_qty, "futures_adet": f_qty})
@@ -258,7 +264,9 @@ if __name__ == "__main__":
     
     set_all_leverages()
     
-    # 🧪 TEST TETİKLEYİCİ: Bot ana döngüye girmeden önce 1 kereliğine mahsus zorunlu BTC emri gönderir
+    telegram_bildir("🚀 <b>Bot Başlatıldı! 1 Seferlik Zorunlu BTC Deneme Emirleri Tetikleniyor...</b>")
+    
+    # 🔥 TEST TETİKLEYİCİ: Pozisyonları açıp kapatmadan bırakacak fonksiyon
     run_instant_btc_test()
     
     threading.Thread(target=start_multi_spot_ws, daemon=True).start()
