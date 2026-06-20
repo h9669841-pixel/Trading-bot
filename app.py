@@ -54,7 +54,7 @@ client.MARGIN_API_URL = 'https://vapi.binance.com/nvapi'
 client.FUTURES_API_URL = 'https://vapi.binance.com/fapi' 
 
 # --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
-GIRIS_MAKAS_YUZDE = 0.25  
+GIRIS_MAKAS_YUZDE = 0.41  
 CIKIS_MAKAS_YUZDE = 0.02  
 
 SPOT_BAKIYE = 100.0       
@@ -66,8 +66,10 @@ FUTURES_FEE_RATE = 0.0450 / 100
 SYMBOLS = []
 piyasa_verisi = {}
 arbitraj_pozisyonlari = {}
+symbol_precisions = {}  # 🎯 ÇÖZÜM: Hassasiyetleri canlı borsadan saklayacağımız global hafıza
 
-def get_all_futures_symbols():
+def get_all_futures_symbols_and_precisions():
+    global symbol_precisions
     try:
         url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
         r = requests.get(url, proxies=requests_proxies, timeout=10)
@@ -76,10 +78,22 @@ def get_all_futures_symbols():
             symbols = []
             for market in data.get("symbols", []):
                 if market.get("quoteAsset") == "USDT" and market.get("status") == "TRADING":
-                    symbols.append(market.get("symbol").lower())
+                    sym = market.get("symbol").lower()
+                    symbols.append(sym)
+                    
+                    # 🎯 ÇÖZÜM: Canlı borsadan gelen LOT_SIZE filtresini hemen hafızaya alıyoruz
+                    precision = 2
+                    for f in market.get('filters', []):
+                        if f.get('filterType') == 'LOT_SIZE':
+                            step_size = float(f.get('stepSize', 0.01))
+                            if step_size >= 1.0:
+                                precision = 0
+                            else:
+                                precision = len(str(step_size).split('.')[1].rstrip('0'))
+                    symbol_precisions[sym.upper()] = precision
             return symbols
     except Exception as e:
-        print(f"❌ Koin listesi çekilirken hata oluştu: {e}")
+        print(f"❌ Koin listesi ve hassasiyetler çekilirken hata oluştu: {e}")
     return ["btcusdt", "ethusdt", "solusdt", "xrpusdt"]
 
 def set_all_leverages():
@@ -88,7 +102,7 @@ def set_all_leverages():
         try:
             client.futures_change_leverage(symbol=symbol.upper(), leverage=1)
             time.sleep(0.25)
-        except (BinanceAPIException, BinanceRequestException, Exception) as e:
+        except (BinanceAPIException, BinanceRequestException, Exception):
             pass
 
 def telegram_bildir(mesaj):
@@ -107,23 +121,11 @@ def net_kar_hesapla(giris_makas, kapanis_makas):
     topham_kesinti_usdt = ((SPOT_BAKIYE * SPOT_FEE_RATE) * 2) + ((FUTURES_BAKIYE * FUTURES_FEE_RATE) * 2)
     return brut_kazanc_usdt, topham_kesinti_usdt, brut_kazanc_usdt - topham_kesinti_usdt
 
-def get_lot_size_precision(symbol):
-    try:
-        info = client.get_symbol_info(symbol.upper())
-        if info and 'filters' in info:
-            for f in info['filters']:
-                if f['filterType'] == 'LOT_SIZE':
-                    step_size = float(f['stepSize'])
-                    if step_size >= 1.0: return 0
-                    return len(str(step_size).split('.')[1].rstrip('0'))
-    except (BinanceAPIException, BinanceRequestException, Exception) as e:
-        pass
-    return 2
-
 def execute_arbitrage_entry(symbol, spot_price, futures_price):
     coin_label = symbol.upper()
     try:
-        precision = get_lot_size_precision(coin_label)
+        # 🎯 ÇÖZÜM: vapi'ye sormak yerine canlı hafızadan hassasiyeti çekiyoruz, çökme ihtimali sıfırlandı
+        precision = symbol_precisions.get(coin_label, 2)
         raw_spot_qty = SPOT_BAKIYE / spot_price
         raw_futures_qty = FUTURES_BAKIYE / futures_price
         
@@ -137,9 +139,8 @@ def execute_arbitrage_entry(symbol, spot_price, futures_price):
         futures_order = client.futures_create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=futures_quantity)
         return True, spot_quantity, futures_quantity
     except (BinanceAPIException, BinanceRequestException, Exception) as e:
-        # 🎯 ÇÖZÜM: Telegram bildirimi kaldırıldı, sadece konsol loguna basılıyor.
-        err_msg = f"❌ [Pas Geçildi] Sanal Hesap İşlem Hatası ({coin_label}): Emir gönderilemedi veya koin vapi'de aktif değil."
-        print(err_msg)
+        # Gerçek bir bakiye veya sunucu hatası olursa konsolda ayrıntıyı göster
+        print(f"❌ Sanal Hesap İşlem Hatası ({coin_label}): {e}")
         return False, 0, 0
 
 def execute_arbitrage_exit(symbol, spot_qty, futures_qty):
@@ -241,8 +242,9 @@ def arbitraj_tarama_dongusu():
         time.sleep(1)
 
 if __name__ == "__main__":
-    print("⏳ Tüm canlı piyasa koin altyapısı ve Demo Hesap bağlantısı kuruluyor...")
-    SYMBOLS = get_all_futures_symbols()
+    print("⏳ Tüm canlı piyasa koin altyapısı ve hassasiyet filtreleri yükleniyor...")
+    # 🎯 Canlı borsadan hem sembolleri hem de virgülden sonraki basamak (lot size) hassasiyetlerini çekiyoruz
+    SYMBOLS = get_all_futures_symbols_and_precisions()
     
     for symbol in SYMBOLS:
         piyasa_verisi[symbol] = {"spot_price": None, "futures_price": None}
@@ -250,7 +252,7 @@ if __name__ == "__main__":
     
     set_all_leverages()
     
-    telegram_bildir(f"🚀 <b>Tam Kapasite Arbitraj Robotu Başlatıldı!</b>\n🎯 <b>Tarama Havuzu:</b> {len(SYMBOLS)} Aktif Koin (Eksiksiz)\n📊 <b>Giriş Eşiği:</b> +%{GIRIS_MAKAS_YUZDE}")
+    telegram_bildir(f"🚀 <b>Tam Kapasite Kusursuz Arbitraj Robotu Başlatıldı!</b>\n🎯 <b>Tarama Havuzu:</b> {len(SYMBOLS)} Aktif Koin (Eksiksiz)\n📊 <b>Giriş Eşiği:</b> +%{GIRIS_MAKAS_YUZDE}")
     
     threading.Thread(target=start_multi_spot_ws, daemon=True).start()
     threading.Thread(target=start_multi_futures_ws, daemon=True).start()
