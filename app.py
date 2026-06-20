@@ -66,7 +66,7 @@ FUTURES_FEE_RATE = 0.0450 / 100
 SYMBOLS = []
 piyasa_verisi = {}
 arbitraj_pozisyonlari = {}
-symbol_precisions = {}  # 🎯 ÇÖZÜM: Hassasiyetleri canlı borsadan saklayacağımız global hafıza
+symbol_precisions = {}  
 
 def get_all_futures_symbols_and_precisions():
     global symbol_precisions
@@ -81,7 +81,6 @@ def get_all_futures_symbols_and_precisions():
                     sym = market.get("symbol").lower()
                     symbols.append(sym)
                     
-                    # 🎯 ÇÖZÜM: Canlı borsadan gelen LOT_SIZE filtresini hemen hafızaya alıyoruz
                     precision = 2
                     for f in market.get('filters', []):
                         if f.get('filterType') == 'LOT_SIZE':
@@ -97,12 +96,12 @@ def get_all_futures_symbols_and_precisions():
     return ["btcusdt", "ethusdt", "solusdt", "xrpusdt"]
 
 def set_all_leverages():
-    print(f"⏳ Sanal hesaptaki {len(SYMBOLS)} koinin kaldıracı 1x olarak senkronize ediliyor...")
+    print(f"⏳ Sanal hesaptaki koinlerin kaldıraçları senkronize ediliyor...")
     for symbol in SYMBOLS:
         try:
             client.futures_change_leverage(symbol=symbol.upper(), leverage=1)
             time.sleep(0.25)
-        except (BinanceAPIException, BinanceRequestException, Exception):
+        except Exception:
             pass
 
 def telegram_bildir(mesaj):
@@ -123,35 +122,41 @@ def net_kar_hesapla(giris_makas, kapanis_makas):
 
 def execute_arbitrage_entry(symbol, spot_price, futures_price):
     coin_label = symbol.upper()
-    try:
-        # 🎯 ÇÖZÜM: vapi'ye sormak yerine canlı hafızadan hassasiyeti çekiyoruz, çökme ihtimali sıfırlandı
-        precision = symbol_precisions.get(coin_label, 2)
-        raw_spot_qty = SPOT_BAKIYE / spot_price
-        raw_futures_qty = FUTURES_BAKIYE / futures_price
-        
-        factor = 10 ** precision
-        spot_quantity = int(raw_spot_qty * factor) / factor if precision > 0 else int(raw_spot_qty)
-        futures_quantity = int(raw_futures_qty * factor) / factor if precision > 0 else int(raw_futures_qty)
+    
+    # 🎯 ÇÖZÜM: Invalid JSON veya sunucu tıkanıklığı hatası gelirse pes etmeyip 3 kere deneyecek sistem
+    for deneme in range(3):
+        try:
+            precision = symbol_precisions.get(coin_label, 2)
+            raw_spot_qty = SPOT_BAKIYE / spot_price
+            raw_futures_qty = FUTURES_BAKIYE / futures_price
+            
+            factor = 10 ** precision
+            spot_quantity = int(raw_spot_qty * factor) / factor if precision > 0 else int(raw_spot_qty)
+            futures_quantity = int(raw_futures_qty * factor) / factor if precision > 0 else int(raw_futures_qty)
 
-        print(f"🛒 {coin_label} Sanal Emir Gönderiliyor.. Adetler -> Spot: {spot_quantity}, Futures: {futures_quantity}")
+            print(f"🛒 {coin_label} Sanal Emir Gönderiliyor (Deneme {deneme+1}/3).. Adetler -> Spot: {spot_quantity}, Futures: {futures_quantity}")
 
-        spot_order = client.create_order(symbol=coin_label, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=spot_quantity)
-        futures_order = client.futures_create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=futures_quantity)
-        return True, spot_quantity, futures_quantity
-    except (BinanceAPIException, BinanceRequestException, Exception) as e:
-        # Gerçek bir bakiye veya sunucu hatası olursa konsolda ayrıntıyı göster
-        print(f"❌ Sanal Hesap İşlem Hatası ({coin_label}): {e}")
-        return False, 0, 0
+            spot_order = client.create_order(symbol=coin_label, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=spot_quantity)
+            futures_order = client.futures_create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=futures_quantity)
+            return True, spot_quantity, futures_quantity
+        except Exception as e:
+            print(f"⚠️ {coin_label} için emir iletiminde vapi geçici hata verdi: {e}. 1sn sonra tekrar deneniyor...")
+            time.sleep(1) # Tıkanan sunucuya nefes aldırmak için 1 saniye bekle
+            
+    print(f"❌ {coin_label} için 3 deneme de başarısız oldu, sonraki fırsat dalgası beklenecek.")
+    return False, 0, 0
 
 def execute_arbitrage_exit(symbol, spot_qty, futures_qty):
     coin_label = symbol.upper()
-    try:
-        client.create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=spot_qty)
-        client.futures_create_order(symbol=coin_label, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=futures_qty)
-        return True
-    except Exception as e:
-        print(f"❌ Sanal Çıkış Hatası ({coin_label}): {e}")
-        return False
+    for deneme in range(3):
+        try:
+            client.create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=spot_qty)
+            client.futures_create_order(symbol=coin_label, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=futures_qty)
+            return True
+        except Exception as e:
+            print(f"⚠️ Pozisyon kapatma hatası ({coin_label}): {e}. Yeniden deneniyor...")
+            time.sleep(1)
+    return False
 
 # --- 🌐 LIVE WEBSOCKET AKIŞLARI ---
 def start_multi_spot_ws():
@@ -242,8 +247,7 @@ def arbitraj_tarama_dongusu():
         time.sleep(1)
 
 if __name__ == "__main__":
-    print("⏳ Tüm canlı piyasa koin altyapısı ve hassasiyet filtreleri yükleniyor...")
-    # 🎯 Canlı borsadan hem sembolleri hem de virgülden sonraki basamak (lot size) hassasiyetlerini çekiyoruz
+    print("⏳ Tüm canlı piyasa koin altyapısı ve akıllı retry motoru yükleniyor...")
     SYMBOLS = get_all_futures_symbols_and_precisions()
     
     for symbol in SYMBOLS:
@@ -252,7 +256,7 @@ if __name__ == "__main__":
     
     set_all_leverages()
     
-    telegram_bildir(f"🚀 <b>Tam Kapasite Kusursuz Arbitraj Robotu Başlatıldı!</b>\n🎯 <b>Tarama Havuzu:</b> {len(SYMBOLS)} Aktif Koin (Eksiksiz)\n📊 <b>Giriş Eşiği:</b> +%{GIRIS_MAKAS_YUZDE}")
+    telegram_bildir(f"🚀 <b>Yeniden Deneme (Retry) Korumalı Bot Başlatıldı!</b>\n🎯 <b>Tarama:</b> {len(SYMBOLS)} Koinin Tamamı\n📊 <b>Giriş Eşiği:</b> +%{GIRIS_MAKAS_YUZDE}")
     
     threading.Thread(target=start_multi_spot_ws, daemon=True).start()
     threading.Thread(target=start_multi_futures_ws, daemon=True).start()
