@@ -54,7 +54,7 @@ client.MARGIN_API_URL = 'https://vapi.binance.com/nvapi'
 client.FUTURES_API_URL = 'https://vapi.binance.com/fapi' 
 
 # --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
-GIRIS_MAKAS_YUZDE = 0.41  
+GIRIS_MAKAS_YUZDE = 10.41  
 CIKIS_MAKAS_YUZDE = 0.02  
 
 SPOT_BAKIYE = 100.0       
