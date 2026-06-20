@@ -1,5 +1,3 @@
-requests
-websocket-client
-python-binance
-python-socks
-PySocks
+requests==2.31.0
+python-binance==1.0.19
+websocket-client==1.7.0
