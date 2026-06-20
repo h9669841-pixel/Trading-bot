@@ -26,11 +26,7 @@ if PROXY_URL:
 
         print(f"🌐 Proxy Bilgileri Ayarlanıyor: {proxy_host}:{proxy_port}")
         
-        requests_proxies = {
-            "http": PROXY_URL,
-            "https": PROXY_URL
-        }
-        
+        requests_proxies = { "http": PROXY_URL, "https": PROXY_URL }
         ws_proxy_params = {
             "http_proxy_host": proxy_host,
             "http_proxy_port": proxy_port,
@@ -40,31 +36,36 @@ if PROXY_URL:
     except Exception as e:
         print(f"❌ Proxy ayrıştırma hatası: {e}")
 
-# --- 🔑 GÜVENLİK VE API AYARLARI ---
+# --- 🔑 SİMÜLASYON (MOCK) API ANAHTARLARI ---
+# demo.binance.com üzerinden aldığın API anahtarları buralara gelecek
 BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")
 BINANCE_SECRET_KEY = os.environ.get("BINANCE_SECRET_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-USE_TESTNET = True 
-
+# ⚠️ UYARI: python-binance kütüphanesinin standart 'testnet=True' modu eski testnet'e gider.
+# demo.binance.com (Mock) hesabı için testnet=False kalmalı, ancak isteklerin yönlendirileceği base_url değiştirilmelidir!
 client = Client(
     BINANCE_API_KEY, 
     BINANCE_SECRET_KEY, 
-    testnet=USE_TESTNET,
     requests_params={"proxies": requests_proxies} if requests_proxies else {}
 )
+
+# 🎯 SİMÜLASYON (MOCK TRADING) DUVARLARI: API isteklerini sanal hesaba yönlendiriyoruz
+client.API_URL = 'https://vapi.binance.com/api'          # Sanal Spot API Uç Noktası
+client.MARGIN_API_URL = 'https://vapi.binance.com/nvapi'
+client.FUTURES_API_URL = 'https://vapi.binance.com/fapi' # Sanal Vadeli İşlemler API Uç Noktası
 
 # --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
 GIRIS_MAKAS_YUZDE = 0.41  
 CIKIS_MAKAS_YUZDE = 0.02  
 
-SPOT_BAKIYE = 15.0       
-FUTURES_BAKIYE = 15.0    
+# 💰 Sanal hesabında 10k$ olduğu için işlem hacimlerini 100$ seviyesine çıkarttık
+SPOT_BAKIYE = 100.0       
+FUTURES_BAKIYE = 100.0    
 
 SPOT_FEE_RATE = 0.0750 / 100     
 FUTURES_FEE_RATE = 0.0450 / 100  
-# ----------------------------------------------
 
 SYMBOLS = []
 piyasa_verisi = {}
@@ -72,11 +73,8 @@ arbitraj_pozisyonlari = {}
 
 def get_all_futures_symbols():
     try:
-        if USE_TESTNET:
-            url = "https://testnet.binancefuture.com/fapi/v1/exchangeInfo"
-        else:
-            url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
-            
+        # Fiyat karşılaştırması ve koin havuzu için listeyi canlı borsadan alıyoruz
+        url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
         r = requests.get(url, proxies=requests_proxies, timeout=10)
         if r.status_code == 200:
             data = r.json()
@@ -87,23 +85,20 @@ def get_all_futures_symbols():
             return symbols
     except Exception as e:
         print(f"❌ Koin listesi çekilirken hata oluştu: {e}")
-        traceback.print_exc()
     return ["btcusdt", "ethusdt", "solusdt", "xrpusdt"]
 
 def set_all_leverages():
-    print("⏳ Tüm sembollerin kaldıracı 1x olarak ayarlanıyor...")
-    for symbol in SYMBOLS[:150]:
+    print("⏳ Sanal hesaptaki kaldıraçlar 1x olarak senkronize ediliyor...")
+    for symbol in SYMBOLS[:50]: # İlk 50 koin için kaldıraç ayarla
         try:
             client.futures_change_leverage(symbol=symbol.upper(), leverage=1)
-            time.sleep(0.1) 
-        except BinanceAPIException as b_err:
-            pass  
+            time.sleep(0.2) 
         except Exception as e:
             pass
 
 def telegram_bildir(mesaj):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print(f"📢 [Telegram Değişkenleri Eksik] -> {mesaj}")
+        print(f"📢 [Telegram] -> {mesaj}")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
@@ -114,26 +109,24 @@ def telegram_bildir(mesaj):
 def net_kar_hesapla(giris_makas, kapanis_makas):
     brut_oran_farki = giris_makas - kapanis_makas
     brut_kazanc_usdt = SPOT_BAKIYE * (brut_oran_farki / 100)
-    spot_toplam_komisyon = (SPOT_BAKIYE * SPOT_FEE_RATE) * 2
-    futures_toplam_komisyon = (FUTURES_BAKIYE * FUTURES_FEE_RATE) * 2
-    toplam_kesinti_usdt = spot_toplam_komisyon + futures_toplam_komisyon
-    net_kazanc_usdt = brut_kazanc_usdt - toplam_kesinti_usdt
-    return brut_kazanc_usdt, toplam_kesinti_usdt, net_kazanc_usdt
+    toplam_kesinti_usdt = ((SPOT_BAKIYE * SPOT_FEE_RATE) * 2) + ((FUTURES_BAKIYE * FUTURES_FEE_RATE) * 2)
+    return brut_kazanc_usdt, toplam_kesinti_usdt, brut_kazanc_usdt - toplam_kesinti_usdt
 
 def get_lot_size_precision(symbol):
     try:
+        # Hassasiyet bilgisi vapi üzerinden sanal borsadan sorgulanıyor
         info = client.get_symbol_info(symbol.upper())
         if info and 'filters' in info:
             for f in info['filters']:
                 if f['filterType'] == 'LOT_SIZE':
                     step_size = float(f['stepSize'])
-                    if step_size >= 1.0:
-                        return 0
+                    if step_size >= 1.0: return 0
                     return len(str(step_size).split('.')[1].rstrip('0'))
     except Exception as e:
-        print(f"⚠️ {symbol} için LOT_SIZE hassasiyeti alınamadı, varsayılan 2 kullanılacak: {e}")
+        pass
     return 2
 
+# --- 🎯 GERÇEK ZAMANLI S SİMÜLASYON EMİR EMİR MOTORU ---
 def execute_arbitrage_entry(symbol, spot_price, futures_price):
     coin_label = symbol.upper()
     try:
@@ -145,20 +138,18 @@ def execute_arbitrage_entry(symbol, spot_price, futures_price):
         spot_quantity = int(raw_spot_qty * factor) / factor if precision > 0 else int(raw_spot_qty)
         futures_quantity = int(raw_futures_qty * factor) / factor if precision > 0 else int(raw_futures_qty)
 
-        print(f"⚙️ {coin_label} Hassasiyet: {precision} | Emir Adetleri -> Spot: {spot_quantity}, Futures: {futures_quantity}")
+        print(f"🛒 {coin_label} Sanal Emir Gönderiliyor.. Adetler -> Spot: {spot_quantity}, Futures: {futures_quantity}")
 
+        # Emirler vapi.binance.com üzerinden doğrudan demo hesabına gider
         spot_order = client.create_order(symbol=coin_label, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=spot_quantity)
         futures_order = client.futures_create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=futures_quantity)
         return True, spot_quantity, futures_quantity
     except BinanceAPIException as e:
-        err_msg = f"❌ <b>{coin_label} BORSASAL GİRİŞ HATASI:</b>\nKod: {e.code}\nMesaj: {e.message}"
+        err_msg = f"❌ <b>Sanal Hesap İşlem Hatası ({coin_label}):</b>\n{e.message}"
         print(err_msg)
         telegram_bildir(err_msg)
         return False, 0, 0
     except Exception as e:
-        err_msg = f"❌ {coin_label} SİSTEMSEL GİRİŞ HATASI: {e}"
-        print(err_msg)
-        telegram_bildir(err_msg)
         return False, 0, 0
 
 def execute_arbitrage_exit(symbol, spot_qty, futures_qty):
@@ -167,105 +158,56 @@ def execute_arbitrage_exit(symbol, spot_qty, futures_qty):
         client.create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=spot_qty)
         client.futures_create_order(symbol=coin_label, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=futures_qty)
         return True
-    except BinanceAPIException as e:
-        err_msg = f"❌ <b>{coin_label} BORSASAL ÇIKIŞ HATASI (BACAK AÇIK KALDI!):</b>\nKod: {e.code}\nMesaj: {e.message}"
-        print(err_msg)
-        telegram_bildir(err_msg)
-        return False
     except Exception as e:
-        err_msg = f"❌ {coin_label} SİSTEMSEL ÇIKIŞ HATASI: {e}"
-        print(err_msg)
-        telegram_bildir(err_msg)
+        print(f"❌ Sanal Çıkış Hatası: {e}")
         return False
 
-# --- 🌐 GLOBAL WEBSOCKET AKIŞLARI (@ticker GÜNCELLEMESİ) ---
-
-def connect_single_spot_ws(symbol):
+# --- 🌐 LIVE WEBSOCKET AKIŞLARI (GERÇEK BORSADAN ANLIK VERİ BESLEME) ---
+def start_multi_spot_ws():
     def on_message(ws, message):
         data = json.loads(message)
-        # ticker stream'inde son fiyat 'c' (current/close price) içinde gelir
-        price = data.get("c") or data.get("data", {}).get("c")
-        if price:
-            piyasa_verisi[symbol.lower()]["spot_price"] = float(price)
+        symbol = data.get("stream", "").split("@")[0].lower()
+        price = data.get("data", {}).get("p")
+        if symbol in piyasa_verisi and price:
+            piyasa_verisi[symbol]["spot_price"] = float(price)
 
-    def on_error(ws, error):
-        pass
-        
     def on_close(ws, c_code, c_msg):
-        time.sleep(5)
-        connect_single_spot_ws(symbol)
+        time.sleep(2)
+        start_multi_spot_ws()
 
-    # 🎯 TESTNET İÇİN @ticker AKIŞINA GEÇİLDİ (Sürekli fiyat akışı sağlar)
-    url = f"wss://testnet.binancevision.com/ws/{symbol.lower()}@ticker"
-    WebSocketApp(url, on_message=on_message, on_error=on_error, on_close=on_close).run_forever(**ws_proxy_params)
-
-def start_multi_spot_ws():
-    if USE_TESTNET:
-        active_symbols = ["btcusdt", "ethusdt", "solusdt", "xrpusdt", "bnbusdt", "adausdt", "dogeusdt", "trxusdt", "linkusdt", "dotusdt"]
-        print(f"📡 Spot (TESTNET): {len(active_symbols)} koin için izole tüneller açılıyor...")
-        for symbol in active_symbols:
-            threading.Thread(target=connect_single_spot_ws, args=(symbol,), daemon=True).start()
-            time.sleep(0.1)
-    else:
-        def on_message(ws, message):
-            data = json.loads(message)
-            symbol = data.get("stream", "").split("@")[0].lower()
-            if symbol in piyasa_verisi:
-                piyasa_verisi[symbol]["spot_price"] = float(data.get("data", {}).get("p", 0))
-
-        def on_close(ws, c_code, c_msg):
-            time.sleep(5)
-            start_multi_spot_ws()
-
-        active_symbols = [s for s in SYMBOLS[:100]]
-        streams = "/".join([f"{symbol}@trade" for symbol in active_symbols])
-        url = f"wss://stream.binance.com:9443/stream?streams={streams}"
-        print(f"📡 Spot (CANLI): {len(active_symbols)} koin havuzdan dinleniyor...")
-        WebSocketApp(url, on_message=on_message, on_close=on_close).run_forever(**ws_proxy_params)
+    # Gerçek borsanın en likit 50 koinini takibe alıyoruz
+    active_symbols = [s for s in SYMBOLS[:50]]
+    streams = "/".join([f"{symbol}@trade" for symbol in active_symbols])
+    url = f"wss://stream.binance.com:9443/stream?streams={streams}"
+    
+    print(f"📡 Canlı Spot Veri Akışı Bağlandı: {len(active_symbols)} koin dinleniyor...")
+    WebSocketApp(url, on_message=on_message, on_close=on_close).run_forever(**ws_proxy_params)
 
 def start_multi_futures_ws():
     def on_message(ws, message):
         data = json.loads(message)
-        stream_name = data.get("stream", "")
-        
-        # Ticker veya normal veri formatına göre fiyatı ayıkla
-        if not stream_name:
-            symbol = data.get("s", "").lower()
-            price = data.get("c") or data.get("p")
-        else:
-            symbol = stream_name.split("@")[0].lower()
-            inner_data = data.get("data", {})
-            price = inner_data.get("c") or inner_data.get("p") or data.get("p")
-
+        symbol = data.get("stream", "").split("@")[0].lower()
+        price = data.get("data", {}).get("p")
         if symbol in piyasa_verisi and price:
             piyasa_verisi[symbol]["futures_price"] = float(price)
 
-    def on_error(ws, error): 
-        print(f"❌ Global Futures WS Hatası: {error}")
-        
-    def on_close(ws, c_code, c_msg): 
-        time.sleep(5)
+    def on_close(ws, c_code, c_msg):
+        time.sleep(2)
         start_multi_futures_ws()
 
-    if USE_TESTNET:
-        active_symbols = ["btcusdt", "ethusdt", "solusdt", "xrpusdt", "bnbusdt", "adausdt", "dogeusdt", "trxusdt", "linkusdt", "dotusdt"]
-        # Futures testnet için de garantili @ticker yapısına geçiyoruz
-        streams = "/".join([f"{symbol}@ticker" for symbol in active_symbols])
-        url = f"wss://fstream.binancefuture.com/stream?streams={streams}"
-    else:
-        active_symbols = [s for s in SYMBOLS[:100]]
-        streams = "/".join([f"{symbol}@trade" for symbol in active_symbols])
-        url = f"wss://fstream.binance.com/stream?streams={streams}"
+    active_symbols = [s for s in SYMBOLS[:50]]
+    streams = "/".join([f"{symbol}@trade" for symbol in active_symbols])
+    url = f"wss://fstream.binance.com/stream?streams={streams}"
     
-    print(f"📡 Futures WS Bağlantısı Açılıyor: {len(active_symbols)} koin dinleniyor...")
-    WebSocketApp(url, on_message=on_message, on_error=on_error, on_close=on_close).run_forever(**ws_proxy_params)
+    print(f"📡 Canlı Futures Veri Akışı Bağlandı: {len(active_symbols)} koin dinleniyor...")
+    WebSocketApp(url, on_message=on_message, on_close=on_close).run_forever(**ws_proxy_params)
 
 def arbitraj_tarama_dongusu():
     global arbitraj_pozisyonlari
     while True:
         try:
             en_yuksek_makaslar = []
-            tarama_listesi = ["btcusdt", "ethusdt", "solusdt", "xrpusdt", "bnbusdt", "adausdt", "dogeusdt", "trxusdt", "linkusdt", "dotusdt"] if USE_TESTNET else SYMBOLS[:100]
+            tarama_listesi = SYMBOLS[:50]
             
             for symbol in tarama_listesi:
                 if symbol not in piyasa_verisi: continue
@@ -289,40 +231,34 @@ def arbitraj_tarama_dongusu():
                         basarili, s_qty, f_qty = execute_arbitrage_entry(symbol, spot_fiyat, futures_fiyat)
                         if basarili:
                             pos.update({"aktif": True, "giris_makas": anlik_makas, "spot_adet": s_qty, "futures_adet": f_qty})
-                            telegram_bildir(f"🤖 <b>İŞLEME GİRİLDİ (TESTNET)</b>\n\n📊 <b>Koin:</b> {coin_label}\n⚡ <b>Makas:</b> +%{anlik_makas:.4f}\n💵 <b>Tahmini Net Kâr:</b> {net:.4f} USDT")
+                            telegram_bildir(f"🤖 <b>DEMO HESAP: İŞLEME GİRİLDİ</b>\n\n📊 <b>Koin:</b> {coin_label}\n⚡ <b>Canlı Makas:</b> +%{anlik_makas:.4f}\n💵 <b>Tahmini Net Kâr:</b> {net:.4f} USDT")
                 else:
                     if anlik_makas <= CIKIS_MAKAS_YUZDE:
                         if execute_arbitrage_exit(symbol, pos["spot_adet"], pos["futures_adet"]):
                             brut, kesinti, net = net_kar_hesapla(pos["giris_makas"], anlik_makas)
-                            telegram_bildir(f"🤝 <b>🔒 POZİSYON KAPATILDI (TESTNET)</b>\n\n🎉 <b>NET REALİZE KÂR:</b> {net:.4f} USDT")
+                            telegram_bildir(f"🤝 <b>🔒 DEMO HESAP: POZİSYON KAPATILDI</b>\n\n🎉 <b>NET REALİZE KÂR:</b> {net:.4f} USDT")
                             pos["aktif"] = False
 
             if en_yuksek_makaslar:
                 en_yuksek_makaslar.sort(key=lambda x: x[1], reverse=True)
-                print("\n💵 --- EN YÜKSEK 3 MAKAS ---")
+                print("\n📊 --- CANLI PİYASA EN YÜKSEK 3 MAKAS ---")
                 for i, item in enumerate(en_yuksek_makaslar[:3]):
-                    print(f"{i+1}. [{item[0]}] +%{item[1]:.4f} | Sp: {item[2]} | Fu: {item[3]}")
+                    print(f"{i+1}. [{item[0]}] +%{item[1]:.4f} | Spot: {item[2]} | Futures: {item[3]}")
         except Exception as e:
             print(f"❌ Döngü hatası: {e}")
-            traceback.print_exc()
-        time.sleep(2)
+        time.sleep(1)
 
 if __name__ == "__main__":
-    base_symbols = ["btcusdt", "ethusdt", "solusdt", "xrpusdt", "bnbusdt", "adausdt", "dogeusdt", "trxusdt", "linkusdt", "dotusdt"]
-    for s in base_symbols:
-        piyasa_verisi[s] = {"spot_price": None, "futures_price": None}
-        arbitraj_pozisyonlari[s] = {"aktif": False, "giris_makas": 0.0, "spot_adet": 0.0, "futures_adet": 0.0}
-
+    print("⏳ Canlı piyasa altyapısı ve Demo Hesap bağlantısı kuruluyor...")
     SYMBOLS = get_all_futures_symbols()
     
     for symbol in SYMBOLS:
-        if symbol not in piyasa_verisi:
-            piyasa_verisi[symbol] = {"spot_price": None, "futures_price": None}
-            arbitraj_pozisyonlari[symbol] = {"aktif": False, "giris_makas": 0.0, "spot_adet": 0.0, "futures_adet": 0.0}
+        piyasa_verisi[symbol] = {"spot_price": None, "futures_price": None}
+        arbitraj_pozisyonlari[symbol] = {"aktif": False, "giris_makas": 0.0, "spot_adet": 0.0, "futures_adet": 0.0}
     
     set_all_leverages()
     
-    telegram_bildir(f"🤖 <b>SOCKS5 Destekli Demo Robotu Başlatıldı!</b>\n🎯 <b>Giriş Eşiği:</b> +%{GIRIS_MAKAS_YUZDE}")
+    telegram_bildir(f"🚀 <b>Sanal İşlemler (Mock Trading) Botu Başlatıldı!</b>\n🎯 <b>Tarama:</b> Canlı Canlı 50 Koin\n📊 <b>Giriş Eşiği:</b> +%{GIRIS_MAKAS_YUZDE}")
     
     threading.Thread(target=start_multi_spot_ws, daemon=True).start()
     threading.Thread(target=start_multi_futures_ws, daemon=True).start()
