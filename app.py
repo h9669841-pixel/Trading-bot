@@ -49,7 +49,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY)
 
 # --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
-GIRIS_MAKAS_YUZDE = 1.41  # 🎯 41 olan değer %0.41 olarak düzeltildi
+GIRIS_MAKAS_YUZDE = 0.31  # 🎯 41 olan değer %0.41 olarak düzeltildi
 CIKIS_MAKAS_YUZDE = 0.02  
 
 SPOT_BAKIYE = 15.0       # 🎯 Binance minimum emir limitine (MIN_NOTIONAL) takılmamak için 15 USDT yapıldı
