@@ -35,16 +35,16 @@ GIRIS_MAKAS_YUZDE = 0.60
 
 # CCXT'nin 3 borsada da (Binance, Bybit, OKX) istisnasız %100 aynı isimle tanıdığı en likit çiftler
 TARANACAK_COINLER = [
-    'FIL/USDT', 'FIL/USDT:USDT',
-    'LTC/USDT', 'LTC/USDT:USDT',
-    'APT/USDT', 'APT/USDT:USDT',
-    'OP/USDT', 'OP/USDT:USDT',
-    'ARB/USDT', 'ARB/USDT:USDT',
-    'NEAR/USDT', 'NEAR/USDT:USDT',
-    'ATOM/USDT', 'ATOM/USDT:USDT',
-    'GRT/USDT', 'GRT/USDT:USDT',
-    'PEPE/USDT', 'PEPE/USDT:USDT',
-    'WIF/USDT', 'WIF/USDT:USDT'
+    'FLOKI/USDT', 'FLOKI/USDT:USDT',
+    'BONK/USDT', 'BONK/USDT:USDT',
+    'WIF/USDT', 'WIF/USDT:USDT',
+    'ORDI/USDT', 'ORDI/USDT:USDT',
+    'SUI/USDT', 'SUI/USDT:USDT',
+    'FET/USDT', 'FET/USDT:USDT',
+    'JUP/USDT', 'JUP/USDT:USDT',
+    'RUNE/USDT', 'RUNE/USDT:USDT',
+    'ONDO/USDT', 'ONDO/USDT:USDT',
+    'TIA/USDT', 'TIA/USDT:USDT'
 ]
 
 fiyat_havuzu = {
