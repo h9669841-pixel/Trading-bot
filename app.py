@@ -1,118 +1,63 @@
+import os
+import time
+import threading
+import traceback
+import requests
+import ccxt
 
-import 
-import socket  # 🎯 Pyt
-from binance.enums import *
-from binance.exceptions import BinanceAPIE
+# --- 🔑 API VE HESAP AYARLARI ---
+BINANCE_API = os.environ.get("BINANCE_API_KEY", "")
+BINANCE_SECRET = os.environ.get("BINANCE_SECRET_KEY", "")
 
-# --- 🌐 GLOBAL SOCKS5 ENJEKSİYONU (ÇEKİRDEK SEVİYESİNDE) ---
-PROXY_URL = os.environ.get("PROXY_URL") 
+BYBIT_API = os.environ.get("BYBIT_API_KEY", "")
+BYBIT_SECRET = os.environ.get("BYBIT_SECRET_KEY", "")
 
-if PROXYmport urlparse, unquote
-        
-        parsed_proxy = urlparse(PROXY_URL)
-y_pass = unquote(parsed_proxy.password) if parsed_proxy.password else None
+OKX_API = os.environ.get("OKX_API_KEY", "")
+OKX_SECRET = os.environ.get("OKX_SECRET_KEY", "")
+OKX_PASSWORD = os.environ.get("OKX_PASSWORD", "")
 
-        print(f"🌐 SOCKS5 Protokolü Çekirdeğe Enjekte Ediliyor: {proxy_host}:{proxy_port}")
-        
-        # Python'ın tüm soket trafiğini (REST ve WS) global olarak SOCKS5 proxy'sine gömüyoruz.
-        socks.set_default_proxy(
-            socks.SOCKS5, 
-            addr=proxy_host, 
-            port=proxy_port, 
-            username=proxy_user, 
-            password=proxy_pass,
-            rdns=True # DNS sorgularını da proxy üzerinden güvenli çözümler
-        )
-        socket.socket = socks.socksocket # Tüm sistemi SOCKS5 soketine yamala
-        
-    except ImportError:
-        print("❌ HATA: SOCKS5 aktif edilemedi. Lütfen terminalde 'pip install PySocks' çalıştırın.")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-# --- 🔑 GÜVENLİK VE API AYARLARI ---
-BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")
-BINANCE_SECRET_KEY = os.environ.get("BINANCE_SECRET_KEY")
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+# --- 🌐 PROXY VE BAĞLANTI AYARLARI ---
+PROXY_URL = os.environ.get("PROXY_URL")
+ccxt_proxy_config = {}
+if PROXY_URL:
+    # CCXT, proxy entegrasyonunu kendi içinde socksProxy kalıbıyla otomatik çözer
+    ccxt_proxy_config = {'socksProxy': PROXY_URL}
 
-client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY)
+# --- 🏛️ BORSA BAĞLANTILARINI BAŞLATMA ---
+exchange_binance = ccxt.binance({
+    'apiKey': BINANCE_API, 'secret': BINANCE_SECRET,
+    'enableRateLimit': True, **ccxt_proxy_config
+})
 
-# --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
-GIRIS_MAKAS_YUZDE = 10.31  
-CIKIS_MAKAS_YUZDE = 0.02  
+exchange_bybit = ccxt.bybit({
+    'apiKey': BYBIT_API, 'secret': BYBIT_SECRET,
+    'enableRateLimit': True, **ccxt_proxy_config
+})
 
-SPOT_BAKIYE = 15.0       # 🎯 Minimum emir limitine (MIN_NOTIONAL) takılmamak için 15 USDT
-FUTURES_BAKIYE = 15.0    
+exchange_okx = ccxt.okx({
+    'apiKey': OKX_API, 'secret': OKX_SECRET, 'password': OKX_PASSWORD,
+    'enableRateLimit': True, **ccxt_proxy_config
+})
 
-SPOT_FEE_RATE = 0.0750 / 100     
-FUTURES_FEE_RATE = 0.0450 / 100  
-# ----------------------------------------------
+# --- 📊 ARBİTRAJ VE TARAMA AYARLARI ---
+GIRIS_MAKAS_YUZDE = 0.50  # Borsalar arası transfer/komisyon maliyetleri için ideal eşik
+TARANACAK_COINLER = [
+    'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'ADA/USDT', 
+    'DOT/USDT', 'AVAX/USDT', 'LINK/USDT', 'DOGE/USDT', 'SHIB/USDT'
+]
 
-SYMBOLS = []
-piyasa_verisi = {}
-arbitraj_pozisyonlari = {}
-
-# ⚡ OPTİMİZASYON: LOT_SIZE basamak hassasiyetlerini RAM'de tutmak için global sözlük
-SEMBOL_HASSASIYETLERI = {}
-
-def get_all_futures_symbols():
-    try:
-        url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
-        r = requests.get(url, timeout=10)
-        if r.status_code == 200:
-            data = r.json()
-            symbols = []
-            for market in data.get("symbols", []):
-                if market.get("quoteAsset") == "USDT" and market.get("status") == "TRADING":
-                    symbols.append(market.get("symbol").lower())
-            return symbols
-    except Exception as e:
-        print(f"❌ Koin listesi çekilirken hata oluştu: {e}")
-        traceback.print_exc()
-    return ["btcusdt", "ethusdt", "solusdt", "xrpusdt"]
-
-def set_all_leverages():
-    print("⏳ Tüm sembollerin kaldıracı başlangıçta ayarlanıyor...")
-    for symbol in SYMBOLS[:150]:
-        try:
-            client.futures_change_leverage(symbol=symbol.upper(), leverage=3)
-            time.sleep(0.05) # Rate limit koruması
-        except Exception:
-            pass
-
-# 🛠️ GÜNCELLEME: "list index out of range" hatasını kökten çözen güvenli fonksiyon
-def tum_hassasiyetleri_yukle():
-    print("⏳ Tüm sembollerin lot hassasiyetleri borsadan çekiliyor ve önbelleğe alınıyor...")
-    try:
-        exchange_info = client.get_exchange_info()
-        for market in exchange_info['symbols']:
-            sym = market['symbol'].lower()
-            if sym in SYMBOLS:
-                for f in market['filters']:
-                    if f['filterType'] == 'LOT_SIZE':
-                        step_size_str = str(f['stepSize']).rstrip('0')
-                        
-                        # Nokta yoksa veya tam sayıysa hassasiyet direkt 0'dır
-                        if '.' not in step_size_str:
-                            precision = 0
-                        else:
-                            # Hata vermeyen güvenli parçalama mekanizması
-                            parts = step_size_str.split('.')
-                            if len(parts) > 1:
-                                precision = len(parts[1])
-                            else:
-                                precision = 0
-                                
-                        SEMBOL_HASSASIYETLERI[sym] = precision
-        print(f"✅ Toplam {len(SEMBOL_HASSASIYETLERI)} sembolün hassasiyet haritası RAM belleğe güvenle kaydedildi.")
-    except Exception as e:
-        print(f"❌ Hassasiyet haritası çıkarılırken hata oluştu (Yedek mekanizma devrede): {e}")
-        # Yedek Koruma: API gecikirse botun durmaması için temel varsayılan atama
-        for sym in SYMBOLS:
-            SEMBOL_HASSASIYETLERI[sym] = 0 if "usdt" in sym else 2
+fiyat_havuzu = {
+    'Binance': {},
+    'Bybit': {},
+    'OKX': {}
+}
 
 def telegram_bildir(mesaj):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print(f"📢 [Telegram Değişkenleri Eksik] -> {mesaj}")
+        print(f"📢 [Telegram] -> {mesaj}")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
@@ -120,212 +65,102 @@ def telegram_bildir(mesaj):
     except Exception as e:
         print(f"❌ Telegram hatası: {e}")
 
-def net_kar_hesapla(giris_makas, kapanis_makas):
-    brut_oran_farki = giris_makas - kapanis_makas
-    brut_kazanc_usdt = SPOT_BAKIYE * (brut_oran_farki / 100)
-    spot_toplam_komisyon = (SPOT_BAKIYE * SPOT_FEE_RATE) * 2
-    futures_toplam_komisyon = (FUTURES_BAKIYE * FUTURES_FEE_RATE) * 2
-    toplam_kesinti_usdt = spot_toplam_komisyon + futures_toplam_komisyon
-    net_kazanc_usdt = brut_kazanc_usdt - toplam_kesinti_usdt
-    return brut_kazanc_usdt, toplam_kesinti_usdt, net_kazanc_usdt
-
-# --- 🚀 ASENKRON PARALEL EMİR MOTORLARI ---
-def _hizli_emir_gonder_spot(coin_label, quantity, sonuclar):
-    try:
-        sonuclar['spot'] = client.create_order(symbol=coin_label, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=quantity)
-    except Exception as e:
-        sonuclar['spot_hata'] = e
-
-def _hizli_emir_gonder_futures(coin_label, quantity, sonuclar):
-    try:
-        # Bakiye sıkışmasını önlemek için kaldıraç 3x olarak güncelleniyor
-        client.futures_change_leverage(symbol=coin_label, leverage=3)
-        sonuclar['futures'] = client.futures_create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=quantity)
-    except Exception as e:
-        sonuclar['futures_hata'] = e
-
-def _hizli_cikis_gonder_spot(coin_label, quantity, sonuclar):
-    try:
-        sonuclar['spot'] = client.create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=quantity)
-    except Exception as e:
-        sonuclar['spot_hata'] = e
-
-def _hizli_cikis_gonder_futures(coin_label, quantity, sonuclar):
-    try:
-        sonuclar['futures'] = client.futures_create_order(symbol=coin_label, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=quantity)
-    except Exception as e:
-        sonuclar['futures_hata'] = e
-
-def get_lot_size_precision(symbol):
-    return SEMBOL_HASSASIYETLERI.get(symbol.lower(), 2)
-
-# --- 🎯 AKTİF EMİR YÖNETİM MOTORU ---
-def execute_arbitrage_entry(symbol, spot_price, futures_price):
-    coin_label = symbol.upper()
-    try:
-        precision = get_lot_size_precision(symbol)
-        
-        raw_spot_qty = SPOT_BAKIYE / spot_price
-        raw_futures_qty = FUTURES_BAKIYE / futures_price
-        
-        # 🛠️ GÜNCELLEME: Kusursuz aşağı yuvarlayan ve LOT_SIZE hatasını kaldıran matematiksel yapı
-        spot_quantity = float(int(raw_spot_qty * (10 ** precision))) / (10 ** precision) if precision > 0 else int(raw_spot_qty)
-        futures_quantity = float(int(raw_futures_qty * (10 ** precision))) / (10 ** precision) if precision > 0 else int(raw_futures_qty)
-
-        # Eğer hassasiyet 0 ise (tam sayı), borsa kuralları gereği tipi int yapıyoruz
-        if precision == 0:
-            spot_quantity = int(spot_quantity)
-            futures_quantity = int(futures_quantity)
-
-        print(f"⚙️ {coin_label} Hassasiyet: {precision} | İstenecek Adet -> Spot: {spot_quantity}, Futures: {futures_quantity}")
-
-        emir_sonuclari = {}
-        t1 = threading.Thread(target=_hizli_emir_gonder_spot, args=(coin_label, spot_quantity, emir_sonuclari))
-        t2 = threading.Thread(target=_hizli_emir_gonder_futures, args=(coin_label, futures_quantity, emir_sonuclari))
-        
-        t1.start()
-        t2.start()
-        
-        t1.join()
-        t2.join()
-
-        if 'spot_hata' in emir_sonuclari:
-            raise emir_sonuclari['spot_hata']
-        if 'futures_hata' in emir_sonuclari:
-            raise emir_sonuclari['futures_hata']
-
-        return True, spot_quantity, futures_quantity
-    except BinanceAPIException as e:
-        err_msg = f"❌ <b>{coin_label} BORSASAL GİRİŞ HATASI:</b>\nKod: {e.code}\nMesaj: {e.message}"
-        print(err_msg)
-        telegram_bildir(err_msg)
-        return False, 0, 0
-    except Exception as e:
-        err_msg = f"❌ {coin_label} SİSTEMSEL GİRİŞ HATASI: {e}"
-        print(err_msg)
-        telegram_bildir(err_msg)
-        return False, 0, 0
-
-def execute_arbitrage_exit(symbol, spot_qty, futures_qty):
-    coin_label = symbol.upper()
-    try:
-        emir_sonuclari = {}
-        t1 = threading.Thread(target=_hizli_cikis_gonder_spot, args=(coin_label, spot_qty, emir_sonuclari))
-        t2 = threading.Thread(target=_hizli_cikis_gonder_futures, args=(coin_label, futures_qty, emir_sonuclari))
-        
-        t1.start()
-        t2.start()
-        
-        t1.join()
-        t2.join()
-
-        if 'spot_hata' in emir_sonuclari:
-            raise emir_sonuclari['spot_hata']
-        if 'futures_hata' in emir_sonuclari:
-            raise emir_sonuclari['futures_hata']
-
-        return True
-    except BinanceAPIException as e:
-        err_msg = f"❌ <b>{coin_label} BORSASAL ÇIKIŞ HATASI (BACAK AÇIK KALDI!):</b>\nKod: {e.code}\nMesaj: {e.message}"
-        print(err_msg)
-        telegram_bildir(err_msg)
-        return False
-    except Exception as e:
-        err_msg = f"❌ {coin_label} SİSTEMSEL ÇIKIŞ HATASI: {e}"
-        print(err_msg)
-        telegram_bildir(err_msg)
-        return False
-
-# --- 🌐 GLOBAL WEBSOCKET AKIŞLARI ---
-def start_multi_spot_ws():
-    def on_message(ws, message):
-        data = json.loads(message)
-        symbol = data.get("stream", "").split("@")[0]
-        if symbol in piyasa_verisi:
-            piyasa_verisi[symbol]["spot_price"] = float(data.get("data", {}).get("p", 0))
-
-    def on_error(ws, error): 
-        print(f"❌ Global Spot WS Hatası: {error}")
-        
-    def on_close(ws, c_code, c_msg): 
-        time.sleep(5)
-        start_multi_spot_ws()
-
-    streams = "/".join([f"{symbol}@trade" for symbol in SYMBOLS[:150]])
-    url = f"wss://stream.binance.com:9443/stream?streams={streams}"
-    WebSocketApp(url, on_message=on_message, on_error=on_error, on_close=on_close).run_forever()
-
-def start_multi_futures_ws():
-    def on_message(ws, message):
-        data = json.loads(message)
-        symbol = data.get("stream", "").split("@")[0]
-        if symbol in piyasa_verisi:
-            piyasa_verisi[symbol]["futures_price"] = float(data.get("data", {}).get("p", 0))
-
-    def on_error(ws, error): 
-        print(f"❌ Global Futures WS Hatası: {error}")
-        
-    def on_close(ws, c_code, c_msg): 
-        time.sleep(5)
-        start_multi_futures_ws()
-
-    streams = "/".join([f"{symbol}@trade" for symbol in SYMBOLS[:150]])
-    url = f"wss://fstream.binance.com/stream?streams={streams}"
-    WebSocketApp(url, on_message=on_message, on_error=on_error, on_close=on_close).run_forever()
-
-def arbitraj_tarama_dongusu():
-    global arbitraj_pozisyonlari
+# --- ⚡ ASENKRON FİYAT TOPLAMA MOTORLARI ---
+def fiyat_cek_binance():
     while True:
         try:
-            en_yuksek_makaslar = []
-            for symbol in SYMBOLS[:150]:
-                spot_fiyat = piyasa_verisi[symbol]["spot_price"]
-                futures_fiyat = piyasa_verisi[symbol]["futures_price"]
-                
-                if not spot_fiyat or not futures_fiyat: continue
-
-                anlik_makas = ((futures_fiyat - spot_fiyat) / spot_fiyat) * 100
-                coin_label = symbol.upper()
-                en_yuksek_makaslar.append((coin_label, anlik_makas, spot_fiyat, futures_fiyat))
-
-                pos = arbitraj_pozisyonlari[symbol]
-
-                if not pos["aktif"]:
-                    if anlik_makas >= GIRIS_MAKAS_YUZDE:
-                        brut, kesinti, net = net_kar_hesapla(anlik_makas, CIKIS_MAKAS_YUZDE)
-                        if net <= 0: continue
-                        
-                        basarili, s_qty, f_qty = execute_arbitrage_entry(symbol, spot_fiyat, futures_fiyat)
-                        if basarili:
-                            pos.update({"aktif": True, "giris_makas": anlik_makas, "spot_adet": s_qty, "futures_adet": f_qty})
-                            telegram_bildir(f"🤖 <b>İŞLEME GİRİLDİ</b>\n\n📊 <b>Koin:</b> {coin_label}\n⚡ <b>Makas:</b> +%{anlik_makas:.4f}\n💵 <b>Tahmini Net Kâr:</b> {net:.4f} USDT")
-                else:
-                    if anlik_makas <= CIKIS_MAKAS_YUZDE:
-                        if execute_arbitrage_exit(symbol, pos["spot_adet"], pos["futures_adet"]):
-                            brut, kesinti, net = net_kar_hesapla(pos["giris_makas"], anlik_makas)
-                            telegram_bildir(f"🤝 <b>🔒 POZİSYON KAPATILDI</b>\n\n🎉 <b>NET REALİZE KÂR:</b> {net:.4f} USDT")
-                            pos["aktif"] = False
-
-            if en_yuksek_makaslar:
-                en_yuksek_makaslar.sort(key=lambda x: x[1], reverse=True)
-                print("\n💵 --- EN YÜKSEK 3 MAKAS ---")
-                for i, item in enumerate(en_yuksek_makaslar[:3]):
-                    print(f"{i+1}. [{item[0]}] +%{item[1]:.4f} | Sp: {item[2]} | Fu: {item[3]}")
+            tickers = exchange_binance.fetch_tickers(TARANACAK_COINLER)
+            for symbol in TARANACAK_COINLER:
+                if symbol in tickers and tickers[symbol]['last']:
+                    fiyat_havuzu['Binance'][symbol] = float(tickers[symbol]['last'])
         except Exception as e:
-            print(f"❌ Döngü hatası: {e}")
-        
-        time.sleep(0.2)
+            print(f"⚠️ Binance fiyat çekme hatası: {e}")
+        time.sleep(0.8)
+
+def fiyat_cek_bybit():
+    while True:
+        try:
+            tickers = exchange_bybit.fetch_tickers(TARANACAK_COINLER)
+            for symbol in TARANACAK_COINLER:
+                if symbol in tickers and tickers[symbol]['last']:
+                    fiyat_havuzu['Bybit'][symbol] = float(tickers[symbol]['last'])
+        except Exception as e:
+            print(f"⚠️ Bybit fiyat çekme hatası: {e}")
+        time.sleep(0.8)
+
+def fiyat_cek_okx():
+    while True:
+        try:
+            tickers = exchange_okx.fetch_tickers(TARANACAK_COINLER)
+            for symbol in TARANACAK_COINLER:
+                if symbol in tickers and tickers[symbol]['last']:
+                    fiyat_havuzu['OKX'][symbol] = float(tickers[symbol]['last'])
+        except Exception as e:
+            print(f"⚠️ OKX fiyat çekme hatası: {e}")
+        time.sleep(0.8)
+
+# --- 🎯 ARBİTRAJ MATEMATİK MOTORU ---
+def uc_borsa_arbitraj_motoru():
+    print("🚀 3'lü Canavar Arbitraj Motoru Pusuda Bekliyor...")
+    telegram_bildir("🤖 <b>3'lü Borsalar Arası Arbitraj Canavarı Başlatıldı!</b>")
+    
+    while True:
+        try:
+            fırsat_listesi = []
+            
+            for symbol in TARANACAK_COINLER:
+                fiyatlar = {}
+                
+                # Fiyatların üç borsadan da gelip gelmediğini kontrol et
+                if symbol in fiyat_havuzu['Binance']: fiyatlar['Binance'] = fiyat_havuzu['Binance'][symbol]
+                if symbol in fiyat_havuzu['Bybit']: fiyatlar['Bybit'] = fiyat_havuzu['Bybit'][symbol]
+                if symbol in fiyat_havuzu['OKX']: fiyatlar['OKX'] = fiyat_havuzu['OKX'][symbol]
+                
+                if len(fiyatlar) < 3: 
+                    continue # 3 borsanın verisi de henüz tamamlanmadıysa pas geç
+                
+                # Dinamik olarak en ucuz ve en pahalı borsayı bul
+                en_ucuz_borsa = min(fiyatlar, key=fiyatlar.get)
+                en_pahali_borsa = max(fiyatlar, key=fiyatlar.get)
+                
+                ucuz_fiyat = fiyatlar[en_ucuz_borsa]
+                pahali_fiyat = fiyatlar[en_pahali_borsa]
+                
+                # Makas hesaplama
+                makas = ((pahali_fiyat - ucuz_fiyat) / ucuz_fiyat) * 100
+                fırsat_listesi.append((symbol, makas, en_ucuz_borsa, ucuz_fiyat, en_pahali_borsa, pahali_fiyat))
+                
+                # Sinyal Durumu
+                if makas >= GIRIS_MAKAS_YUZDE:
+                    mesaj = (f"🔥 <b>ARBİTRAJ SİNYALİ</b>\n\n"
+                             f"📊 <b>Koin:</b> {symbol}\n"
+                             f"⚡ <b>Makas:</b> +%{makas:.4f}\n"
+                             f"🟢 <b>Al (Ucuz):</b> {en_ucuz_borsa} ({ucuz_fiyat})\n"
+                             f"🔴 <b>Sat (Pahalı):</b> {en_pahali_borsa} ({pahali_fiyat})")
+                    print(f"\a{mesaj}") # Konsolda sesli uyarı verir (destekleyen sistemlerde)
+                    telegram_bildir(mesaj)
+            
+            # Konsol Ekranı Gösterimi (Temiz takip için)
+            if fırsat_listesi:
+                fırsat_listesi.sort(key=lambda x: x[1], reverse=True)
+                print("\n💵 --- 3 BORSA ANLIK EN YÜKSEK 3 MAKAS ---")
+                for i, item in enumerate(fırsat_listesi[:3]):
+                    print(f"{i+1}. [{item[0]}] +%{item[1]:.4f} | Ucuz: {item[2]} ({item[3]}) -> Pahalı: {item[4]} ({item[5]})")
+                    
+        except Exception as e:
+            print(f"❌ Motor hatası: {e}")
+            traceback.print_exc()
+            
+        time.sleep(1)
 
 if __name__ == "__main__":
-    SYMBOLS = get_all_futures_symbols()
-    piyasa_verisi = {symbol: {"spot_price": None, "futures_price": None} for symbol in SYMBOLS}
-    arbitraj_pozisyonlari = {symbol: {"aktif": False, "giris_makas": 0.0, "spot_adet": 0.0, "futures_adet": 0.0} for symbol in SYMBOLS}
+    # Fiyat çekme kanallarını eşzamanlı başlat
+    threading.Thread(target=fiyat_cek_binance, daemon=True).start()
+    threading.Thread(target=fiyat_cek_bybit, daemon=True).start()
+    threading.Thread(target=fiyat_cek_okx, daemon=True).start()
     
-    set_all_leverages()
-    tum_hassasiyetleri_yukle()
+    # Verilerin havuza dolması için kısa bir es ver
+    time.sleep(3)
     
-    telegram_bildir(f"🤖 <b>Kusursuz Filtreli Arbitraj Robotu Başlatıldı!</b>\n🎯 <b>Giriş Eşiği:</b> +%{GIRIS_MAKAS_YUZDE}")
-    
-    threading.Thread(target=start_multi_spot_ws, daemon=True).start()
-    threading.Thread(target=start_multi_futures_ws, daemon=True).start()
-    arbitraj_tarama_dongusu()
+    # Karşılaştırma motorunu çalıştır
+    uc_borsa_arbitraj_motoru()
