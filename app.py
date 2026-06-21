@@ -35,12 +35,14 @@ GIRIS_MAKAS_YUZDE = 0.40
 
 # CCXT'nin 3 borsada da (Binance, Bybit, OKX) istisnasız %100 aynı isimle tanıdığı en likit çiftler
 TARANACAK_COINLER = [
-    'BTC/USDT',         # Bitcoin Spot
-    'BTC/USDT:USDT',    # Bitcoin Vadeli
-    'ETH/USDT',         # Ethereum Spot
-    'ETH/USDT:USDT',    # Ethereum Vadeli
-    'SOL/USDT',         # Solana Spot
-    'SOL/USDT:USDT'     # Solana Vadeli
+    'BTC/USDT', 'BTC/USDT:USDT',
+    'ETH/USDT', 'ETH/USDT:USDT',
+    'SOL/USDT', 'SOL/USDT:USDT',
+    'XRP/USDT', 'XRP/USDT:USDT',
+    'ADA/USDT', 'ADA/USDT:USDT',
+    'AVAX/USDT', 'AVAX/USDT:USDT',
+    'LINK/USDT', 'LINK/USDT:USDT',
+    'DOGE/USDT', 'DOGE/USDT:USDT'
 ]
 
 fiyat_havuzu = {
