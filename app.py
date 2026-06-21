@@ -23,30 +23,29 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 PROXY_URL = os.environ.get("PROXY_URL")
 ccxt_proxy_config = {}
 if PROXY_URL:
-    # CCXT, proxy entegrasyonunu kendi içinde socksProxy kalıbıyla otomatik çözer
     ccxt_proxy_config = {'socksProxy': PROXY_URL}
 
 # --- 🏛️ BORSA BAĞLANTILARINI BAŞLATMA ---
-exchange_binance = ccxt.binance({
-    'apiKey': BINANCE_API, 'secret': BINANCE_SECRET,
-    'enableRateLimit': True, **ccxt_proxy_config
-})
+exchange_binance = ccxt.binance({'apiKey': BINANCE_API, 'secret': BINANCE_SECRET, 'enableRateLimit': True, **ccxt_proxy_config})
+exchange_bybit = ccxt.bybit({'apiKey': BYBIT_API, 'secret': BYBIT_SECRET, 'enableRateLimit': True, **ccxt_proxy_config})
+exchange_okx = ccxt.okx({'apiKey': OKX_API, 'secret': OKX_SECRET, 'password': OKX_PASSWORD, 'enableRateLimit': True, **ccxt_proxy_config})
 
-exchange_bybit = ccxt.bybit({
-    'apiKey': BYBIT_API, 'secret': BYBIT_SECRET,
-    'enableRateLimit': True, **ccxt_proxy_config
-})
+# --- 📊 GENİŞLETİLMİŞ ARBİTRAJ AYARLARI ---
+GIRIS_MAKAS_YUZDE = 0.55  # Vadeli piyasalarda komisyon ve fonlama riski için eşiği hafifçe yükselttik
 
-exchange_okx = ccxt.okx({
-    'apiKey': OKX_API, 'secret': OKX_SECRET, 'password': OKX_PASSWORD,
-    'enableRateLimit': True, **ccxt_proxy_config
-})
-
-# --- 📊 ARBİTRAJ VE TARAMA AYARLARI ---
-GIRIS_MAKAS_YUZDE = 0.50  # Borsalar arası transfer/komisyon maliyetleri için ideal eşik
+# CCXT Kuralları: 
+# '/' içeriyorsa SPOT piyasadır.
+# '/' ve sonrasında ':USDT' içeriyorsa VADELİ (Futures/Perpetual) piyasadır.
 TARANACAK_COINLER = [
-    'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT', 'ADA/USDT', 
-    'DOT/USDT', 'AVAX/USDT', 'LINK/USDT', 'DOGE/USDT', 'SHIB/USDT'
+    'BTC/USDT', 'BTC/USDT:USDT',
+    'ETH/USDT', 'ETH/USDT:USDT',
+    'SOL/USDT', 'SOL/USDT:USDT',
+    'XRP/USDT', 'XRP/USDT:USDT',
+    'ADA/USDT', 'ADA/USDT:USDT',
+    'DOT/USDT', 'DOT/USDT:USDT',
+    'AVAX/USDT', 'AVAX/USDT:USDT',
+    'LINK/USDT', 'LINK/USDT:USDT',
+    'DOGE/USDT', 'DOGE/USDT:USDT'
 ]
 
 fiyat_havuzu = {
@@ -74,8 +73,8 @@ def fiyat_cek_binance():
                 if symbol in tickers and tickers[symbol]['last']:
                     fiyat_havuzu['Binance'][symbol] = float(tickers[symbol]['last'])
         except Exception as e:
-            print(f"⚠️ Binance fiyat çekme hatası: {e}")
-        time.sleep(0.8)
+            pass
+        time.sleep(0.5)
 
 def fiyat_cek_bybit():
     while True:
@@ -85,8 +84,8 @@ def fiyat_cek_bybit():
                 if symbol in tickers and tickers[symbol]['last']:
                     fiyat_havuzu['Bybit'][symbol] = float(tickers[symbol]['last'])
         except Exception as e:
-            print(f"⚠️ Bybit fiyat çekme hatası: {e}")
-        time.sleep(0.8)
+            pass
+        time.sleep(0.5)
 
 def fiyat_cek_okx():
     while True:
@@ -96,13 +95,13 @@ def fiyat_cek_okx():
                 if symbol in tickers and tickers[symbol]['last']:
                     fiyat_havuzu['OKX'][symbol] = float(tickers[symbol]['last'])
         except Exception as e:
-            print(f"⚠️ OKX fiyat çekme hatası: {e}")
-        time.sleep(0.8)
+            pass
+        time.sleep(0.5)
 
-# --- 🎯 ARBİTRAJ MATEMATİK MOTORU ---
+# --- 🎯 AGRESİF ARBİTRAJ MATEMATİK MOTORU ---
 def uc_borsa_arbitraj_motoru():
-    print("🚀 3'lü Canavar Arbitraj Motoru Pusuda Bekliyor...")
-    telegram_bildir("🤖 <b>3'lü Borsalar Arası Arbitraj Canavarı Başlatıldı!</b>")
+    print("🚀 3'lü Agresif Canavar (Spot + Vadeli) Pusuda Bekliyor...")
+    telegram_bildir("🤖 <b>3'lü Agresif Arbitraj Canavarı (Spot + Vadeli) Başlatıldı!</b>")
     
     while True:
         try:
@@ -110,42 +109,40 @@ def uc_borsa_arbitraj_motoru():
             
             for symbol in TARANACAK_COINLER:
                 fiyatlar = {}
+                piyasa_turu = "⚠️ (Vadeli)" if ":" in symbol else "🟢 (Spot)"
+                temiz_isim = symbol.split(":")[0] # Görsel temizlik için
                 
-                # Fiyatların üç borsadan da gelip gelmediğini kontrol et
-                if symbol in fiyat_havuzu['Binance']: fiyatlar['Binance'] = fiyat_havuzu['Binance'][symbol]
-                if symbol in fiyat_havuzu['Bybit']: fiyatlar['Bybit'] = fiyat_havuzu['Bybit'][symbol]
-                if symbol in fiyat_havuzu['OKX']: fiyatlar['OKX'] = fiyat_havuzu['OKX'][symbol]
+                # Fiyat kontrolü
+                if symbol in fiyat_havuzu['Binance']: fiyatlar[f'Binance {piyasa_turu}'] = fiyat_havuzu['Binance'][symbol]
+                if symbol in fiyat_havuzu['Bybit']: fiyatlar[f'Bybit {piyasa_turu}'] = fiyat_havuzu['Bybit'][symbol]
+                if symbol in fiyat_havuzu['OKX']: fiyatlar[f'OKX {piyasa_turu}'] = fiyat_havuzu['OKX'][symbol]
                 
                 if len(fiyatlar) < 3: 
-                    continue # 3 borsanın verisi de henüz tamamlanmadıysa pas geç
+                    continue
                 
-                # Dinamik olarak en ucuz ve en pahalı borsayı bul
-                en_ucuz_borsa = min(fiyatlar, key=fiyatlar.get)
-                en_pahali_borsa = max(fiyatlar, key=fiyatlar.get)
+                en_ucuz_piyasa = min(fiyatlar, key=fiyatlar.get)
+                en_pahali_piyasa = max(fiyatlar, key=fiyatlar.get)
                 
-                ucuz_fiyat = fiyatlar[en_ucuz_borsa]
-                pahali_fiyat = fiyatlar[en_pahali_borsa]
+                ucuz_fiyat = fiyatlar[en_ucuz_piyasa]
+                pahali_fiyat = fiyatlar[en_pahali_piyasa]
                 
-                # Makas hesaplama
                 makas = ((pahali_fiyat - ucuz_fiyat) / ucuz_fiyat) * 100
-                fırsat_listesi.append((symbol, makas, en_ucuz_borsa, ucuz_fiyat, en_pahali_borsa, pahali_fiyat))
+                fırsat_listesi.append((temiz_isim, makas, en_ucuz_piyasa, ucuz_fiyat, en_pahali_piyasa, pahali_fiyat))
                 
-                # Sinyal Durumu
                 if makas >= GIRIS_MAKAS_YUZDE:
-                    mesaj = (f"🔥 <b>ARBİTRAJ SİNYALİ</b>\n\n"
-                             f"📊 <b>Koin:</b> {symbol}\n"
+                    mesaj = (f"🔥 <b>AGRESİF ARBİTRAJ SİNYALİ</b>\n\n"
+                             f"📊 <b>Koin:</b> {temiz_isim}\n"
                              f"⚡ <b>Makas:</b> +%{makas:.4f}\n"
-                             f"🟢 <b>Al (Ucuz):</b> {en_ucuz_borsa} ({ucuz_fiyat})\n"
-                             f"🔴 <b>Sat (Pahalı):</b> {en_pahali_borsa} ({pahali_fiyat})")
-                    print(f"\a{mesaj}") # Konsolda sesli uyarı verir (destekleyen sistemlerde)
+                             f"📥 <b>Al (Ucuz):</b> {en_ucuz_piyasa} -> {ucuz_fiyat}\n"
+                             f"📤 <b>Sat (Pahalı):</b> {en_pahali_piyasa} -> {pahali_fiyat}")
+                    print(mesaj)
                     telegram_bildir(mesaj)
             
-            # Konsol Ekranı Gösterimi (Temiz takip için)
             if fırsat_listesi:
                 fırsat_listesi.sort(key=lambda x: x[1], reverse=True)
-                print("\n💵 --- 3 BORSA ANLIK EN YÜKSEK 3 MAKAS ---")
+                print("\n💵 --- 3 BORSA (SPOT+VADELİ) EN YÜKSEK 3 MAKAS ---")
                 for i, item in enumerate(fırsat_listesi[:3]):
-                    print(f"{i+1}. [{item[0]}] +%{item[1]:.4f} | Ucuz: {item[2]} ({item[3]}) -> Pahalı: {item[4]} ({item[5]})")
+                    print(f"{i+1}. [{item[0]}] +%{item[1]:.4f} |\n    Ucuz: {item[2]} ({item[3]})\n    Pahalı: {item[4]} ({item[5]})")
                     
         except Exception as e:
             print(f"❌ Motor hatası: {e}")
@@ -154,13 +151,9 @@ def uc_borsa_arbitraj_motoru():
         time.sleep(1)
 
 if __name__ == "__main__":
-    # Fiyat çekme kanallarını eşzamanlı başlat
     threading.Thread(target=fiyat_cek_binance, daemon=True).start()
     threading.Thread(target=fiyat_cek_bybit, daemon=True).start()
     threading.Thread(target=fiyat_cek_okx, daemon=True).start()
     
-    # Verilerin havuza dolması için kısa bir es ver
-    time.sleep(3)
-    
-    # Karşılaştırma motorunu çalıştır
+    time.sleep(4) # Verilerin dolması için biraz daha süre tanıyalım
     uc_borsa_arbitraj_motoru()
