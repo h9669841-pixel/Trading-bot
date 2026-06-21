@@ -1,1 +1,4 @@
+ccxt==4.2.10
+requests==2.31.0
+PySocks==1.7.1
 
