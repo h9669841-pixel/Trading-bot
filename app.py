@@ -31,18 +31,20 @@ exchange_bybit = ccxt.bybit({'enableRateLimit': True, **ccxt_proxy_config})
 exchange_okx = ccxt.okx({'enableRateLimit': True, **ccxt_proxy_config})
 
 # --- 📊 ARBİTRAJ AYARLARI ---
-GIRIS_MAKAS_YUZDE = 0.40  
+GIRIS_MAKAS_YUZDE = 0.60  
 
 # CCXT'nin 3 borsada da (Binance, Bybit, OKX) istisnasız %100 aynı isimle tanıdığı en likit çiftler
 TARANACAK_COINLER = [
-    'BTC/USDT', 'BTC/USDT:USDT',
-    'ETH/USDT', 'ETH/USDT:USDT',
-    'SOL/USDT', 'SOL/USDT:USDT',
-    'XRP/USDT', 'XRP/USDT:USDT',
-    'ADA/USDT', 'ADA/USDT:USDT',
-    'AVAX/USDT', 'AVAX/USDT:USDT',
-    'LINK/USDT', 'LINK/USDT:USDT',
-    'DOGE/USDT', 'DOGE/USDT:USDT'
+    'FIL/USDT', 'FIL/USDT:USDT',
+    'LTC/USDT', 'LTC/USDT:USDT',
+    'APT/USDT', 'APT/USDT:USDT',
+    'OP/USDT', 'OP/USDT:USDT',
+    'ARB/USDT', 'ARB/USDT:USDT',
+    'NEAR/USDT', 'NEAR/USDT:USDT',
+    'ATOM/USDT', 'ATOM/USDT:USDT',
+    'GRT/USDT', 'GRT/USDT:USDT',
+    'PEPE/USDT', 'PEPE/USDT:USDT',
+    'WIF/USDT', 'WIF/USDT:USDT'
 ]
 
 fiyat_havuzu = {
