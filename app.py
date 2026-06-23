@@ -36,11 +36,11 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY)
 
 # --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
-GIRIS_MAKAS_YUZDE = 0.45       
+GIRIS_MAKAS_YUZDE = 10.45       
 CIKIS_MAKAS_YUZDE = 0.10       
 
-SPOT_BAKIYE = 22.0  
-FUTURES_BAKIYE = 22.0  
+SPOT_BAKIYE = 15.0  
+FUTURES_BAKIYE = 15.0  
 
 SPOT_FEE_RATE = 0.0750 / 100
 FUTURES_FEE_RATE = 0.0450 / 100
@@ -51,6 +51,9 @@ arbitraj_pozisyonlari = {}
 
 SPOT_HASSASIYETLERI = {}
 FUTURES_HASSASIYETLERI = {}
+
+# 🛠️ ÇÖZÜM: Koinlerin birbirine karışmasını engelleyecek Global Kilit (Lock)
+order_lock = threading.Lock()
 
 def get_all_futures_symbols():
     try:
@@ -70,13 +73,11 @@ def get_all_futures_symbols():
     return ["btcusdt", "ethusdt", "solusdt", "xrpusdt"]
 
 def set_all_leverages():
-    # 🛠️ ÇÖZÜM: Pozisyon Modunu (Hedge -> One-Way) tek seferde küresel olarak düzeltiyoruz
     print("⏳ Pozisyon Modu 'One-Way' (Tek Yönlü) olarak zorlanıyor...")
     try:
         client.futures_change_position_mode(dualSidePosition="false")
         print("✅ Pozisyon Modu başarıyla Tek Yönlü (One-Way) yapıldı.")
     except BinanceAPIException as e:
-        # Zaten tek yönlüyse hata verebilir, onu yok sayıyoruz
         if e.code == -4059: 
             print("✅ Pozisyon Modu zaten Tek Yönlü (One-Way).")
         else:
@@ -247,16 +248,22 @@ def arbitraj_tarama_dongusu():
                         net = net_kar_hesapla(anlik_makas, CIKIS_MAKAS_YUZDE)
                         if net <= 0: continue
                             
-                        basarili, s_qty, f_qty = execute_arbitrage_entry(symbol, spot_fiyat, futures_fiyat)
-                        if basarili:
-                            pos.update({"aktif": True, "giris_makas": anlik_makas, "spot_adet": s_qty, "futures_adet": f_qty})
-                            telegram_bildir(f"🤖 <b>İŞLEME GİRİLDİ (+)</b>\n\n📊 <b>Koin:</b> {coin_label}\n⚡ <b>Makas:</b> +%{anlik_makas:.4f}\n💵 <b>Tahmini Net Kâr:</b> {net:.4f} USDT")
+                        # 🛠️ ÇÖZÜM: Aynı anda sadece BİR koin işlem yapabilir. Diğer koinlerin sinyalleri kilit çözülene kadar bekler.
+                        with order_lock:
+                            # Kilidin içine girdiğinde fiyatı ve aktiflik durumunu son bir kez daha doğrula (Double-check)
+                            if not pos["aktif"]:
+                                basarili, s_qty, f_qty = execute_arbitrage_entry(symbol, spot_fiyat, futures_fiyat)
+                                if basarili:
+                                    pos.update({"aktif": True, "giris_makas": anlik_makas, "spot_adet": s_qty, "futures_adet": f_qty})
+                                    telegram_bildir(f"🤖 <b>İŞLEME GİRİLDİ (+)</b>\n\n📊 <b>Koin:</b> {coin_label}\n⚡ <b>Makas:</b> +%{anlik_makas:.4f}\n💵 <b>Tahmini Net Kâr:</b> {net:.4f} USDT")
                 else:
                     if anlik_makas <= CIKIS_MAKAS_YUZDE:
-                        if execute_arbitrage_exit(symbol, pos["spot_adet"], pos["futures_adet"]):
-                            brut, kesinti, net = net_kar_hesapla(pos["giris_makas"], anlik_makas)
-                            telegram_bildir(f"🤝 <b>🔒 POZİSYON KAPATILDI</b>\n🎉 Net Realize Kâr: {net:.4f} USDT")
-                            pos["aktif"] = False
+                        with order_lock:
+                            if pos["aktif"]:
+                                if execute_arbitrage_exit(symbol, pos["spot_adet"], pos["futures_adet"]):
+                                    brut, kesinti, net = net_kar_hesapla(pos["giris_makas"], anlik_makas)
+                                    telegram_bildir(f"🤝 <b>🔒 POZİSYON KAPATILDI</b>\n🎉 Net Realize Kâr: {net:.4f} USDT")
+                                    pos["aktif"] = False
                             
             if en_yuksek_makaslar:
                 en_yuksek_makaslar.sort(key=lambda x: x[1], reverse=True)
@@ -265,18 +272,17 @@ def arbitraj_tarama_dongusu():
                     print(f"{i+1}. [{item[0]}] +%{item[1]:.4f} | Sp: {item[2]} | Fu: {item[3]}")
                     
         except Exception as e: print(f"❌ Döngü hatası: {e}")
-        time.sleep(0.2)
+        time.sleep(0.3) # Döngü nefes alma süresini 0.3 saniyeye çekerek işlemciyi ve API'yi rahatlatıyoruz
 
 if __name__ == "__main__":
     SYMBOLS = get_all_futures_symbols()
     piyasa_verisi = {symbol: {"spot_price": None, "futures_price": None} for symbol in SYMBOLS}
     arbitraj_pozisyonlari = {symbol: {"aktif": False, "giris_makas": 0.0, "spot_adet": 0.0, "futures_adet": 0.0} for symbol in SYMBOLS}
     
-    # 🛠️ Başlangıçta tüm kaldıraçları ve pozisyon modlarını hizala
     set_all_leverages()
     tum_hassasiyetleri_yukle()
     
-    telegram_bildir("🤖 <b>Pozisyon Modu Sabitleyici Devrede!</b>\nHedge modu engeli kaldırıldı.")
+    telegram_bildir("🤖 <b>Thread Lock Koruması Devrede!</b>\nSinyal ve koin kaymaları engellendi.")
     
     threading.Thread(target=start_multi_spot_ws, daemon=True).start()
     threading.Thread(target=start_multi_futures_ws, daemon=True).start()
