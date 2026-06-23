@@ -37,7 +37,7 @@ client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY)
 
 # --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
 GIRIS_MAKAS_YUZDE = 0.45       # Sadece +%0.45 ve üzerindeki fırsatları avlar
-CIKIS_MAKAS_YUZDE = 0.07       # Makas +%0.10'un altına daraldığında kârı kilitler ve çıkar
+CIKIS_MAKAS_YUZDE = 0.10       # Makas +%0.10'un altına daraldığında kârı kilitler ve çıkar
 
 # 25 USDT cüzdan bakiyenizin ucu ucuna sıkışmaması için güvenlik tamponlu bakiye
 SPOT_BAKIYE = 22.0  
@@ -52,12 +52,23 @@ arbitraj_pozisyonlari = {}
 SEMBOL_HASSASIYETLERI = {}
 
 def get_all_futures_symbols():
-    return [
-        "wifusdt", "pepeusdt", "bonkusdt", "flokiusdt", "shibusdt",
-        "suiusdt", "fetusdt", "jupusdt", "ondousdt", "tiausdt",
-        "bomeusdt", "dogeusdt", "ltcusdt", "filusdt", "aptusdt",
-        "arbusdt", "nearusdt", "opusdt", "linkusdt", "avaxusdt", "bandusdt"
-    ]
+    try:
+        url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            symbols = []
+            for market in data.get("symbols", []):
+                if market.get("quoteAsset") == "USDT" and market.get("status") == "TRADING":
+                    symbols.append(market.get("symbol").lower())
+            # İlk 150 koini filtrele ve döndür
+            filtered_symbols = symbols[:150]
+            print(f"🎯 Binance Vadeli İşlemlerden ilk {len(filtered_symbols)} aktif sembol başarıyla çekildi.")
+            return filtered_symbols
+    except Exception as e:
+        print(f"❌ Koin listesi çekilirken hata oluştu: {e}")
+        traceback.print_exc()
+    return ["btcusdt", "ethusdt", "solusdt", "xrpusdt"]
 
 def set_all_leverages():
     print("⏳ Kaldıraçlar 5x ve Cross olarak ayarlanıyor...")
@@ -139,7 +150,6 @@ def execute_arbitrage_entry(symbol, spot_price, futures_price):
         t1.start(); t2.start(); t1.join(); t2.join()
         
         if 'spot_hata' in emir_sonuclari or 'futures_hata' in emir_sonuclari:
-            # Bacaklardan biri hata verirse işlemi iptal et
             return False, 0, 0
         return True, spot_quantity, futures_quantity
     except Exception as e:
