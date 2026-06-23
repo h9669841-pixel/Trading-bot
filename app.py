@@ -39,9 +39,9 @@ client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY)
 GIRIS_MAKAS_YUZDE = 0.45       
 CIKIS_MAKAS_YUZDE = 0.10       
 
-# 🎯 İki bacağı kusursuz eşitlemek için bakiye ayarları
+# 🎯 Bacak dengeleme ayarları
 SPOT_BAKIYE = 22.0  
-FUTURES_BAKIYE = 22.0  # Pozisyon hacmini 22 USDT yapıyoruz (5x kaldıraçla cüzdandan sadece 4.4 USDT bağlar)
+FUTURES_BAKIYE = 22.0  
 
 SPOT_FEE_RATE = 0.0750 / 100
 FUTURES_FEE_RATE = 0.0450 / 100
@@ -95,10 +95,17 @@ def tum_hassasiyetleri_yukle():
         for sym in SYMBOLS: SEMBOL_HASSASIYETLERI[sym] = 2
 
 def telegram_bildir(mesaj):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: 
+        print(f"⚠️ Telegram ayarları eksik. Mesaj gönderilemedi: {mesaj}")
+        return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    try: requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": mesaj, "parse_mode": "HTML"}, timeout=5)
-    except Exception: pass
+    try: 
+        # 🛠️ Yazım hatası tamamen düzeltildi (mesaj parametresi doğru bağlandı)
+        r = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": mesaj, "parse_mode": "HTML"}, timeout=5)
+        if r.status_code != 200:
+            print(f"❌ Telegram API Hatası: {r.text}")
+    except Exception as e: 
+        print(f"❌ Telegram bağlantı hatası: {e}")
 
 def net_kar_hesapla(giris_makas, kapanis_makas):
     brut_oran_farki = giris_makas - kapanis_makas
@@ -118,7 +125,6 @@ def _hizli_emir_gonder_futures(coin_label, quantity, sonuclar):
         client.futures_change_leverage(symbol=coin_label, leverage=5)
         sonuclar['futures'] = client.futures_create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=quantity)
     except BinanceAPIException as e:
-        # 🎯 BURASI KRİTİK: Borsanın vadeli emri neden reddettiğini yakalıyoruz!
         sonuclar['futures_hata'] = f"Binance Borsası Emri Reddetti -> Kod: {e.code}, Mesaj: {e.message}"
     except Exception as e: 
         sonuclar['futures_hata'] = f"Sistemsel Bağlantı Hatası -> {e}"
@@ -154,13 +160,11 @@ def execute_arbitrage_entry(symbol, spot_price, futures_price):
         t1.start(); t2.start(); t1.join(); t2.join()
         
         if 'spot_hata' in emir_sonuclari or 'futures_hata' in emir_sonuclari:
-            # 🚨 EKRANA VE TELEGRAMA REDDEDİLME NEDENİNİ DETAYLI YAZDIR
             if 'futures_hata' in emir_sonuclari:
                 hata_raporu = f"⚠️ <b>{coin_label} VADELİ EMİR REDDEDİLDİ!</b>\nNeden: <code>{emir_sonuclari['futures_hata']}</code>"
                 print(hata_raporu)
                 telegram_bildir(hata_raporu)
             
-            # Eğer spot alındı ama vadeli açılmadıysa riski önlemek için spotu acilen geri sat
             if 'spot' in emir_sonuclari and 'futures_hata' in emir_sonuclari:
                 print(f"🔄 Risk Koruma: Alınan spot {coin_label} koinleri piyasa fiyatından hemen geri satılıyor...")
                 client.create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=spot_quantity)
@@ -187,7 +191,7 @@ def start_multi_spot_ws():
     def on_message(ws, message):
         data = json.loads(message)
         symbol = data.get("stream", "").split("@")[0]
-        if symbol in piyasa_verisi: piyasa_verica[symbol]["spot_price"] = float(data.get("data", {}).get("p", 0))
+        if symbol in piyasa_verisi: piyasa_verisi[symbol]["spot_price"] = float(data.get("data", {}).get("p", 0))
     WebSocketApp(f"wss://stream.binance.com:9443/stream?streams={'/'.join([f'{s}@trade' for s in SYMBOLS])}", on_message=on_message).run_forever()
 
 def start_multi_futures_ws():
@@ -246,6 +250,10 @@ if __name__ == "__main__":
     piyasa_verisi = {symbol: {"spot_price": None, "futures_price": None} for symbol in SYMBOLS}
     arbitraj_pozisyonlari = {symbol: {"aktif": False, "giris_makas": 0.0, "spot_adet": 0.0, "futures_adet": 0.0} for symbol in SYMBOLS}
     set_all_leverages(); tum_hassasiyetleri_yukle()
+    
+    # Başlangıç test bildirimi
+    telegram_bildir("🤖 <b>Arbitraj Robotu Başarıyla Başlatıldı!</b>\nTelegram bağlantısı sorunsuz.")
+    
     threading.Thread(target=start_multi_spot_ws, daemon=True).start()
     threading.Thread(target=start_multi_futures_ws, daemon=True).start()
     arbitraj_tarama_dongusu()
