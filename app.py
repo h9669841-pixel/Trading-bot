@@ -36,12 +36,14 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY)
 
 # --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
-GIRIS_MAKAS_YUZDE = 0.50       
+GIRIS_MAKAS_YUZDE = 0.45       
 CIKIS_MAKAS_YUZDE = 0.10       
 
+# 🛠️ GÜNCELLEME: İstediğin gibi kaldıracı 1x yaptık ve bakiyeleri 15 USDT'ye çektik.
+# 15 / 1 = 15 USDT pozisyon açacağı için 5 USDT barajını rahatça geçiyoruz.
 SPOT_BAKIYE = 15.0  
 FUTURES_BAKIYE = 15.0  
-KALDIRAC = 5  # 🛠️ Vadeli pozisyon büyüklüğünü dengelemek için kaldıraç çarpanı
+KALDIRAC = 1  
 
 SPOT_FEE_RATE = 0.0750 / 100
 FUTURES_FEE_RATE = 0.0450 / 100
@@ -53,7 +55,6 @@ arbitraj_pozisyonlari = {}
 SPOT_HASSASIYETLERI = {}
 FUTURES_HASSASIYETLERI = {}
 
-# Sinyal ve koin karışmalarını engelleyen kilit mekanizması
 order_lock = threading.Lock()
 
 def get_all_futures_symbols():
@@ -167,9 +168,13 @@ def execute_arbitrage_entry(symbol, spot_price, futures_price):
         spot_precision = SPOT_HASSASIYETLERI.get(symbol.lower(), 2)
         futures_precision = FUTURES_HASSASIYETLERI.get(symbol.lower(), 2)
         
-        # 🛠️ ÇÖZÜM: Vadeli tarafta kaldıraç büyüklüğünü (Notional) tam 15 USDT'ye eşitleyen yeni formül
         raw_spot_qty = SPOT_BAKIYE / spot_price
         raw_futures_qty = (FUTURES_BAKIYE / KALDIRAC) / futures_price
+        
+        tahmini_notional = raw_futures_qty * KALDIRAC * futures_price
+        if tahmini_notional < 5.1:
+            print(f"⚠️ {coin_label} pas geçildi. Tahmini büyüklük ({tahmini_notional:.2f} USDT) 5 USDT limitinin altında.")
+            return False, 0, 0
         
         spot_quantity = float(int(raw_spot_qty * (10 ** spot_precision))) / (10 ** spot_precision) if spot_precision > 0 else int(raw_spot_qty)
         futures_quantity = float(int(raw_futures_qty * (10 ** futures_precision))) / (10 ** futures_precision) if futures_precision > 0 else int(raw_futures_qty)
@@ -285,7 +290,7 @@ if __name__ == "__main__":
     set_all_leverages()
     tum_hassasiyetleri_yukle()
     
-    telegram_bildir("🚀 <b>Delta Nötr Arbitraj Botu Yayında!</b>\nKaldıraçlı büyüklük dengelemesi sağlandı.")
+    telegram_bildir("🚀 <b>1x Kaldıraçlı Koruma Aktif!</b>\n15 USDT saf arbitraj moduna geçildi.")
     
     threading.Thread(target=start_multi_spot_ws, daemon=True).start()
     threading.Thread(target=start_multi_futures_ws, daemon=True).start()
