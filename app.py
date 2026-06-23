@@ -36,11 +36,12 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY)
 
 # --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
-GIRIS_MAKAS_YUZDE = 0.60       
+GIRIS_MAKAS_YUZDE = 10.45       
 CIKIS_MAKAS_YUZDE = 0.10       
 
 SPOT_BAKIYE = 15.0  
 FUTURES_BAKIYE = 15.0  
+KALDIRAC = 5  # 🛠️ Vadeli pozisyon büyüklüğünü dengelemek için kaldıraç çarpanı
 
 SPOT_FEE_RATE = 0.0750 / 100
 FUTURES_FEE_RATE = 0.0450 / 100
@@ -52,7 +53,7 @@ arbitraj_pozisyonlari = {}
 SPOT_HASSASIYETLERI = {}
 FUTURES_HASSASIYETLERI = {}
 
-# 🛠️ ÇÖZÜM: Koinlerin birbirine karışmasını engelleyecek Global Kilit (Lock)
+# Sinyal ve koin karışmalarını engelleyen kilit mekanizması
 order_lock = threading.Lock()
 
 def get_all_futures_symbols():
@@ -85,10 +86,10 @@ def set_all_leverages():
     except Exception as e:
         print(f"⚠️ Pozisyon modu genel hata: {e}")
 
-    print("⏳ Kaldıraçlar 5x olarak ayarlanıyor...")
+    print(f"⏳ Kaldıraçlar {KALDIRAC}x olarak ayarlanıyor...")
     for symbol in SYMBOLS:
         try:
-            client.futures_change_leverage(symbol=symbol.upper(), leverage=5)
+            client.futures_change_leverage(symbol=symbol.upper(), leverage=KALDIRAC)
             time.sleep(0.02)
         except Exception:
             pass
@@ -139,7 +140,8 @@ def net_kar_hesapla(giris_makas, kapanis_makas):
     brut_oran_farki = giris_makas - kapanis_makas
     brut_kazanc_usdt = SPOT_BAKIYE * (brut_oran_farki / 100)
     toplam_kesinti_usdt = ((SPOT_BAKIYE * SPOT_FEE_RATE) * 2) + ((FUTURES_BAKIYE * FUTURES_FEE_RATE) * 2)
-    return brut_kazanc_usdt - toplam_kesinti_usdt
+    net_kazanc_usdt = brut_kazanc_usdt - toplam_kesinti_usdt
+    return brut_kazanc_usdt, toplam_kesinti_usdt, net_kazanc_usdt
 
 # --- 🚀 EMİR MOTORLARI ---
 def _hizli_emir_gonder_spot(coin_label, quantity, sonuclar):
@@ -165,8 +167,9 @@ def execute_arbitrage_entry(symbol, spot_price, futures_price):
         spot_precision = SPOT_HASSASIYETLERI.get(symbol.lower(), 2)
         futures_precision = FUTURES_HASSASIYETLERI.get(symbol.lower(), 2)
         
+        # 🛠️ ÇÖZÜM: Vadeli tarafta kaldıraç büyüklüğünü (Notional) tam 15 USDT'ye eşitleyen yeni formül
         raw_spot_qty = SPOT_BAKIYE / spot_price
-        raw_futures_qty = FUTURES_BAKIYE / futures_price
+        raw_futures_qty = (FUTURES_BAKIYE / KALDIRAC) / futures_price
         
         spot_quantity = float(int(raw_spot_qty * (10 ** spot_precision))) / (10 ** spot_precision) if spot_precision > 0 else int(raw_spot_qty)
         futures_quantity = float(int(raw_futures_qty * (10 ** futures_precision))) / (10 ** futures_precision) if futures_precision > 0 else int(raw_futures_qty)
@@ -245,12 +248,10 @@ def arbitraj_tarama_dongusu():
                 
                 if not pos["aktif"]:
                     if anlik_makas >= GIRIS_MAKAS_YUZDE:
-                        net = net_kar_hesapla(anlik_makas, CIKIS_MAKAS_YUZDE)
+                        _, _, net = net_kar_hesapla(anlik_makas, CIKIS_MAKAS_YUZDE)
                         if net <= 0: continue
                             
-                        # 🛠️ ÇÖZÜM: Aynı anda sadece BİR koin işlem yapabilir. Diğer koinlerin sinyalleri kilit çözülene kadar bekler.
                         with order_lock:
-                            # Kilidin içine girdiğinde fiyatı ve aktiflik durumunu son bir kez daha doğrula (Double-check)
                             if not pos["aktif"]:
                                 basarili, s_qty, f_qty = execute_arbitrage_entry(symbol, spot_fiyat, futures_fiyat)
                                 if basarili:
@@ -271,8 +272,10 @@ def arbitraj_tarama_dongusu():
                 for i, item in enumerate(en_yuksek_makaslar[:3]):
                     print(f"{i+1}. [{item[0]}] +%{item[1]:.4f} | Sp: {item[2]} | Fu: {item[3]}")
                     
-        except Exception as e: print(f"❌ Döngü hatası: {e}")
-        time.sleep(0.3) # Döngü nefes alma süresini 0.3 saniyeye çekerek işlemciyi ve API'yi rahatlatıyoruz
+        except Exception as e: 
+            print(f"❌ Döngü hatası: {e}")
+            traceback.print_exc()
+        time.sleep(0.3)
 
 if __name__ == "__main__":
     SYMBOLS = get_all_futures_symbols()
@@ -282,7 +285,7 @@ if __name__ == "__main__":
     set_all_leverages()
     tum_hassasiyetleri_yukle()
     
-    telegram_bildir("🤖 <b>Thread Lock Koruması Devrede!</b>\nSinyal ve koin kaymaları engellendi.")
+    telegram_bildir("🚀 <b>Delta Nötr Arbitraj Botu Yayında!</b>\nKaldıraçlı büyüklük dengelemesi sağlandı.")
     
     threading.Thread(target=start_multi_spot_ws, daemon=True).start()
     threading.Thread(target=start_multi_futures_ws, daemon=True).start()
