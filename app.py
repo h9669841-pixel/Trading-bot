@@ -36,12 +36,12 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY)
 
 # --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
-GIRIS_MAKAS_YUZDE = 0.35       # Sadece +%0.45 ve üzerindeki fırsatları avlar
-CIKIS_MAKAS_YUZDE = 0.07       # Makas +%0.10'un altına daraldığında kârı kilitler ve çıkar
+GIRIS_MAKAS_YUZDE = 0.45       
+CIKIS_MAKAS_YUZDE = 0.10       
 
-# 25 USDT cüzdan bakiyenizin ucu ucuna sıkışmaması için güvenlik tamponlu bakiye
-SPOT_BAKIYE = 26.0  
-FUTURES_BAKIYE = 26.0
+# 🎯 İki bacağı kusursuz eşitlemek için bakiye ayarları
+SPOT_BAKIYE = 22.0  
+FUTURES_BAKIYE = 22.0  # Pozisyon hacmini 22 USDT yapıyoruz (5x kaldıraçla cüzdandan sadece 4.4 USDT bağlar)
 
 SPOT_FEE_RATE = 0.0750 / 100
 FUTURES_FEE_RATE = 0.0450 / 100
@@ -61,17 +61,15 @@ def get_all_futures_symbols():
             for market in data.get("symbols", []):
                 if market.get("quoteAsset") == "USDT" and market.get("status") == "TRADING":
                     symbols.append(market.get("symbol").lower())
-            # İlk 150 koini filtrele ve döndür
             filtered_symbols = symbols[:150]
             print(f"🎯 Binance Vadeli İşlemlerden ilk {len(filtered_symbols)} aktif sembol başarıyla çekildi.")
             return filtered_symbols
     except Exception as e:
         print(f"❌ Koin listesi çekilirken hata oluştu: {e}")
-        traceback.print_exc()
     return ["btcusdt", "ethusdt", "solusdt", "xrpusdt"]
 
 def set_all_leverages():
-    print("⏳ Kaldıraçlar 5x ve Cross olarak ayarlanıyor...")
+    print("⏳ Kaldıraçlar 5x olarak ayarlanıyor...")
     for symbol in SYMBOLS:
         try:
             client.futures_change_leverage(symbol=symbol.upper(), leverage=5)
@@ -110,14 +108,20 @@ def net_kar_hesapla(giris_makas, kapanis_makas):
 
 # --- 🚀 REKABETÇİ VE HIZLI EMİR MOTORLARI ---
 def _hizli_emir_gonder_spot(coin_label, quantity, sonuclar):
-    try: sonuclar['spot'] = client.create_order(symbol=coin_label, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=quantity)
-    except Exception as e: sonuclar['spot_hata'] = e
+    try: 
+        sonuclar['spot'] = client.create_order(symbol=coin_label, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=quantity)
+    except Exception as e: 
+        sonuclar['spot_hata'] = e
 
 def _hizli_emir_gonder_futures(coin_label, quantity, sonuclar):
     try:
         client.futures_change_leverage(symbol=coin_label, leverage=5)
         sonuclar['futures'] = client.futures_create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=quantity)
-    except Exception as e: sonuclar['futures_hata'] = e
+    except BinanceAPIException as e:
+        # 🎯 BURASI KRİTİK: Borsanın vadeli emri neden reddettiğini yakalıyoruz!
+        sonuclar['futures_hata'] = f"Binance Borsası Emri Reddetti -> Kod: {e.code}, Mesaj: {e.message}"
+    except Exception as e: 
+        sonuclar['futures_hata'] = f"Sistemsel Bağlantı Hatası -> {e}"
 
 def _hizli_cikis_gonder_spot(coin_label, quantity, sonuclar):
     try: sonuclar['spot'] = client.create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=quantity)
@@ -150,7 +154,18 @@ def execute_arbitrage_entry(symbol, spot_price, futures_price):
         t1.start(); t2.start(); t1.join(); t2.join()
         
         if 'spot_hata' in emir_sonuclari or 'futures_hata' in emir_sonuclari:
+            # 🚨 EKRANA VE TELEGRAMA REDDEDİLME NEDENİNİ DETAYLI YAZDIR
+            if 'futures_hata' in emir_sonuclari:
+                hata_raporu = f"⚠️ <b>{coin_label} VADELİ EMİR REDDEDİLDİ!</b>\nNeden: <code>{emir_sonuclari['futures_hata']}</code>"
+                print(hata_raporu)
+                telegram_bildir(hata_raporu)
+            
+            # Eğer spot alındı ama vadeli açılmadıysa riski önlemek için spotu acilen geri sat
+            if 'spot' in emir_sonuclari and 'futures_hata' in emir_sonuclari:
+                print(f"🔄 Risk Koruma: Alınan spot {coin_label} koinleri piyasa fiyatından hemen geri satılıyor...")
+                client.create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=spot_quantity)
             return False, 0, 0
+            
         return True, spot_quantity, futures_quantity
     except Exception as e:
         print(f"❌ Giriş Hatası: {e}"); return False, 0, 0
@@ -172,7 +187,7 @@ def start_multi_spot_ws():
     def on_message(ws, message):
         data = json.loads(message)
         symbol = data.get("stream", "").split("@")[0]
-        if symbol in piyasa_verisi: piyasa_verisi[symbol]["spot_price"] = float(data.get("data", {}).get("p", 0))
+        if symbol in piyasa_verisi: piyasa_verica[symbol]["spot_price"] = float(data.get("data", {}).get("p", 0))
     WebSocketApp(f"wss://stream.binance.com:9443/stream?streams={'/'.join([f'{s}@trade' for s in SYMBOLS])}", on_message=on_message).run_forever()
 
 def start_multi_futures_ws():
@@ -196,14 +211,12 @@ def arbitraj_tarama_dongusu():
                 anlik_makas = ((futures_fiyat - spot_fiyat) / spot_fiyat) * 100
                 coin_label = symbol.upper()
                 
-                # Sadece pozitif (+) makasları sıralamaya ve radara ekle
                 if anlik_makas > 0:
                     en_yuksek_makaslar.append((coin_label, anlik_makas, spot_fiyat, futures_fiyat))
                 
                 pos = arbitraj_pozisyonlari[symbol]
                 
                 if not pos["aktif"]:
-                    # Sadece belirlenen giriş limitini aşan ARTI (+) makaslarda işleme gir
                     if anlik_makas >= GIRIS_MAKAS_YUZDE:
                         net = net_kar_hesapla(anlik_makas, CIKIS_MAKAS_YUZDE)
                         if net <= 0: continue
@@ -213,7 +226,6 @@ def arbitraj_tarama_dongusu():
                             pos.update({"aktif": True, "giris_makas": anlik_makas, "spot_adet": s_qty, "futures_adet": f_qty})
                             telegram_bildir(f"🤖 <b>İŞLEME GİRİLDİ (+)</b>\n\n📊 <b>Koin:</b> {coin_label}\n⚡ <b>Makas:</b> +%{anlik_makas:.4f}\n💵 <b>Tahmini Net Kâr:</b> {net:.4f} USDT")
                 else:
-                    # Pozisyon kapatma kontrolü
                     if anlik_makas <= CIKIS_MAKAS_YUZDE:
                         if execute_arbitrage_exit(symbol, pos["spot_adet"], pos["futures_adet"]):
                             brut, kesinti, net = net_kar_hesapla(pos["giris_makas"], anlik_makas)
