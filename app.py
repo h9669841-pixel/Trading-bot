@@ -40,8 +40,8 @@ GIRIS_MAKAS_YUZDE = 10.45       # Sadece +%0.45 ve üzerindeki fırsatları avla
 CIKIS_MAKAS_YUZDE = 0.10       # Makas +%0.10'un altına daraldığında kârı kilitler ve çıkar
 
 # 25 USDT cüzdan bakiyenizin ucu ucuna sıkışmaması için güvenlik tamponlu bakiye
-SPOT_BAKIYE = 22.0  
-FUTURES_BAKIYE = 22.0
+SPOT_BAKIYE = 26.0  
+FUTURES_BAKIYE = 26.0
 
 SPOT_FEE_RATE = 0.0750 / 100
 FUTURES_FEE_RATE = 0.0450 / 100
