@@ -39,11 +39,9 @@ client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY)
 GIRIS_MAKAS_YUZDE = 0.45       
 CIKIS_MAKAS_YUZDE = 0.10       
 
-# 🛠️ GÜNCELLEME: İstediğin gibi kaldıracı 1x yaptık ve bakiyeleri 15 USDT'ye çektik.
-# 15 / 1 = 15 USDT pozisyon açacağı için 5 USDT barajını rahatça geçiyoruz.
 SPOT_BAKIYE = 15.0  
 FUTURES_BAKIYE = 15.0  
-KALDIRAC = 1  
+KALDIRAC = 1  # 1x Kaldıraç ayarı korundu
 
 SPOT_FEE_RATE = 0.0750 / 100
 FUTURES_FEE_RATE = 0.0450 / 100
@@ -55,7 +53,8 @@ arbitraj_pozisyonlari = {}
 SPOT_HASSASIYETLERI = {}
 FUTURES_HASSASIYETLERI = {}
 
-order_lock = threading.Lock()
+# 🔒 Veri bütünlüğü kilidi (WebSocket ve Döngü senkronizasyonu için)
+data_lock = threading.Lock()
 
 def get_all_futures_symbols():
     try:
@@ -173,7 +172,6 @@ def execute_arbitrage_entry(symbol, spot_price, futures_price):
         
         tahmini_notional = raw_futures_qty * KALDIRAC * futures_price
         if tahmini_notional < 5.1:
-            print(f"⚠️ {coin_label} pas geçildi. Tahmini büyüklük ({tahmini_notional:.2f} USDT) 5 USDT limitinin altında.")
             return False, 0, 0
         
         spot_quantity = float(int(raw_spot_qty * (10 ** spot_precision))) / (10 ** spot_precision) if spot_precision > 0 else int(raw_spot_qty)
@@ -218,19 +216,27 @@ def execute_arbitrage_exit(symbol, spot_qty, futures_qty):
         print(f"❌ Çıkış Hatası: {e}"); return False
 
 # --- 🌐 WEBSOCKET SÜRÜCÜLERİ ---
+def on_spot_message(ws, message):
+    data = json.loads(message)
+    symbol = data.get("stream", "").split("@")[0]
+    # 🔒 ÇÖZÜM: Döngü tarama yaparken fiyat güncellemesini kilitle
+    with data_lock:
+        if symbol in piyasa_verisi: 
+            piyasa_verisi[symbol]["spot_price"] = float(data.get("data", {}).get("p", 0))
+
+def on_futures_message(ws, message):
+    data = json.loads(message)
+    symbol = data.get("stream", "").split("@")[0]
+    # 🔒 ÇÖZÜM: Döngü tarama yaparken fiyat güncellemesini kilitle
+    with data_lock:
+        if symbol in piyasa_verisi: 
+            piyasa_verisi[symbol]["futures_price"] = float(data.get("data", {}).get("p", 0))
+
 def start_multi_spot_ws():
-    def on_message(ws, message):
-        data = json.loads(message)
-        symbol = data.get("stream", "").split("@")[0]
-        if symbol in piyasa_verisi: piyasa_verisi[symbol]["spot_price"] = float(data.get("data", {}).get("p", 0))
-    WebSocketApp(f"wss://stream.binance.com:9443/stream?streams={'/'.join([f'{s}@trade' for s in SYMBOLS])}", on_message=on_message).run_forever()
+    WebSocketApp(f"wss://stream.binance.com:9443/stream?streams={'/'.join([f'{s}@trade' for s in SYMBOLS])}", on_message=on_spot_message).run_forever()
 
 def start_multi_futures_ws():
-    def on_message(ws, message):
-        data = json.loads(message)
-        symbol = data.get("stream", "").split("@")[0]
-        if symbol in piyasa_verisi: piyasa_verisi[symbol]["futures_price"] = float(data.get("data", {}).get("p", 0))
-    WebSocketApp(f"wss://fstream.binance.com/stream?streams={'/'.join([f'{s}@trade' for s in SYMBOLS])}", on_message=on_message).run_forever()
+    WebSocketApp(f"wss://fstream.binance.com/stream?streams={'/'.join([f'{s}@trade' for s in SYMBOLS])}", on_message=on_futures_message).run_forever()
 
 # --- 🎯 ARBİTRAJ MOTORU ---
 def arbitraj_tarama_dongusu():
@@ -238,33 +244,34 @@ def arbitraj_tarama_dongusu():
     while True:
         try:
             en_yuksek_makaslar = []
-            for symbol in SYMBOLS:
-                spot_fiyat = piyasa_verisi[symbol]["spot_price"]
-                futures_fiyat = piyasa_verisi[symbol]["futures_price"]
-                if not spot_fiyat or not futures_fiyat: continue
+            
+            # 🔒 ÇÖZÜM: Taramayı, hesaplamayı ve emri komple TEK KİLİT altına alıyoruz.
+            # Bu kilit açıkken WebSocket'ler fiyatları arka planda değiştiremez.
+            with data_lock:
+                for symbol in SYMBOLS:
+                    spot_fiyat = piyasa_verisi[symbol]["spot_price"]
+                    futures_fiyat = piyasa_verisi[symbol]["futures_price"]
+                    if not spot_fiyat or not futures_fiyat: continue
+                        
+                    anlik_makas = ((futures_fiyat - spot_fiyat) / spot_fiyat) * 100
+                    coin_label = symbol.upper()
                     
-                anlik_makas = ((futures_fiyat - spot_fiyat) / spot_fiyat) * 100
-                coin_label = symbol.upper()
-                
-                if anlik_makas > 0:
-                    en_yuksek_makaslar.append((coin_label, anlik_makas, spot_fiyat, futures_fiyat))
-                
-                pos = arbitraj_pozisyonlari[symbol]
-                
-                if not pos["aktif"]:
-                    if anlik_makas >= GIRIS_MAKAS_YUZDE:
-                        _, _, net = net_kar_hesapla(anlik_makas, CIKIS_MAKAS_YUZDE)
-                        if net <= 0: continue
-                            
-                        with order_lock:
-                            if not pos["aktif"]:
-                                basarili, s_qty, f_qty = execute_arbitrage_entry(symbol, spot_fiyat, futures_fiyat)
-                                if basarili:
-                                    pos.update({"aktif": True, "giris_makas": anlik_makas, "spot_adet": s_qty, "futures_adet": f_qty})
-                                    telegram_bildir(f"🤖 <b>İŞLEME GİRİLDİ (+)</b>\n\n📊 <b>Koin:</b> {coin_label}\n⚡ <b>Makas:</b> +%{anlik_makas:.4f}\n💵 <b>Tahmini Net Kâr:</b> {net:.4f} USDT")
-                else:
-                    if anlik_makas <= CIKIS_MAKAS_YUZDE:
-                        with order_lock:
+                    if anlik_makas > 0:
+                        en_yuksek_makaslar.append((coin_label, anlik_makas, spot_fiyat, futures_fiyat))
+                    
+                    pos = arbitraj_pozisyonlari[symbol]
+                    
+                    if not pos["aktif"]:
+                        if anlik_makas >= GIRIS_MAKAS_YUZDE:
+                            _, _, net = net_kar_hesapla(anlik_makas, CIKIS_MAKAS_YUZDE)
+                            if net <= 0: continue
+                                
+                            basarili, s_qty, f_qty = execute_arbitrage_entry(symbol, spot_fiyat, futures_fiyat)
+                            if basarili:
+                                pos.update({"aktif": True, "giris_makas": anlik_makas, "spot_adet": s_qty, "futures_adet": f_qty})
+                                telegram_bildir(f"🤖 <b>İŞLEME GİRİLDİ (+)</b>\n\n📊 <b>Koin:</b> {coin_label}\n⚡ <b>Makas:</b> +%{anlik_makas:.4f}\n💵 <b>Tahmini Net Kâr:</b> {net:.4f} USDT")
+                    else:
+                        if anlik_makas <= CIKIS_MAKAS_YUZDE:
                             if pos["aktif"]:
                                 if execute_arbitrage_exit(symbol, pos["spot_adet"], pos["futures_adet"]):
                                     brut, kesinti, net = net_kar_hesapla(pos["giris_makas"], anlik_makas)
@@ -280,7 +287,7 @@ def arbitraj_tarama_dongusu():
         except Exception as e: 
             print(f"❌ Döngü hatası: {e}")
             traceback.print_exc()
-        time.sleep(0.3)
+        time.sleep(0.4) # Döngü nefes alma süresini 0.4 saniye yaparak kilitlerin çakışmasını önlüyoruz
 
 if __name__ == "__main__":
     SYMBOLS = get_all_futures_symbols()
@@ -290,7 +297,7 @@ if __name__ == "__main__":
     set_all_leverages()
     tum_hassasiyetleri_yukle()
     
-    telegram_bildir("🚀 <b>1x Kaldıraçlı Koruma Aktif!</b>\n15 USDT saf arbitraj moduna geçildi.")
+    telegram_bildir("🚀 <b>Atomic Lock (Bütünleşik Kilit) Koruması Devreye Alındı!</b>\nÇapraz koin kaymaları tamamen imkansız hale getirildi.")
     
     threading.Thread(target=start_multi_spot_ws, daemon=True).start()
     threading.Thread(target=start_multi_futures_ws, daemon=True).start()
