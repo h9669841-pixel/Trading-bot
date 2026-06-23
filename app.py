@@ -39,7 +39,6 @@ client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY)
 GIRIS_MAKAS_YUZDE = 0.45       
 CIKIS_MAKAS_YUZDE = 0.10       
 
-# 🎯 Bacak dengeleme ayarları
 SPOT_BAKIYE = 22.0  
 FUTURES_BAKIYE = 22.0  
 
@@ -49,7 +48,9 @@ FUTURES_FEE_RATE = 0.0450 / 100
 SYMBOLS = []
 piyasa_verisi = {}
 arbitraj_pozisyonlari = {}
-SEMBOL_HASSASIYETLERI = {}
+
+SPOT_HASSASIYETLERI = {}
+FUTURES_HASSASIYETLERI = {}
 
 def get_all_futures_symbols():
     try:
@@ -69,43 +70,69 @@ def get_all_futures_symbols():
     return ["btcusdt", "ethusdt", "solusdt", "xrpusdt"]
 
 def set_all_leverages():
+    # 🛠️ ÇÖZÜM: Pozisyon Modunu (Hedge -> One-Way) tek seferde küresel olarak düzeltiyoruz
+    print("⏳ Pozisyon Modu 'One-Way' (Tek Yönlü) olarak zorlanıyor...")
+    try:
+        client.futures_change_position_mode(dualSidePosition="false")
+        print("✅ Pozisyon Modu başarıyla Tek Yönlü (One-Way) yapıldı.")
+    except BinanceAPIException as e:
+        # Zaten tek yönlüyse hata verebilir, onu yok sayıyoruz
+        if e.code == -4059: 
+            print("✅ Pozisyon Modu zaten Tek Yönlü (One-Way).")
+        else:
+            print(f"⚠️ Pozisyon modu değiştirilemedi: {e.message}")
+    except Exception as e:
+        print(f"⚠️ Pozisyon modu genel hata: {e}")
+
     print("⏳ Kaldıraçlar 5x olarak ayarlanıyor...")
     for symbol in SYMBOLS:
         try:
             client.futures_change_leverage(symbol=symbol.upper(), leverage=5)
-            time.sleep(0.05)
+            time.sleep(0.02)
         except Exception:
             pass
 
 def tum_hassasiyetleri_yukle():
-    print("⏳ Lot hassasiyetleri önbelleğe alınıyor...")
+    print("⏳ Spot ve Vadeli Lot hassasiyetleri önbelleğe alınıyor...")
     try:
-        exchange_info = client.get_exchange_info()
-        for market in exchange_info['symbols']:
+        spot_info = client.get_exchange_info()
+        for market in spot_info['symbols']:
             sym = market['symbol'].lower()
             if sym in SYMBOLS:
                 for f in market['filters']:
                     if f['filterType'] == 'LOT_SIZE':
                         step_size_str = str(f['stepSize']).rstrip('0')
                         precision = 0 if '.' not in step_size_str else len(step_size_str.split('.')[1])
-                        SEMBOL_HASSASIYETLERI[sym] = precision
-        print(f"✅ Hassasiyet haritası kaydedildi. Toplam: {len(SEMBOL_HASSASIYETLERI)}")
+                        SPOT_HASSASIYETLERI[sym] = precision
     except Exception as e:
-        print(f"❌ Hassasiyet yükleme hatası: {e}")
-        for sym in SYMBOLS: SEMBOL_HASSASIYETLERI[sym] = 2
+        print(f"❌ Spot hassasiyet yükleme hatası: {e}")
+
+    try:
+        f_url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
+        r = requests.get(f_url, timeout=10)
+        if r.status_code == 200:
+            f_data = r.json()
+            for market in f_data.get("symbols", []):
+                sym = market.get("symbol").lower()
+                if sym in SYMBOLS:
+                    for f in market.get("filters", []):
+                        if f.get("filterType") == "LOT_SIZE":
+                            step_size_str = str(f.get("stepSize")).rstrip('0')
+                            precision = 0 if '.' not in step_size_str else len(step_size_str.split('.')[1])
+                            FUTURES_HASSASIYETLERI[sym] = precision
+        print(f"✅ Çift yönlü hassasiyet haritası kaydedildi. S:{len(SPOT_HASSASIYETLERI)} | F:{len(FUTURES_HASSASIYETLERI)}")
+    except Exception as e:
+        print(f"❌ Vadeli hassasiyet yükleme hatası: {e}")
+
+    for sym in SYMBOLS:
+        if sym not in SPOT_HASSASIYETLERI: SPOT_HASSASIYETLERI[sym] = 2
+        if sym not in FUTURES_HASSASIYETLERI: FUTURES_HASSASIYETLERI[sym] = 2
 
 def telegram_bildir(mesaj):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: 
-        print(f"⚠️ Telegram ayarları eksik. Mesaj gönderilemedi: {mesaj}")
-        return
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    try: 
-        # 🛠️ Yazım hatası tamamen düzeltildi (mesaj parametresi doğru bağlandı)
-        r = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": mesaj, "parse_mode": "HTML"}, timeout=5)
-        if r.status_code != 200:
-            print(f"❌ Telegram API Hatası: {r.text}")
-    except Exception as e: 
-        print(f"❌ Telegram bağlantı hatası: {e}")
+    try: requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": mesaj, "parse_mode": "HTML"}, timeout=5)
+    except Exception: pass
 
 def net_kar_hesapla(giris_makas, kapanis_makas):
     brut_oran_farki = giris_makas - kapanis_makas
@@ -113,21 +140,15 @@ def net_kar_hesapla(giris_makas, kapanis_makas):
     toplam_kesinti_usdt = ((SPOT_BAKIYE * SPOT_FEE_RATE) * 2) + ((FUTURES_BAKIYE * FUTURES_FEE_RATE) * 2)
     return brut_kazanc_usdt - toplam_kesinti_usdt
 
-# --- 🚀 REKABETÇİ VE HIZLI EMİR MOTORLARI ---
+# --- 🚀 EMİR MOTORLARI ---
 def _hizli_emir_gonder_spot(coin_label, quantity, sonuclar):
-    try: 
-        sonuclar['spot'] = client.create_order(symbol=coin_label, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=quantity)
-    except Exception as e: 
-        sonuclar['spot_hata'] = e
+    try: sonuclar['spot'] = client.create_order(symbol=coin_label, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=quantity)
+    except Exception as e: sonuclar['spot_hata'] = e
 
 def _hizli_emir_gonder_futures(coin_label, quantity, sonuclar):
-    try:
-        client.futures_change_leverage(symbol=coin_label, leverage=5)
-        sonuclar['futures'] = client.futures_create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=quantity)
-    except BinanceAPIException as e:
-        sonuclar['futures_hata'] = f"Binance Borsası Emri Reddetti -> Kod: {e.code}, Mesaj: {e.message}"
-    except Exception as e: 
-        sonuclar['futures_hata'] = f"Sistemsel Bağlantı Hatası -> {e}"
+    try: sonuclar['futures'] = client.futures_create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=quantity)
+    except BinanceAPIException as e: sonuclar['futures_hata'] = f"Binance Borsası Emri Reddetti -> Kod: {e.code}, Mesaj: {e.message}"
+    except Exception as e: sonuclar['futures_hata'] = f"Sistemsel Bağlantı Hatası -> {e}"
 
 def _hizli_cikis_gonder_spot(coin_label, quantity, sonuclar):
     try: sonuclar['spot'] = client.create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=quantity)
@@ -140,18 +161,19 @@ def _hizli_cikis_gonder_futures(coin_label, quantity, sonuclar):
 def execute_arbitrage_entry(symbol, spot_price, futures_price):
     coin_label = symbol.upper()
     try:
-        precision = SEMBOL_HASSASIYETLERI.get(symbol.lower(), 2)
+        spot_precision = SPOT_HASSASIYETLERI.get(symbol.lower(), 2)
+        futures_precision = FUTURES_HASSASIYETLERI.get(symbol.lower(), 2)
+        
         raw_spot_qty = SPOT_BAKIYE / spot_price
         raw_futures_qty = FUTURES_BAKIYE / futures_price
         
-        spot_quantity = float(int(raw_spot_qty * (10 ** precision))) / (10 ** precision) if precision > 0 else int(raw_spot_qty)
-        futures_quantity = float(int(raw_futures_qty * (10 ** precision))) / (10 ** precision) if precision > 0 else int(raw_futures_qty)
+        spot_quantity = float(int(raw_spot_qty * (10 ** spot_precision))) / (10 ** spot_precision) if spot_precision > 0 else int(raw_spot_qty)
+        futures_quantity = float(int(raw_futures_qty * (10 ** futures_precision))) / (10 ** futures_precision) if futures_precision > 0 else int(raw_futures_qty)
         
-        if precision == 0:
-            spot_quantity = int(spot_quantity)
-            futures_quantity = int(futures_quantity)
+        if spot_precision == 0: spot_quantity = int(spot_quantity)
+        if futures_precision == 0: futures_quantity = int(futures_quantity)
             
-        print(f"⚙️ {coin_label} İşleme Gönderiliyor | Adetler -> Sp: {spot_quantity}, Fu: {futures_quantity}")
+        print(f"⚙️ {coin_label} İşleme Gönderiliyor | Sp Adet: {spot_quantity} | Fu Adet: {futures_quantity}")
         
         emir_sonuclari = {}
         t1 = threading.Thread(target=_hizli_emir_gonder_spot, args=(coin_label, spot_quantity, emir_sonuclari))
@@ -249,10 +271,12 @@ if __name__ == "__main__":
     SYMBOLS = get_all_futures_symbols()
     piyasa_verisi = {symbol: {"spot_price": None, "futures_price": None} for symbol in SYMBOLS}
     arbitraj_pozisyonlari = {symbol: {"aktif": False, "giris_makas": 0.0, "spot_adet": 0.0, "futures_adet": 0.0} for symbol in SYMBOLS}
-    set_all_leverages(); tum_hassasiyetleri_yukle()
     
-    # Başlangıç test bildirimi
-    telegram_bildir("🤖 <b>Arbitraj Robotu Başarıyla Başlatıldı!</b>\nTelegram bağlantısı sorunsuz.")
+    # 🛠️ Başlangıçta tüm kaldıraçları ve pozisyon modlarını hizala
+    set_all_leverages()
+    tum_hassasiyetleri_yukle()
+    
+    telegram_bildir("🤖 <b>Pozisyon Modu Sabitleyici Devrede!</b>\nHedge modu engeli kaldırıldı.")
     
     threading.Thread(target=start_multi_spot_ws, daemon=True).start()
     threading.Thread(target=start_multi_futures_ws, daemon=True).start()
