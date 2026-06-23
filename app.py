@@ -41,7 +41,7 @@ CIKIS_MAKAS_YUZDE = 0.10
 
 SPOT_BAKIYE = 15.0  
 FUTURES_BAKIYE = 15.0  
-KALDIRAC = 1  # 1x Kaldıraç ayarı korundu
+KALDIRAC = 1  
 
 SPOT_FEE_RATE = 0.0750 / 100
 FUTURES_FEE_RATE = 0.0450 / 100
@@ -53,7 +53,7 @@ arbitraj_pozisyonlari = {}
 SPOT_HASSASIYETLERI = {}
 FUTURES_HASSASIYETLERI = {}
 
-# 🔒 Veri bütünlüğü kilidi (WebSocket ve Döngü senkronizasyonu için)
+# 🔒 Veri bütünlüğü kilidi
 data_lock = threading.Lock()
 
 def get_all_futures_symbols():
@@ -155,11 +155,13 @@ def _hizli_emir_gonder_futures(coin_label, quantity, sonuclar):
 
 def _hizli_cikis_gonder_spot(coin_label, quantity, sonuclar):
     try: sonuclar['spot'] = client.create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=quantity)
-    except Exception as e: sonuclar['spot_hata'] = e
+    except BinanceAPIException as e: sonuclar['spot_hata'] = f"Kod: {e.code}, Mesaj: {e.message}"
+    except Exception as e: sonuclar['spot_hata'] = str(e)
 
 def _hizli_cikis_gonder_futures(coin_label, quantity, sonuclar):
     try: sonuclar['futures'] = client.futures_create_order(symbol=coin_label, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=quantity)
-    except Exception as e: sonuclar['futures_hata'] = e
+    except BinanceAPIException as e: sonuclar['futures_hata'] = f"Kod: {e.code}, Mesaj: {e.message}"
+    except Exception as e: sonuclar['futures_hata'] = str(e)
 
 def execute_arbitrage_entry(symbol, spot_price, futures_price):
     coin_label = symbol.upper()
@@ -203,6 +205,7 @@ def execute_arbitrage_entry(symbol, spot_price, futures_price):
     except Exception as e:
         print(f"❌ Giriş Hatası: {e}"); return False, 0, 0
 
+# 🛠️ GÜNCELLEME: Çıkış hatalarını Telegram'a raporlayan yeni çıkış motoru
 def execute_arbitrage_exit(symbol, spot_qty, futures_qty):
     coin_label = symbol.upper()
     try:
@@ -211,15 +214,28 @@ def execute_arbitrage_exit(symbol, spot_qty, futures_qty):
         t2 = threading.Thread(target=_hizli_cikis_gonder_futures, args=(coin_label, futures_qty, emir_sonuclari))
         
         t1.start(); t2.start(); t1.join(); t2.join()
+        
+        # Eğer bir tarafta bile hata varsa durumu raporla
+        if 'spot_hata' in emir_sonuclari or 'futures_hata' in emir_sonuclari:
+            hata_mesaji = f"🚨 <b>{coin_label} POZİSYON KAPATILIRKEN HATA OLUŞTU!</b>\n"
+            if 'spot_hata' in emir_sonuclari:
+                hata_mesaji += f"❌ <b>Spot Çıkış Hatası:</b> <code>{emir_sonuclari['spot_hata']}</code>\n"
+            if 'futures_hata' in emir_sonuclari:
+                hata_mesaji += f"❌ <b>Vadeli Çıkış Hatası:</b> <code>{emir_sonuclari['futures_hata']}</code>\n"
+            hata_mesaji += "⚠️ Lütfen borsa hesabınızı manuel olarak kontrol edin!"
+            print(hata_mesaji)
+            telegram_bildir(hata_mesaji)
+            return False
+            
         return True
     except Exception as e:
-        print(f"❌ Çıkış Hatası: {e}"); return False
+        print(f"❌ Kritik Çıkış Hatası: {e}")
+        return False
 
 # --- 🌐 WEBSOCKET SÜRÜCÜLERİ ---
 def on_spot_message(ws, message):
     data = json.loads(message)
     symbol = data.get("stream", "").split("@")[0]
-    # 🔒 ÇÖZÜM: Döngü tarama yaparken fiyat güncellemesini kilitle
     with data_lock:
         if symbol in piyasa_verisi: 
             piyasa_verisi[symbol]["spot_price"] = float(data.get("data", {}).get("p", 0))
@@ -227,7 +243,6 @@ def on_spot_message(ws, message):
 def on_futures_message(ws, message):
     data = json.loads(message)
     symbol = data.get("stream", "").split("@")[0]
-    # 🔒 ÇÖZÜM: Döngü tarama yaparken fiyat güncellemesini kilitle
     with data_lock:
         if symbol in piyasa_verisi: 
             piyasa_verisi[symbol]["futures_price"] = float(data.get("data", {}).get("p", 0))
@@ -245,8 +260,6 @@ def arbitraj_tarama_dongusu():
         try:
             en_yuksek_makaslar = []
             
-            # 🔒 ÇÖZÜM: Taramayı, hesaplamayı ve emri komple TEK KİLİT altına alıyoruz.
-            # Bu kilit açıkken WebSocket'ler fiyatları arka planda değiştiremez.
             with data_lock:
                 for symbol in SYMBOLS:
                     spot_fiyat = piyasa_verisi[symbol]["spot_price"]
@@ -271,8 +284,10 @@ def arbitraj_tarama_dongusu():
                                 pos.update({"aktif": True, "giris_makas": anlik_makas, "spot_adet": s_qty, "futures_adet": f_qty})
                                 telegram_bildir(f"🤖 <b>İŞLEME GİRİLDİ (+)</b>\n\n📊 <b>Koin:</b> {coin_label}\n⚡ <b>Makas:</b> +%{anlik_makas:.4f}\n💵 <b>Tahmini Net Kâr:</b> {net:.4f} USDT")
                     else:
+                        # 🛠️ GÜNCELLEME: Çıkış koşulu sağlandığında emri tetikle
                         if anlik_makas <= CIKIS_MAKAS_YUZDE:
                             if pos["aktif"]:
+                                # execute_arbitrage_exit başarılı olursa pozisyonu temizle
                                 if execute_arbitrage_exit(symbol, pos["spot_adet"], pos["futures_adet"]):
                                     brut, kesinti, net = net_kar_hesapla(pos["giris_makas"], anlik_makas)
                                     telegram_bildir(f"🤝 <b>🔒 POZİSYON KAPATILDI</b>\n🎉 Net Realize Kâr: {net:.4f} USDT")
@@ -287,7 +302,7 @@ def arbitraj_tarama_dongusu():
         except Exception as e: 
             print(f"❌ Döngü hatası: {e}")
             traceback.print_exc()
-        time.sleep(0.4) # Döngü nefes alma süresini 0.4 saniye yaparak kilitlerin çakışmasını önlüyoruz
+        time.sleep(0.4)
 
 if __name__ == "__main__":
     SYMBOLS = get_all_futures_symbols()
@@ -297,7 +312,7 @@ if __name__ == "__main__":
     set_all_leverages()
     tum_hassasiyetleri_yukle()
     
-    telegram_bildir("🚀 <b>Atomic Lock (Bütünleşik Kilit) Koruması Devreye Alındı!</b>\nÇapraz koin kaymaları tamamen imkansız hale getirildi.")
+    telegram_bildir("🚀 <b>Gelişmiş Çıkış Raporlamalı Bot Devrede!</b>\nAsenkron kapanış takibi aktif.")
     
     threading.Thread(target=start_multi_spot_ws, daemon=True).start()
     threading.Thread(target=start_multi_futures_ws, daemon=True).start()
