@@ -344,7 +344,7 @@ def arbitraj_tarama_dongusu():
         except Exception as e: 
             print(f"❌ Döngü hatası: {e}")
             traceback.print_exc()
-        time.sleep(0.4)
+        time.sleep(4)
 
 if __name__ == "__main__":
     SYMBOLS = get_all_futures_symbols()
