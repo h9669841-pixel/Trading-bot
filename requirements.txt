@@ -1,5 +1,2 @@
-requests[socks]
-python-socks
-websocket-client
-python-binance
+
 
