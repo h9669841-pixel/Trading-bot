@@ -52,7 +52,7 @@ arbitraj_pozisyonlari = {}
 
 SPOT_HASSASIYETLERI = {}
 FUTURES_HASSASIYETLERI = {}
-PRICE_HASSASIYETLERI = {} # Fiyat adımı (tickSize) hassasiyetleri
+PRICE_HASSASIYETLERI = {}
 
 data_lock = threading.Lock()
 
@@ -71,14 +71,63 @@ def get_all_futures_symbols():
         print(f"❌ Koin listesi çekilirken hata oluştu: {e}")
     return ["btcusdt", "ethusdt", "solusdt", "xrpusdt"]
 
+def senkronize_et_mevcut_pozisyonlar():
+    print("⏳ Binance Vadeli İşlemlerdeki aktif pozisyonlarınız kırıntı filtresiyle taranıyor...")
+    try:
+        account_info = client.futures_account()
+        positions = account_info.get("positions", [])
+        
+        acik_sayac = 0
+        for pos in positions:
+            symbol_upper = pos.get("symbol")
+            symbol_lower = symbol_upper.lower()
+            
+            if symbol_lower in arbitraj_pozisyonlari:
+                amt = float(pos.get("positionAmt", 0))
+                notional_degeri = abs(float(pos.get("notional", 0)))
+                
+                if amt != 0 and notional_degeri >= 5.0:
+                    v_adet = abs(amt)
+                    arbitraj_pozisyonlari[symbol_lower].update({
+                        "durum": "CIKIS_BEKLIYOR", # Doğrudan çıkış pusu aşamasına alıyoruz manuel koruma için
+                        "spot_adet": v_adet,             
+                        "futures_adet": v_adet
+                    })
+                    acik_sayac += 1
+                    print(f"⚠️ AKTİF POZİSYON KİLİTLENDİ: {symbol_upper} ({notional_degeri:.2f} USDT büyüklüğünde).")
+        print(f"✅ Filtreleme tamamlandı. Toplam {acik_sayac} pozisyon hafızaya alındı.")
+    except Exception as e:
+        print(f"❌ Pozisyonlar senkronize edilirken hata: {e}")
+
+def set_all_leverages():
+    print("⏳ Pozisyon Modu 'One-Way' (Tek Yönlü) olarak zorlanıyor...")
+    try:
+        client.futures_change_position_mode(dualSidePosition="false")
+        print("✅ Pozisyon Modu başarıyla Tek Yönlü (One-Way) yapıldı.")
+    except BinanceAPIException as e:
+        if e.code == -4059: 
+            print("✅ Pozisyon Modu zaten Tek Yönlü (One-Way).")
+        else:
+            print(f"⚠️ Pozisyon modu değiştirilemedi: {e.message}")
+    except Exception as e:
+        print(f"⚠️ Pozisyon modu genel hata: {e}")
+
+    print(f"⏳ Kaldıraçlar {KALDIRAC}x olarak ayarlanıyor...")
+    for symbol in SYMBOLS:
+        try:
+            client.futures_change_leverage(symbol=symbol.upper(), leverage=KALDIRAC)
+            time.sleep(0.01)
+        except Exception:
+            pass
+
 def tum_hassasiyetleri_yukle():
-    print("⏳ Spot, Vadeli Lot ve Fiyat hassasiyetleri önbelleğe alıyor...")
+    print("⏳ Spot, Vadeli Lot ve Fiyat hassasiyetleri önbelleğe alınıyor...")
     try:
         spot_info = client.get_exchange_info()
         for market in spot_info['symbols']:
             sym = market['symbol'].lower()
             if sym in SYMBOLS:
-                PRICE_HASSASIYETLERI[sym] = 2 # Varsayılan fiyat hassasiyeti
+                PRICE_HASSASIYETLERI[sym] = 2
                 for f in market['filters']:
                     if f['filterType'] == 'LOT_SIZE':
                         step_size_str = str(f['stepSize']).rstrip('0')
@@ -130,7 +179,6 @@ def execute_limit_arbitrage_entry(symbol, spot_price, futures_price):
 
         print(f"⏳ {coin_label} için LİMİT giriş emirleri gönderiliyor... Sp: {s_price_str} | Fu: {f_price_str}")
         
-        # LIMIT emirler tahtaya pasif bırakılır (timeInForce=GTC)
         spot_order = client.create_order(symbol=coin_label, side=SIDE_BUY, type=ORDER_TYPE_LIMIT, timeInForce=TIME_IN_FORCE_GTC, quantity=spot_quantity, price=s_price_str)
         futures_order = client.futures_create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_LIMIT, timeInForce=TIME_IN_FORCE_GTC, quantity=futures_quantity, price=f_price_str)
         
@@ -139,7 +187,7 @@ def execute_limit_arbitrage_entry(symbol, spot_price, futures_price):
         print(f"❌ Limit Giriş Hatası: {e}")
         return False, 0, 0, None, None
 
-# --- 🚀 LİMİT EMİR MOTORLARI (KÂR KAPANIŞI - TAKE PROFIT) ---
+# --- 🚀 LİMİT EMİR MOTORLARI (KÂR KAPANIŞI) ---
 def execute_limit_arbitrage_exit_targets(symbol, spot_qty, futures_qty, target_spot_exit_price, target_futures_exit_price):
     coin_label = symbol.upper()
     try:
@@ -151,15 +199,14 @@ def execute_limit_arbitrage_exit_targets(symbol, spot_qty, futures_qty, target_s
         s_exit_price_str = f"{target_spot_exit_price:.{price_precision}f}"
         f_exit_price_str = f"{target_futures_exit_price:.{price_precision}f}"
         
-        print(f"🎯 {coin_label} KÂR HEDEFLİ LİMİT KAPANIŞ EMİRLERİ YAZILIYOR -> Sp Satış: {s_exit_price_str} | Fu Alış: {f_exit_price_str}")
+        print(f"🎯 {coin_label} KÂR LİMİT EMİRLERİ YAZILIYOR -> Sp Satış: {s_exit_price_str} | Fu Alış: {f_exit_price_str}")
         
-        # Kâr realizasyonu için limit çıkış emirleri tahtaya asılır
         spot_close_order = client.create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_LIMIT, timeInForce=TIME_IN_FORCE_GTC, quantity=güvenli_spot_qty, price=s_exit_price_str)
         futures_close_order = client.futures_create_order(symbol=coin_label, side=SIDE_BUY, type=ORDER_TYPE_LIMIT, timeInForce=TIME_IN_FORCE_GTC, quantity=futures_qty, price=f_exit_price_str)
         
         return True, spot_close_order.get('orderId'), futures_close_order.get('orderId')
     except Exception as e:
-        print(f"❌ Kâr Limit Emirleri Girilirken Hata: {e}")
+        print(f"❌ Kâr Limit Emirleri Hatası: {e}")
         return False, None, None
 
 # --- 🌐 WEBSOCKET SÜRÜCÜLERİ ---
@@ -196,7 +243,7 @@ def arbitraj_tarama_dongusu():
                     coin_label = symbol.upper()
                     pos = arbitraj_pozisyonlari[symbol]
                     
-                    # STAGE 1: HİÇ POZİSYON YOKSA VE GİRİŞ ŞARTI OLUŞTUYSA -> LİMİT GİRİŞ EMİRLERİNİ GİR
+                    # STAGE 1: HİÇ POZİSYON YOKSA VE GİRİŞ ŞARTI OLUŞTUYSA
                     if pos["durum"] == "BOS":
                         if anlik_makas >= GIRIS_MAKAS_YUZDE:
                             basarili, s_qty, f_qty, s_id, f_id = execute_limit_arbitrage_entry(symbol, spot_fiyat, futures_fiyat)
@@ -208,19 +255,17 @@ def arbitraj_tarama_dongusu():
                                     "spot_entry_id": s_id,
                                     "futures_entry_id": f_id,
                                     "giris_spot_fiyat": spot_fiyat,
-                                    "giris_futures_fiyat": futures_fiyat
+                                    "giris_futures_fiyat": futures_fiyat,
+                                    "emir_giris_zamani": time.time() # Kronometreyi başlat
                                 })
-                                telegram_bildir(f"⏳ <b>{coin_label} Limit Giriş Emirleri Tahtaya İletildi.</b>\nSp Alış: {spot_fiyat}\nFu Short: {futures_fiyat}")
+                                telegram_bildir(f"⏳ <b>{coin_label} Limit Giriş Emirleri İletildi.</b>\nSp Alış: {spot_fiyat}\nFu Short: {futures_fiyat}")
 
-                    # STAGE 2: GİRİŞ EMİRLERİ VERİLDİYSE -> İKİ EMİR DE GERÇEKLEŞTİ Mİ KONTROL ET
+                    # STAGE 2: GİRİŞ EMİRLERİ VERİLDİYSE -> ZAMAN AŞIMI GÜVENLİK KORUMASI
                     elif pos["durum"] == "GIRIS_BEKLIYOR":
                         s_status = client.get_order(symbol=coin_label, orderId=pos["spot_entry_id"]).get("status")
                         f_status = client.futures_get_order(symbol=coin_label, orderId=pos["futures_entry_id"]).get("status")
                         
                         if s_status == "FILLED" and f_status == "FILLED":
-                            # 🎯 MUHTEŞEM AN: İki limit emir de doldu! Şimdi kâr edecek çıkış fiyatlarını hesapla
-                            # Spot çıkış hedefi: Giriş fiyatının biraz üzerinde satmak
-                            # Vadeli çıkış hedefi: Giriş fiyatının biraz altında geri almak (Short kapatmak)
                             hedef_spot_cikis = pos["giris_spot_fiyat"] * (1 + (CIKIS_MAKAS_YUZDE / 2 / 100))
                             hedef_futures_cikis = pos["giris_futures_fiyat"] * (1 - (CIKIS_MAKAS_YUZDE / 2 / 100))
                             
@@ -236,25 +281,46 @@ def arbitraj_tarama_dongusu():
                                     "hedef_futures_cikis": hedef_futures_cikis
                                 })
                                 telegram_bildir(
-                                    f"🚀 <b>{coin_label} GİRİŞ EMİRLERİ GERÇEKLEŞTİ!</b>\n"
-                                    f"🔒 Kâr Hedefli Çıkış Emirleri Tahtaya Asıldı:\n"
-                                    f"📈 Spot Limit Satış: {hedef_spot_cikis:.4f}\n"
-                                    f"📉 Vadeli Limit Alış (Short Kapatma): {hedef_futures_cikis:.4f}"
+                                    f"🚀 <b>{coin_label} GİRİŞLER DOLDU!</b>\n"
+                                    f"🔒 Kâr Limitleri Tahtaya Asıldı:\n"
+                                    f"📈 Spot Satış: {hedef_spot_cikis:.4f}\n"
+                                    f"📉 Vadeli Alış: {hedef_futures_cikis:.4f}"
                                 )
                         
-                        # Eğer emirler uzun süre gerçekleşmezse iptal mekanizması eklenebilir (Güvenlik amaçlı)
+                        # 🛡️ Acil Durum Yönetimi: 100 saniye boyunca eşleşme gerçekleşmediyse
+                        elif time.time() - pos.get("emir_giris_zamani", time.time()) > 100.0:
+                            print(f"🚨 Süre Aşımı: {coin_label} emirleri iptal ediliyor...")
+                            
+                            if s_status != "FILLED":
+                                try: client.cancel_order(symbol=coin_label, orderId=pos["spot_entry_id"])
+                                except Exception: pass
+                            if f_status != "FILLED":
+                                try: client.futures_cancel_order(symbol=coin_label, orderId=pos["futures_entry_id"])
+                                except Exception: pass
+                                
+                            # Yarım bacak koruma kontrolü (Piyasa emriyle eşitleme)
+                            if s_status == "FILLED" and f_status != "FILLED":
+                                client.create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=pos["spot_adet"])
+                                telegram_bildir(f"🛡️ <b>BACAK RİSKİ ÖNLENDİ:</b> {coin_label} vadelisi dolmadığı için alınan spotlar piyasadan satılarak bakiye korundu.")
+                                
+                            elif f_status == "FILLED" and s_status != "FILLED":
+                                client.futures_create_order(symbol=coin_label, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=pos["futures_adet"])
+                                telegram_bildir(f"🛡️ <b>BACAK RİSKİ ÖNLENDİ:</b> {coin_label} spotu dolmadığı için açılan short pozisyonu piyasadan geri kapatıldı.")
+                            else:
+                                telegram_bildir(f"🧹 <b>{coin_label}:</b> Eşleşmeyen pasif limit emirler temizlendi. Risk yok.")
+                                
+                            pos.update({"durum": "BOS", "spot_entry_id": None, "futures_entry_id": None})
 
-                    # STAGE 3: KÂR EMİRLERİ TAHTADA ASILIYSA -> KAPANMALARINI BEKLE
+                    # STAGE 3: KÂR EMİRLERİ TAHTADA ASILIYSA
                     elif pos["durum"] == "CIKIS_BEKLIYOR":
+                        # Eğer manuel senkronizasyondan geldiyse ID'ler boş olabilir, pas geç
+                        if not pos.get("spot_exit_id") or not pos.get("futures_exit_id"): continue
+                            
                         s_cl_status = client.get_order(symbol=coin_label, orderId=pos["spot_exit_id"]).get("status")
                         f_cl_status = client.futures_get_order(symbol=coin_label, orderId=pos["futures_exit_id"]).get("status")
                         
                         if s_cl_status == "FILLED" and f_cl_status == "FILLED":
-                            telegram_bildir(
-                                f"🎉 <b>🔒 ARBİTRAJ BAŞARIYLA TAMAMLANDI (Makers PNL)</b>\n"
-                                f"📊 <b>Koin:</b> {coin_label}\n"
-                                f"💰 Her iki limit emir de tam hedef fiyatlarından kârla kapandı!"
-                            )
+                            telegram_bildir(f"🎉 <b>🔒 ARBİTRAJ TAMAMLANDI (Limit PNL)</b>\n📊 <b>Koin:</b> {coin_label}\n💰 Limit kâr hedefleri tam fiyattan gerçekleşti!")
                             pos.update({"durum": "BOS", "spot_entry_id": None, "futures_entry_id": None, "spot_exit_id": None, "futures_exit_id": None})
 
         except Exception as e: 
@@ -265,14 +331,15 @@ def arbitraj_tarama_dongusu():
 if __name__ == "__main__":
     SYMBOLS = get_all_futures_symbols()
     piyasa_verisi = {symbol: {"spot_price": None, "futures_price": None} for symbol in SYMBOLS}
-    
-    # Yeni Durum Yönetimi Hafızası: "BOS", "GIRIS_BEKLIYOR", "CIKIS_BEKLIYOR"
     arbitraj_pozisyonlari = {symbol: {"durum": "BOS", "spot_adet": 0.0, "futures_adet": 0.0, "spot_entry_id": None, "futures_entry_id": None, "spot_exit_id": None, "futures_exit_id": None} for symbol in SYMBOLS}
     
-    client.futures_change_position_mode(dualSidePosition="false")
+    set_all_leverages()
     tum_hassasiyetleri_yukle()
     
-    telegram_bildir("🤖 <b>Pusu Modu (Limit Emirli) Arbitraj Botu Yayında!</b>\nArtık piyasa emri ve fiyat kayması yok.")
+    # Başlangıçta borsa pozisyon emniyet kilidi açılıyor
+    senkronize_et_mevcut_pozisyonlar()
+    
+    telegram_bildir("🤖 <b>100sn Korumalı Pusu Modu Bot Başlatıldı!</b>\nLimit emir takipleri ve bacak risk bariyerleri aktif.")
     
     threading.Thread(target=start_multi_spot_ws, daemon=True).start()
     threading.Thread(target=start_multi_futures_ws, daemon=True).start()
