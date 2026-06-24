@@ -53,6 +53,7 @@ arbitraj_pozisyonlari = {}
 SPOT_HASSASIYETLERI = {}
 FUTURES_HASSASIYETLERI = {}
 
+# 🔒 Veri ve Tarama Döngüsü Güvenlik Kilidi
 data_lock = threading.Lock()
 
 def get_all_futures_symbols():
@@ -72,9 +73,9 @@ def get_all_futures_symbols():
         print(f"❌ Koin listesi çekilirken hata oluştu: {e}")
     return ["btcusdt", "ethusdt", "solusdt", "xrpusdt"]
 
-# 🛠️ YENİ FONKSİYON: Binance'deki mevcut açık pozisyonları çekip bota öğretir
+# 🧹 Kırıntı Filtreli Gelişmiş Pozisyon Senkronizasyonu
 def senkronize_et_mevcut_pozisyonlar():
-    print("⏳ Binance Vadeli İşlemlerdeki açık pozisyonlarınız taranıyor...")
+    print("⏳ Binance Vadeli İşlemlerdeki aktif pozisyonlarınız kırıntı filtresiyle taranıyor...")
     try:
         account_info = client.futures_account()
         positions = account_info.get("positions", [])
@@ -86,21 +87,27 @@ def senkronize_et_mevcut_pozisyonlar():
             
             if symbol_lower in arbitraj_pozisyonlari:
                 amt = float(pos.get("positionAmt", 0))
-                # Eğer vadeli tarafta short (negatif) veya long (pozitif) bir pozisyon varsa
-                if amt != 0:
-                    # Arbitraj botu short açtığı için miktarı pozitife çevirerek hafızaya alıyoruz
+                
+                # Pozisyonun anlık USDT cinsinden toplam büyüklüğü (notional)
+                notional_degeri = abs(float(pos.get("notional", 0)))
+                
+                # Eğer pozisyon varsa VE büyüklüğü 5 USDT'den büyükse (Gerçek aktif pozisyondur)
+                if amt != 0 and notional_degeri >= 5.0:
                     v_adet = abs(amt)
                     
                     arbitraj_pozisyonlari[symbol_lower].update({
                         "aktif": True,
-                        "giris_makas": GIRIS_MAKAS_YUZDE, # Geçmiş makas bilinemediği için güvenli sınır atanır
-                        "spot_adet": v_adet,             # Koruma amaçlı vadeli adet eşleştirilir
+                        "giris_makas": GIRIS_MAKAS_YUZDE, 
+                        "spot_adet": v_adet,             
                         "futures_adet": v_adet
                     })
                     acik_sayac += 1
-                    print(f"⚠️ TESPİT EDİLDİ: {symbol_upper} üzerinde zaten açık pozisyon var ({v_adet} adet). Tekrar açılması engellendi.")
+                    print(f"⚠️ AKTİF POZİSYON KİLİTLENDİ: {symbol_upper} ({notional_degeri:.2f} USDT büyüklüğünde).")
+                elif amt != 0 and notional_degeri < 5.0:
+                    # 5 dolardan küçük pozisyonlar kırıntı kabul edilip pas geçilir
+                    print(f"🧹 KIRINTI ELENDİ: {symbol_upper} üzerinde {notional_degeri:.2f} USDT'lik ufak bir parça var, dahil edilmedi.")
         
-        print(f"✅ Pozisyon senkronizasyonu tamamlandı. Toplam {acik_sayac} aktif pozisyon koruma altına alındı.")
+        print(f"✅ Filtreleme tamamlandı. Toplam {acik_sayac} gerçek pozisyon başarıyla koruma altına alındı.")
     except Exception as e:
         print(f"❌ Pozisyonlar senkronize edilirken hata: {e}. Bot güvenlik amacıyla boş hafızayla başlıyor.")
 
@@ -241,7 +248,7 @@ def execute_arbitrage_exit(symbol, spot_qty, futures_qty):
     try:
         spot_precision = SPOT_HASSASIYETLERI.get(symbol.lower(), 2)
         
-        # Spot satış adedini %0.15 kırpıyoruz (Komisyon koruması)
+        # 🛡️ Komisyon Koruma Marjı: Spot satış adedini %0.15 kırparak yetersiz bakiye hatasını engelliyoruz
         güvenli_spot_qty = spot_qty * 0.9985
         güvenli_spot_qty = float(int(güvenli_spot_qty * (10 ** spot_precision))) / (10 ** spot_precision) if spot_precision > 0 else int(güvenli_spot_qty)
         if spot_precision == 0: güvenli_spot_qty = int(güvenli_spot_qty)
@@ -296,6 +303,7 @@ def arbitraj_tarama_dongusu():
         try:
             en_yuksek_makaslar = []
             
+            # 🔒 Bütünleşik Kilit: Tarama, karar ve emri tek çatı altında kilitler
             with data_lock:
                 for symbol in SYMBOLS:
                     spot_fiyat = piyasa_verisi[symbol]["spot_price"]
@@ -346,10 +354,10 @@ if __name__ == "__main__":
     set_all_leverages()
     tum_hassasiyetleri_yukle()
     
-    # 🛠️ GÜNCELLEME: Bot taramaya başlamadan hemen önce mevcut pozisyonları sorgulayıp kilitler
+    # Bot taramaya başlamadan önce mevcut açık pozisyonları kırıntı filtresiyle senkronize eder
     senkronize_et_mevcut_pozisyonlar()
     
-    telegram_bildir("🚀 <b>Hafıza Korumalı ve Otomatik Senkronizasyonlu Bot Yayında!</b>\nMevcut pozisyonlar kilitlendi.")
+    telegram_bildir("🚀 <b>Ultra Korumalı Tam Sürüm Bot Başlatıldı!</b>\n• Çapraz koin kilidi aktif\n• Komisyon marjı aktif\n• Kırıntı senkronizasyonu aktif.")
     
     threading.Thread(target=start_multi_spot_ws, daemon=True).start()
     threading.Thread(target=start_multi_futures_ws, daemon=True).start()
