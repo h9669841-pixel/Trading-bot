@@ -36,7 +36,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY)
 
 # --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
-GIRIS_MAKAS_YUZDE = 0.88       
+GIRIS_MAKAS_YUZDE = 0.45       
 CIKIS_MAKAS_YUZDE = 0.10       
 
 SPOT_BAKIYE = 15.0  
@@ -53,7 +53,6 @@ arbitraj_pozisyonlari = {}
 SPOT_HASSASIYETLERI = {}
 FUTURES_HASSASIYETLERI = {}
 
-# 🔒 Veri bütünlüğü kilidi
 data_lock = threading.Lock()
 
 def get_all_futures_symbols():
@@ -72,6 +71,38 @@ def get_all_futures_symbols():
     except Exception as e:
         print(f"❌ Koin listesi çekilirken hata oluştu: {e}")
     return ["btcusdt", "ethusdt", "solusdt", "xrpusdt"]
+
+# 🛠️ YENİ FONKSİYON: Binance'deki mevcut açık pozisyonları çekip bota öğretir
+def senkronize_et_mevcut_pozisyonlar():
+    print("⏳ Binance Vadeli İşlemlerdeki açık pozisyonlarınız taranıyor...")
+    try:
+        account_info = client.futures_account()
+        positions = account_info.get("positions", [])
+        
+        acik_sayac = 0
+        for pos in positions:
+            symbol_upper = pos.get("symbol")
+            symbol_lower = symbol_upper.lower()
+            
+            if symbol_lower in arbitraj_pozisyonlari:
+                amt = float(pos.get("positionAmt", 0))
+                # Eğer vadeli tarafta short (negatif) veya long (pozitif) bir pozisyon varsa
+                if amt != 0:
+                    # Arbitraj botu short açtığı için miktarı pozitife çevirerek hafızaya alıyoruz
+                    v_adet = abs(amt)
+                    
+                    arbitraj_pozisyonlari[symbol_lower].update({
+                        "aktif": True,
+                        "giris_makas": GIRIS_MAKAS_YUZDE, # Geçmiş makas bilinemediği için güvenli sınır atanır
+                        "spot_adet": v_adet,             # Koruma amaçlı vadeli adet eşleştirilir
+                        "futures_adet": v_adet
+                    })
+                    acik_sayac += 1
+                    print(f"⚠️ TESPİT EDİLDİ: {symbol_upper} üzerinde zaten açık pozisyon var ({v_adet} adet). Tekrar açılması engellendi.")
+        
+        print(f"✅ Pozisyon senkronizasyonu tamamlandı. Toplam {acik_sayac} aktif pozisyon koruma altına alındı.")
+    except Exception as e:
+        print(f"❌ Pozisyonlar senkronize edilirken hata: {e}. Bot güvenlik amacıyla boş hafızayla başlıyor.")
 
 def set_all_leverages():
     print("⏳ Pozisyon Modu 'One-Way' (Tek Yönlü) olarak zorlanıyor...")
@@ -205,17 +236,22 @@ def execute_arbitrage_entry(symbol, spot_price, futures_price):
     except Exception as e:
         print(f"❌ Giriş Hatası: {e}"); return False, 0, 0
 
-# 🛠️ GÜNCELLEME: Çıkış hatalarını Telegram'a raporlayan yeni çıkış motoru
 def execute_arbitrage_exit(symbol, spot_qty, futures_qty):
     coin_label = symbol.upper()
     try:
+        spot_precision = SPOT_HASSASIYETLERI.get(symbol.lower(), 2)
+        
+        # Spot satış adedini %0.15 kırpıyoruz (Komisyon koruması)
+        güvenli_spot_qty = spot_qty * 0.9985
+        güvenli_spot_qty = float(int(güvenli_spot_qty * (10 ** spot_precision))) / (10 ** spot_precision) if spot_precision > 0 else int(güvenli_spot_qty)
+        if spot_precision == 0: güvenli_spot_qty = int(güvenli_spot_qty)
+            
         emir_sonuclari = {}
-        t1 = threading.Thread(target=_hizli_cikis_gonder_spot, args=(coin_label, spot_qty, emir_sonuclari))
+        t1 = threading.Thread(target=_hizli_cikis_gonder_spot, args=(coin_label, güvenli_spot_qty, emir_sonuclari))
         t2 = threading.Thread(target=_hizli_cikis_gonder_futures, args=(coin_label, futures_qty, emir_sonuclari))
         
         t1.start(); t2.start(); t1.join(); t2.join()
         
-        # Eğer bir tarafta bile hata varsa durumu raporla
         if 'spot_hata' in emir_sonuclari or 'futures_hata' in emir_sonuclari:
             hata_mesaji = f"🚨 <b>{coin_label} POZİSYON KAPATILIRKEN HATA OLUŞTU!</b>\n"
             if 'spot_hata' in emir_sonuclari:
@@ -284,10 +320,8 @@ def arbitraj_tarama_dongusu():
                                 pos.update({"aktif": True, "giris_makas": anlik_makas, "spot_adet": s_qty, "futures_adet": f_qty})
                                 telegram_bildir(f"🤖 <b>İŞLEME GİRİLDİ (+)</b>\n\n📊 <b>Koin:</b> {coin_label}\n⚡ <b>Makas:</b> +%{anlik_makas:.4f}\n💵 <b>Tahmini Net Kâr:</b> {net:.4f} USDT")
                     else:
-                        # 🛠️ GÜNCELLEME: Çıkış koşulu sağlandığında emri tetikle
                         if anlik_makas <= CIKIS_MAKAS_YUZDE:
                             if pos["aktif"]:
-                                # execute_arbitrage_exit başarılı olursa pozisyonu temizle
                                 if execute_arbitrage_exit(symbol, pos["spot_adet"], pos["futures_adet"]):
                                     brut, kesinti, net = net_kar_hesapla(pos["giris_makas"], anlik_makas)
                                     telegram_bildir(f"🤝 <b>🔒 POZİSYON KAPATILDI</b>\n🎉 Net Realize Kâr: {net:.4f} USDT")
@@ -312,7 +346,10 @@ if __name__ == "__main__":
     set_all_leverages()
     tum_hassasiyetleri_yukle()
     
-    telegram_bildir("🚀 <b>Gelişmiş Çıkış Raporlamalı Bot Devrede!</b>\nAsenkron kapanış takibi aktif.")
+    # 🛠️ GÜNCELLEME: Bot taramaya başlamadan hemen önce mevcut pozisyonları sorgulayıp kilitler
+    senkronize_et_mevcut_pozisyonlar()
+    
+    telegram_bildir("🚀 <b>Hafıza Korumalı ve Otomatik Senkronizasyonlu Bot Yayında!</b>\nMevcut pozisyonlar kilitlendi.")
     
     threading.Thread(target=start_multi_spot_ws, daemon=True).start()
     threading.Thread(target=start_multi_futures_ws, daemon=True).start()
