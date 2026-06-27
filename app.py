@@ -35,47 +35,30 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY)
 
-# --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
-GIRIS_MAKAS_YUZDE = 0.95       
-CIKIS_MAKAS_YUZDE = 0.10       
+# --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI (DYDX İÇİN OPTİMİZE) ---
+GIRIS_MAKAS_YUZDE = 0.50       # DYDX derin tahta olduğu için %0.50 temiz kalır
+CIKIS_MAKAS_YUZDE = 0.05       # Makasın tam daraldığı saniyeyi kovalıyoruz
 
-SPOT_BAKIYE = 11.0  
-FUTURES_BAKIYE = 11.0  
+SPOT_BAKIYE = 11.0  # Spot 10$ sınırına takılmamak için 11$ kilitli
+FUTURES_BAKIYE = 10.0  
 KALDIRAC = 1  
 
 SPOT_FEE_RATE = 0.0750 / 100
 FUTURES_FEE_RATE = 0.0450 / 100
 
-SYMBOLS = []
+# 🎯 TEK KOİN ODAKLI SİSTEM
+SYMBOLS = ["dydxusdt"]
 piyasa_verisi = {}
 arbitraj_pozisyonlari = {}
 
 SPOT_HASSASIYETLERI = {}
 FUTURES_HASSASIYETLERI = {}
 
-# 🔒 Veri ve Tarama Döngüsü Güvenlik Kilidi
+# 🔒 Veri Güvenlik Kilidi
 data_lock = threading.Lock()
 
-def get_all_futures_symbols():
-    try:
-        url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
-        r = requests.get(url, timeout=10)
-        if r.status_code == 200:
-            data = r.json()
-            symbols = []
-            for market in data.get("symbols", []):
-                if market.get("quoteAsset") == "USDT" and market.get("status") == "TRADING":
-                    symbols.append(market.get("symbol").lower())
-            filtered_symbols = symbols[:150]
-            print(f"🎯 Binance Vadeli İşlemlerden ilk {len(filtered_symbols)} aktif sembol başarıyla çekildi.")
-            return filtered_symbols
-    except Exception as e:
-        print(f"❌ Koin listesi çekilirken hata oluştu: {e}")
-    return ["btcusdt", "ethusdt", "solusdt", "xrpusdt"]
-
-# 🧹 Kırıntı Filtreli Gelişmiş Pozisyon Senkronizasyonu
 def senkronize_et_mevcut_pozisyonlar():
-    print("⏳ Binance Vadeli İşlemlerdeki aktif pozisyonlarınız kırıntı filtresiyle taranıyor...")
+    print("⏳ Binance Vadeli İşlemlerdeki aktif DYDX pozisyonunuz kırıntı filtresiyle taranıyor...")
     try:
         account_info = client.futures_account()
         positions = account_info.get("positions", [])
@@ -87,11 +70,8 @@ def senkronize_et_mevcut_pozisyonlar():
             
             if symbol_lower in arbitraj_pozisyonlari:
                 amt = float(pos.get("positionAmt", 0))
-                
-                # Pozisyonun anlık USDT cinsinden toplam büyüklüğü (notional)
                 notional_degeri = abs(float(pos.get("notional", 0)))
                 
-                # Eğer pozisyon varsa VE büyüklüğü 5 USDT'den büyükse (Gerçek aktif pozisyondur)
                 if amt != 0 and notional_degeri >= 5.0:
                     v_adet = abs(amt)
                     
@@ -104,12 +84,11 @@ def senkronize_et_mevcut_pozisyonlar():
                     acik_sayac += 1
                     print(f"⚠️ AKTİF POZİSYON KİLİTLENDİ: {symbol_upper} ({notional_degeri:.2f} USDT büyüklüğünde).")
                 elif amt != 0 and notional_degeri < 5.0:
-                    # 5 dolardan küçük pozisyonlar kırıntı kabul edilip pas geçilir
-                    print(f"🧹 KIRINTI ELENDİ: {symbol_upper} üzerinde {notional_degeri:.2f} USDT'lik ufak bir parça var, dahil edilmedi.")
+                    print(f"🧹 KIRINTI ELENDİ: {symbol_upper} üzerinde {notional_degeri:.2f} USDT'lik ufak bir parça var.")
         
-        print(f"✅ Filtreleme tamamlandı. Toplam {acik_sayac} gerçek pozisyon başarıyla koruma altına alındı.")
+        print(f"✅ Filtreleme tamamlandı. Toplam {acik_sayac} gerçek pozisyon başarıyla koruma altına kaldırıldı.")
     except Exception as e:
-        print(f"❌ Pozisyonlar senkronize edilirken hata: {e}. Bot güvenlik amacıyla boş hafızayla başlıyor.")
+        print(f"❌ Pozisyonlar senkronize edilirken hata: {e}. Bot boş hafızayla başlıyor.")
 
 def set_all_leverages():
     print("⏳ Pozisyon Modu 'One-Way' (Tek Yönlü) olarak zorlanıyor...")
@@ -117,23 +96,18 @@ def set_all_leverages():
         client.futures_change_position_mode(dualSidePosition="false")
         print("✅ Pozisyon Modu başarıyla Tek Yönlü (One-Way) yapıldı.")
     except BinanceAPIException as e:
-        if e.code == -4059: 
-            print("✅ Pozisyon Modu zaten Tek Yönlü (One-Way).")
-        else:
-            print(f"⚠️ Pozisyon modu değiştirilemedi: {e.message}")
-    except Exception as e:
-        print(f"⚠️ Pozisyon modu genel hata: {e}")
+        if e.code == -4059: print("✅ Pozisyon Modu zaten Tek Yönlü (One-Way).")
+        else: print(f"⚠️ Pozisyon modu değiştirilemedi: {e.message}")
+    except Exception as e: print(f"⚠️ Pozisyon modu genel hata: {e}")
 
-    print(f"⏳ Kaldıraçlar {KALDIRAC}x olarak ayarlanıyor...")
+    print(f"⏳ Kaldıraç {KALDIRAC}x olarak ayarlanıyor...")
     for symbol in SYMBOLS:
         try:
             client.futures_change_leverage(symbol=symbol.upper(), leverage=KALDIRAC)
-            time.sleep(0.02)
-        except Exception:
-            pass
+        except Exception: pass
 
 def tum_hassasiyetleri_yukle():
-    print("⏳ Spot ve Vadeli Lot hassasiyetleri önbelleğe alınıyor...")
+    print("⏳ DYDX Lot hassasiyetleri önbelleğe alınıyor...")
     try:
         spot_info = client.get_exchange_info()
         for market in spot_info['symbols']:
@@ -144,8 +118,7 @@ def tum_hassasiyetleri_yukle():
                         step_size_str = str(f['stepSize']).rstrip('0')
                         precision = 0 if '.' not in step_size_str else len(step_size_str.split('.')[1])
                         SPOT_HASSASIYETLERI[sym] = precision
-    except Exception as e:
-        print(f"❌ Spot hassasiyet yükleme hatası: {e}")
+    except Exception as e: print(f"❌ Spot hassasiyet yükleme hatası: {e}")
 
     try:
         f_url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
@@ -161,8 +134,7 @@ def tum_hassasiyetleri_yukle():
                             precision = 0 if '.' not in step_size_str else len(step_size_str.split('.')[1])
                             FUTURES_HASSASIYETLERI[sym] = precision
         print(f"✅ Çift yönlü hassasiyet haritası kaydedildi. S:{len(SPOT_HASSASIYETLERI)} | F:{len(FUTURES_HASSASIYETLERI)}")
-    except Exception as e:
-        print(f"❌ Vadeli hassasiyet yükleme hatası: {e}")
+    except Exception as e: print(f"❌ Vadeli hassasiyet yükleme hatası: {e}")
 
     for sym in SYMBOLS:
         if sym not in SPOT_HASSASIYETLERI: SPOT_HASSASIYETLERI[sym] = 2
@@ -211,8 +183,7 @@ def execute_arbitrage_entry(symbol, spot_price, futures_price):
         raw_futures_qty = (FUTURES_BAKIYE / KALDIRAC) / futures_price
         
         tahmini_notional = raw_futures_qty * KALDIRAC * futures_price
-        if tahmini_notional < 5.1:
-            return False, 0, 0
+        if tahmini_notional < 5.1: return False, 0, 0
         
         spot_quantity = float(int(raw_spot_qty * (10 ** spot_precision))) / (10 ** spot_precision) if spot_precision > 0 else int(raw_spot_qty)
         futures_quantity = float(int(raw_futures_qty * (10 ** futures_precision))) / (10 ** futures_precision) if futures_precision > 0 else int(raw_futures_qty)
@@ -248,7 +219,6 @@ def execute_arbitrage_exit(symbol, spot_qty, futures_qty):
     try:
         spot_precision = SPOT_HASSASIYETLERI.get(symbol.lower(), 2)
         
-        # 🛡️ Komisyon Koruma Marjı: Spot satış adedini %0.15 kırparak yetersiz bakiye hatasını engelliyoruz
         güvenli_spot_qty = spot_qty * 0.9985
         güvenli_spot_qty = float(int(güvenli_spot_qty * (10 ** spot_precision))) / (10 ** spot_precision) if spot_precision > 0 else int(güvenli_spot_qty)
         if spot_precision == 0: güvenli_spot_qty = int(güvenli_spot_qty)
@@ -261,10 +231,8 @@ def execute_arbitrage_exit(symbol, spot_qty, futures_qty):
         
         if 'spot_hata' in emir_sonuclari or 'futures_hata' in emir_sonuclari:
             hata_mesaji = f"🚨 <b>{coin_label} POZİSYON KAPATILIRKEN HATA OLUŞTU!</b>\n"
-            if 'spot_hata' in emir_sonuclari:
-                hata_mesaji += f"❌ <b>Spot Çıkış Hatası:</b> <code>{emir_sonuclari['spot_hata']}</code>\n"
-            if 'futures_hata' in emir_sonuclari:
-                hata_mesaji += f"❌ <b>Vadeli Çıkış Hatası:</b> <code>{emir_sonuclari['futures_hata']}</code>\n"
+            if 'spot_hata' in emir_sonuclari: hata_mesaji += f"❌ <b>Spot Çıkış Hatası:</b> <code>{emir_sonuclari['spot_hata']}</code>\n"
+            if 'futures_hata' in emir_sonuclari: hata_mesaji += f"❌ <b>Vadeli Çıkış Hatası:</b> <code>{emir_sonuclari['futures_hata']}</code>\n"
             hata_mesaji += "⚠️ Lütfen borsa hesabınızı manuel olarak kontrol edin!"
             print(hata_mesaji)
             telegram_bildir(hata_mesaji)
@@ -272,23 +240,20 @@ def execute_arbitrage_exit(symbol, spot_qty, futures_qty):
             
         return True
     except Exception as e:
-        print(f"❌ Kritik Çıkış Hatası: {e}")
-        return False
+        print(f"❌ Kritik Çıkış Hatası: {e}"); return False
 
 # --- 🌐 WEBSOCKET SÜRÜCÜLERİ ---
 def on_spot_message(ws, message):
     data = json.loads(message)
     symbol = data.get("stream", "").split("@")[0]
     with data_lock:
-        if symbol in piyasa_verisi: 
-            piyasa_verisi[symbol]["spot_price"] = float(data.get("data", {}).get("p", 0))
+        if symbol in piyasa_verisi: piyasa_verisi[symbol]["spot_price"] = float(data.get("data", {}).get("p", 0))
 
 def on_futures_message(ws, message):
     data = json.loads(message)
     symbol = data.get("stream", "").split("@")[0]
     with data_lock:
-        if symbol in piyasa_verisi: 
-            piyasa_verisi[symbol]["futures_price"] = float(data.get("data", {}).get("p", 0))
+        if symbol in piyasa_verisi: piyasa_verisi[symbol]["futures_price"] = float(data.get("data", {}).get("p", 0))
 
 def start_multi_spot_ws():
     WebSocketApp(f"wss://stream.binance.com:9443/stream?streams={'/'.join([f'{s}@trade' for s in SYMBOLS])}", on_message=on_spot_message).run_forever()
@@ -301,9 +266,6 @@ def arbitraj_tarama_dongusu():
     global arbitraj_pozisyonlari
     while True:
         try:
-            en_yuksek_makaslar = []
-            
-            # 🔒 Bütünleşik Kilit: Tarama, karar ve emri tek çatı altında kilitler
             with data_lock:
                 for symbol in SYMBOLS:
                     spot_fiyat = piyasa_verisi[symbol]["spot_price"]
@@ -313,12 +275,12 @@ def arbitraj_tarama_dongusu():
                     anlik_makas = ((futures_fiyat - spot_fiyat) / spot_fiyat) * 100
                     coin_label = symbol.upper()
                     
-                    if anlik_makas > 0:
-                        en_yuksek_makaslar.append((coin_label, anlik_makas, spot_fiyat, futures_fiyat))
-                    
                     pos = arbitraj_pozisyonlari[symbol]
                     
                     if not pos["aktif"]:
+                        # Ekrana saniyelik DYDX durumunu canlı basıyoruz
+                        print(f"📊 [CANLI TAKİP] {coin_label} Makas: +%{anlik_makas:.4f} | Sp: {spot_fiyat} | Fu: {futures_fiyat}")
+                        
                         if anlik_makas >= GIRIS_MAKAS_YUZDE:
                             _, _, net = net_kar_hesapla(anlik_makas, CIKIS_MAKAS_YUZDE)
                             if net <= 0: continue
@@ -326,25 +288,20 @@ def arbitraj_tarama_dongusu():
                             basarili, s_qty, f_qty = execute_arbitrage_entry(symbol, spot_fiyat, futures_fiyat)
                             if basarili:
                                 pos.update({"aktif": True, "giris_makas": anlik_makas, "spot_adet": s_qty, "futures_adet": f_qty})
-                                telegram_bildir(f"🤖 <b>İŞLEME GİRİLDİ (+)</b>\n\n📊 <b>Koin:</b> {coin_label}\n⚡ <b>Makas:</b> +%{anlik_makas:.4f}\n💵 <b>Tahmini Net Kâr:</b> {net:.4f} USDT")
+                                telegram_bildir(f"🤖 <b>DYDX İŞLEME GİRİLDİ (+)</b>\n\n⚡ <b>Giriş Makası:</b> +%{anlik_makas:.4f}\n💵 <b>Tahmini Net Kâr:</b> {net:.4f} USDT")
                     else:
+                        print(f"⏳ [POZİSYONDASIN] {coin_label} Hedef Kapanış: +%{CIKIS_MAKAS_YUZDE:.2f} | Anlık Makas: +%{anlik_makas:.4f}")
                         if anlik_makas <= CIKIS_MAKAS_YUZDE:
                             if pos["aktif"]:
                                 if execute_arbitrage_exit(symbol, pos["spot_adet"], pos["futures_adet"]):
                                     brut, kesinti, net = net_kar_hesapla(pos["giris_makas"], anlik_makas)
-                                    telegram_bildir(f"🤝 <b>🔒 POZİSYON KAPATILDI</b>\n🎉 Net Realize Kâr: {net:.4f} USDT")
+                                    telegram_bildir(f"🤝 <b>🔒 DYDX POZİSYONU KAPATILDI</b>\n🎉 Net Realize Kâr: {net:.4f} USDT")
                                     pos["aktif"] = False
                             
-            if en_yuksek_makaslar:
-                en_yuksek_makaslar.sort(key=lambda x: x[1], reverse=True)
-                print("\n💵 --- EN YÜKSEK 3 ARTI (+) MAKAS ---")
-                for i, item in enumerate(en_yuksek_makaslar[:3]):
-                    print(f"{i+1}. [{item[0]}] +%{item[1]:.4f} | Sp: {item[2]} | Fu: {item[3]}")
-                    
         except Exception as e: 
             print(f"❌ Döngü hatası: {e}")
             traceback.print_exc()
-        time.sleep(14)
+        time.sleep(1.0) # 👈 1 saniyede bir milimetrik tarama (DYDX tahtasında körlük bitti)
 
 if __name__ == "__main__":
     SYMBOLS = get_all_futures_symbols()
@@ -353,11 +310,9 @@ if __name__ == "__main__":
     
     set_all_leverages()
     tum_hassasiyetleri_yukle()
-    
-    # Bot taramaya başlamadan önce mevcut açık pozisyonları kırıntı filtresiyle senkronize eder
     senkronize_et_mevcut_pozisyonlar()
     
-    telegram_bildir("🚀 <b>Ultra Korumalı Tam Sürüm Bot Başlatıldı!</b>\n• Çapraz koin kilidi aktif\n• Komisyon marjı aktif\n• Kırıntı senkronizasyonu aktif.")
+    telegram_bildir("🎯 <b>DYDX Odaklı Saniyelik Ultra Arbitraj Botu Başlatıldı!</b>")
     
     threading.Thread(target=start_multi_spot_ws, daemon=True).start()
     threading.Thread(target=start_multi_futures_ws, daemon=True).start()
