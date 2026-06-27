@@ -39,6 +39,7 @@ client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY)
 GIRIS_MAKAS_YUZDE = 0.50       
 CIKIS_MAKAS_YUZDE = 0.05       
 
+# 💰 [GÜNCELLEME]: Yatırım miktarları 10$ spot, 10$ vadeli olarak eşitlendi
 SPOT_BAKIYE = 10.0  
 FUTURES_BAKIYE = 10.0  
 KALDIRAC = 1  
@@ -46,11 +47,13 @@ KALDIRAC = 1
 SPOT_FEE_RATE = 0.0750 / 100
 FUTURES_FEE_RATE = 0.0450 / 100
 
-# 🎯 GENİŞLETİLMİŞ GÜVENLİ VE HACİMLİ PARİTE LİSTESİ (15 Adet Koin)
+# 🎯 EN GENİŞ GÜVENLİ VE HACİMLİ PARİTE LİSTESİ (Tam 25 Adet Koin)
 SYMBOLS = [
     "dydxusdt", "opusdt", "arbusdt", "ldousdt", "tiausdt", 
     "solusdt", "avaxusdt", "linkusdt", "suiusdt", "ethusdt", 
-    "bnbusdt", "xrpusdt", "adausdt", "dotusdt", "maticusdt"
+    "bnbusdt", "xrpusdt", "adausdt", "dotusdt", "maticusdt",
+    "btcusdt", "dogeusdt", "shibusdt", "nearusdt", "ftmusdt",
+    "atomusdt", "ltcusdt", "uniusdt", "aptusdt", "filusdt"
 ]
 piyasa_verisi = {symbol: {"spot_price": None, "futures_price": None} for symbol in SYMBOLS}
 arbitraj_pozisyonlari = {symbol: {"aktif": False, "giris_makas": 0.0, "spot_adet": 0.0, "futures_adet": 0.0} for symbol in SYMBOLS}
@@ -91,7 +94,7 @@ def senkronize_et_mevcut_pozisyonlar():
         print(f"❌ Pozisyonlar senkronize edilirken hata: {e}. Bot boş hafızayla başlıyor.")
 
 def set_all_leverages():
-    print("⏳ Kaldıraçlar {KALDIRAC}x olarak ayarlanıyor...")
+    print(f"⏳ Kaldıraçlar {KALDIRAC}x olarak ayarlanıyor...")
     for symbol in SYMBOLS:
         try:
             client.futures_change_leverage(symbol=symbol.upper(), leverage=KALDIRAC)
@@ -124,6 +127,7 @@ def tum_hassasiyetleri_yukle():
                             step_size_str = str(f.get("stepSize")).rstrip('0')
                             precision = 0 if '.' not in step_size_str else len(step_size_str.split('.')[1])
                             FUTURES_HASSASIYETLERI[sym] = precision
+        print(f"✅ Çift yönlü hassasiyet haritası kaydedildi. S:{len(SPOT_HASSASIYETLERI)} | F:{len(FUTURES_HASSASIYETLERI)}")
     except Exception as e: print(f"❌ Vadeli hassasiyet yükleme hatası: {e}")
 
     for sym in SYMBOLS:
@@ -258,7 +262,6 @@ def arbitraj_tarama_dongusu():
                     pos = arbitraj_pozisyonlari[symbol]
                     
                     if not pos["aktif"]:
-                        # İleride en yüksek 3'ü bulabilmek için havuzu topluyoruz
                         aktif_firsatlar.append({
                             "symbol": coin_label,
                             "makas": anlik_makas,
@@ -266,7 +269,7 @@ def arbitraj_tarama_dongusu():
                             "fu": futures_fiyat
                         })
                         
-                        # 🛡️ Giriş Koşulu Kontrolü
+                        # 🛡️ Giriş Koşulu
                         if anlik_makas >= GIRIS_MAKAS_YUZDE:
                             _, _, net = net_kar_hesapla(anlik_makas, CIKIS_MAKAS_YUZDE)
                             if net <= 0: continue
@@ -274,9 +277,9 @@ def arbitraj_tarama_dongusu():
                             basarili, s_qty, f_qty = execute_arbitrage_entry(symbol, spot_fiyat, futures_fiyat)
                             if basarili:
                                 pos.update({"aktif": True, "giris_makas": anlik_makas, "spot_adet": s_qty, "futures_adet": f_qty})
-                                telegram_bildir(f"🤖 <b>{coin_label} İŞLEME GİRİLDİ (+)</b>\n⚡ Makas: +%{anlik_makas:.4f}")
+                                telegram_bildir(f"🤖 <b>{coin_label} İŞLEME GİRİLDİ (+)</b>\n⚡ Bakiye: 10/10$ | Makas: +%{anlik_makas:.4f}")
                     else:
-                        print(f"⏳ [POZİSYONDASIN] {coin_label} Hedef Kapanış: +%{CIKIS_MAKAS_YUZDE:.2f} | Anlık Makas: +%{anlik_makas:.4f}")
+                        print(f"⏳ [POZİSYONDASIN] {coin_label} Hedef Kapanış: +% {CIKIS_MAKAS_YUZDE:.2f} | Anlık Makas: +%{anlik_makas:.4f}")
                         if anlik_makas <= CIKIS_MAKAS_YUZDE:
                             if pos["aktif"]:
                                 if execute_arbitrage_exit(symbol, pos["spot_adet"], pos["futures_adet"]):
@@ -284,26 +287,29 @@ def arbitraj_tarama_dongusu():
                                     telegram_bildir(f"🤝 <b>🔒 POZİSYON KAPATILDI</b>\nRealize Kâr: {net:.4f} USDT")
                                     pos["aktif"] = False
             
-            # 🎯 [LOG MEKANİZMASI]: Tüm koinleri makas büyüklüğüne göre (büyükten küçüğe) sırala ve ilk 3'ünü bas
+            # 🎯 Akıllı Sıralama: En yüksek makası veren ilk 3 pariteyi ekrana basar
             if aktif_firsatlar:
                 aktif_firsatlar.sort(key=lambda x: x["makas"], reverse=True)
-                print("\n🔥 --- EN YÜKSEK MAKASLI İLK 3 PARİTE ---")
+                print("\n🔥 --- EN YÜKSEK MAKASLI İLK 3 PARİTE (Havuz: 25 Koin) ---")
                 for f in aktif_firsatlar[:3]:
                     if f["makas"] >= 0:
                         print(f"📊 [İZLEME] {f['symbol']} Makas: +%{f['makas']:.3f} | Sp: {f['sp']} | Fu: {f['fu']}")
                     else:
                         print(f"🔻 [İZLEME] {f['symbol']} Makas: -%{abs(f['makas']):.3f} | Sp: {f['sp']} | Fu: {f['fu']}")
-                print("------------------------------------------")
+                print("---------------------------------------------------------")
                             
         except Exception as e: 
             print(f"❌ Döngü hatası: {e}")
         time.sleep(1.0) 
 
 if __name__ == "__main__":
+    # 🎯 25 Koinli Likit Havuz
     SYMBOLS = [
         "dydxusdt", "opusdt", "arbusdt", "ldousdt", "tiausdt", 
         "solusdt", "avaxusdt", "linkusdt", "suiusdt", "ethusdt", 
-        "bnbusdt", "xrpusdt", "adausdt", "dotusdt", "maticusdt"
+        "bnbusdt", "xrpusdt", "adausdt", "dotusdt", "maticusdt",
+        "btcusdt", "dogeusdt", "shibusdt", "nearusdt", "ftmusdt",
+        "atomusdt", "ltcusdt", "uniusdt", "aptusdt", "filusdt"
     ]
     
     set_all_leverages()
@@ -316,5 +322,5 @@ if __name__ == "__main__":
     
     time.sleep(4.0) 
     
-    telegram_bildir("🎯 <b>15 Koinli Akıllı Dinamik Log Botu Başlatıldı!</b>")
+    telegram_bildir("🎯 <b>25 Parite & 10/10$ Ayarlı Çekirdek Bot Başlatıldı!</b>")
     arbitraj_tarama_dongusu()
