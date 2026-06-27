@@ -36,8 +36,8 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY)
 
 # --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
-GIRIS_MAKAS_YUZDE = 1.80       
-CIKIS_MAKAS_YUZDE = 0.01       
+GIRIS_MAKAS_YUZDE = 0.50       
+CIKIS_MAKAS_YUZDE = 0.05       
 
 SPOT_BAKIYE = 11.0  
 FUTURES_BAKIYE = 11.0  
@@ -56,15 +56,14 @@ SYMBOLS = [
 ]
 piyasa_verisi = {symbol: {"spot_price": None, "futures_price": None} for symbol in SYMBOLS}
 
-# 🔄 [GÜNCELLEME]: Çift teyit için giriş ve çıkış onay sayaçları eklendi
 arbitraj_pozisyonlari = {
     symbol: {
         "aktif": False, 
         "giris_makas": 0.0, 
         "spot_adet": 0.0, 
         "futures_adet": 0.0,
-        "giris_onay_sayac": 0,  # Giriş teyit sayacı
-        "cikis_onay_sayac": 0   # Çıkış teyit sayacı
+        "giris_onay_sayac": 0,  
+        "cikis_onay_sayac": 0   
     } for symbol in SYMBOLS
 }
 
@@ -204,8 +203,16 @@ def execute_arbitrage_entry(symbol, spot_price, futures_price):
         t1.start(); t2.start(); t1.join(); t2.join()
         
         if 'spot_hata' in emir_sonuclari or 'futures_hata' in emir_sonuclari:
+            if 'futures' in emir_sonuclari and 'spot_hata' in emir_sonuclari:
+                print(f"🚨 SİGORTA DEVREDE: Spot emir hata verdi. Açılan Vadeli pozisyon acilen ters emirle kapatılıyor...")
+                try: client.futures_create_order(symbol=coin_label, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=futures_quantity)
+                except Exception: pass
+            
             if 'spot' in emir_sonuclari and 'futures_hata' in emir_sonuclari:
-                client.create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=spot_quantity)
+                print(f"🚨 SİGORTA DEVREDE: Vadeli emir hata verdi. Alınan Spot acilen geri satılıyor...")
+                try: client.create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=spot_quantity)
+                except Exception: pass
+                    
             return False, 0, 0
             
         return True, spot_quantity, futures_quantity
@@ -274,7 +281,6 @@ def arbitraj_tarama_dongusu():
                     pos = arbitraj_pozisyonlari[symbol]
                     
                     if not pos["aktif"]:
-                        # Çıkış sayacını sıfırla (Pozisyonda değiliz)
                         pos["cikis_onay_sayac"] = 0
                         
                         aktif_firsatlar.append({
@@ -290,7 +296,6 @@ def arbitraj_tarama_dongusu():
                             pos["giris_onay_sayac"] += 1
                             print(f"👁️‍🗨️ TEYİT ALINIYOR -> {coin_label} Makas %0.50 üstünde! Onay Adımı: {pos['giris_onay_sayac']}/2")
                             
-                            # İkinci fiyat karşılaştırmasında da hala şart sağlanıyorsa gir
                             if pos["giris_onay_sayac"] >= 2:
                                 _, _, net = net_kar_hesapla(anlik_makas, CIKIS_MAKAS_YUZDE)
                                 if net <= 0: 
@@ -308,10 +313,8 @@ def arbitraj_tarama_dongusu():
                                     })
                                     telegram_bildir(f"🤖 <b>{coin_label} ÇİFT ONAYLA İŞLEME GİRİLDİ (+)</b>\n⚡ Makas: +%{anlik_makas:.4f}")
                         else:
-                            # Fiyat 0.50'nin altına anlık düştüyse onay sayacını sıfırla (kesintisiz üst üste 2 defa olmalı)
                             pos["giris_onay_sayac"] = 0
                     else:
-                        # Giriş sayacını sıfırla (Zaten pozisyondayız)
                         pos["giris_onay_sayac"] = 0
                         
                         # 🤝 ÇIKIŞ KOŞULU KONTROLÜ
@@ -320,19 +323,23 @@ def arbitraj_tarama_dongusu():
                             print(f"🔄 ÇIKIŞ TEYİDİ ALINIYOR -> {coin_label} Makas kapandı! Onay Adımı: {pos['cikis_onay_sayac']}/2")
                             
                             if pos["cikis_onay_sayac"] >= 2:
-                                # İkinci teyitte hala kar edip etmediğimizi kontrol et
+                                # Realize edilen kâr/zararı kuruşu kuruşuna hesapla
                                 _, _, anlik_net_kar = net_kar_hesapla(pos["giris_makas"], anlik_makas)
                                 
-                                if anlik_net_kar > 0:
-                                    if execute_arbitrage_exit(symbol, pos["spot_adet"], pos["futures_adet"]):
-                                        telegram_bildir(f"🤝 <b>🔒 POZİSYON ÇİFT ONAYLA KAPATILDI</b>\nRealize Kâr: {anlik_net_kar:.4f} USDT")
-                                        pos["aktif"] = False
-                                        pos["cikis_onay_sayac"] = 0
+                                if execute_arbitrage_exit(symbol, pos["spot_adet"], pos["futures_adet"]):
+                                    # 🟢 VEYA 🔴 KÂR ZARAR DURUMUNU TELEGRAMA RAPORLAMA ALANI
+                                    if anlik_net_kar > 0:
+                                        durum_mesaji = f"🟢 <b>🔒 POZİSYON KÂRLA KAPATILDI</b>\n💰 <b>Kazanılan Net Kâr:</b> +{anlik_net_kar:.4f} USDT\n📈 Giriş Makası: %{pos['giris_makas']:.3f} | Çıkış: %{anlik_makas:.3f}"
+                                    else:
+                                        durum_mesaji = f"🔴 <b>🔒 POZİSYON ZARARLA KAPATILDI (Kayma/Komisyon)</b>\n📉 <b>Kalan Net Zarar:</b> {anlik_net_kar:.4f} USDT\n📉 Giriş Makası: %{pos['giris_makas']:.3f} | Çıkış: %{anlik_makas:.3f}"
+                                    
+                                    telegram_bildir(f"🤝 <b>{coin_label} İşlemi Sona Erdi</b>\n{durum_mesaji}")
+                                    pos["aktif"] = False
+                                    pos["cikis_onay_sayac"] = 0
                                 else:
-                                    print(f"⚠️ {coin_label} makas kapandı fakat komisyonlar düşüldüğünde zarar yazıyor ({anlik_net_kar:.4f} USDT). Çıkış ertelendi.")
+                                    print(f"❌ {coin_label} için çıkış emri gönderilemedi. Bir sonraki döngüde tekrar denenecek.")
                                     pos["cikis_onay_sayac"] = 0
                         else:
-                            # Makas tekrar açıldıysa teyit sayacını sıfırla
                             pos["cikis_onay_sayac"] = 0
                             print(f"⏳ [POZİSYONDASIN] {coin_label} Hedef Kapanış: +%{CIKIS_MAKAS_YUZDE:.2f} | Anlık Makas: +%{anlik_makas:.4f}")
             
@@ -372,5 +379,5 @@ if __name__ == "__main__":
     
     time.sleep(4.0) 
     
-    telegram_bildir("🎯 <b>Güvenli Çift Onay Motoru Devreye Alındı! Bot Başlatıldı.</b>")
+    telegram_bildir("🎯 <b>Kâr/Zarar Göstergeli Akıllı Raporlama Botu Başlatıldı!</b>")
     arbitraj_tarama_dongusu()
