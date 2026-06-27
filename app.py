@@ -46,8 +46,12 @@ KALDIRAC = 1
 SPOT_FEE_RATE = 0.0750 / 100
 FUTURES_FEE_RATE = 0.0450 / 100
 
-# 🎯 KONTROLLÜ VE DERİN PARİTE LİSTESİ (Toplam 9 Adet Hacimli Koin)
-SYMBOLS = ["dydxusdt", "opusdt", "arbusdt", "ldousdt", "tiausdt", "solusdt", "avaxusdt", "linkusdt", "suiusdt"]
+# 🎯 GENİŞLETİLMİŞ GÜVENLİ VE HACİMLİ PARİTE LİSTESİ (15 Adet Koin)
+SYMBOLS = [
+    "dydxusdt", "opusdt", "arbusdt", "ldousdt", "tiausdt", 
+    "solusdt", "avaxusdt", "linkusdt", "suiusdt", "ethusdt", 
+    "bnbusdt", "xrpusdt", "adausdt", "dotusdt", "maticusdt"
+]
 piyasa_verisi = {symbol: {"spot_price": None, "futures_price": None} for symbol in SYMBOLS}
 arbitraj_pozisyonlari = {symbol: {"aktif": False, "giris_makas": 0.0, "spot_adet": 0.0, "futures_adet": 0.0} for symbol in SYMBOLS}
 
@@ -87,16 +91,7 @@ def senkronize_et_mevcut_pozisyonlar():
         print(f"❌ Pozisyonlar senkronize edilirken hata: {e}. Bot boş hafızayla başlıyor.")
 
 def set_all_leverages():
-    print("⏳ Pozisyon Modu 'One-Way' (Tek Yönlü) olarak zorlanıyor...")
-    try:
-        client.futures_change_position_mode(dualSidePosition="false")
-        print("✅ Pozisyon Modu Microsoft altyapısında zaten Tek Yönlü (One-Way).")
-    except BinanceAPIException as e:
-        if e.code == -4059: print("✅ Pozisyon Modu zaten Tek Yönlü (One-Way).")
-        else: print(f"⚠️ Pozisyon modu değiştirilemedi: {e.message}")
-    except Exception as e: print(f"⚠️ Pozisyon modu genel hata: {e}")
-
-    print(f"⏳ Kaldıraçlar {KALDIRAC}x olarak ayarlanıyor...")
+    print("⏳ Kaldıraçlar {KALDIRAC}x olarak ayarlanıyor...")
     for symbol in SYMBOLS:
         try:
             client.futures_change_leverage(symbol=symbol.upper(), leverage=KALDIRAC)
@@ -129,7 +124,6 @@ def tum_hassasiyetleri_yukle():
                             step_size_str = str(f.get("stepSize")).rstrip('0')
                             precision = 0 if '.' not in step_size_str else len(step_size_str.split('.')[1])
                             FUTURES_HASSASIYETLERI[sym] = precision
-        print(f"✅ Çift yönlü hassasiyet haritası kaydedildi. S:{len(SPOT_HASSASIYETLERI)} | F:{len(FUTURES_HASSASIYETLERI)}")
     except Exception as e: print(f"❌ Vadeli hassasiyet yükleme hatası: {e}")
 
     for sym in SYMBOLS:
@@ -161,12 +155,10 @@ def _hizli_emir_gonder_futures(coin_label, quantity, sonuclar):
 
 def _hizli_cikis_gonder_spot(coin_label, quantity, sonuclar):
     try: sonuclar['spot'] = client.create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=quantity)
-    except BinanceAPIException as e: sonuclar['spot_hata'] = f"Kod: {e.code}, Mesaj: {e.message}"
     except Exception as e: sonuclar['spot_hata'] = str(e)
 
 def _hizli_cikis_gonder_futures(coin_label, quantity, sonuclar):
     try: sonuclar['futures'] = client.futures_create_order(symbol=coin_label, side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=quantity)
-    except BinanceAPIException as e: sonuclar['futures_hata'] = f"Kod: {e.code}, Mesaj: {e.message}"
     except Exception as e: sonuclar['futures_hata'] = str(e)
 
 def execute_arbitrage_entry(symbol, spot_price, futures_price):
@@ -196,8 +188,6 @@ def execute_arbitrage_entry(symbol, spot_price, futures_price):
         t1.start(); t2.start(); t1.join(); t2.join()
         
         if 'spot_hata' in emir_sonuclari or 'futures_hata' in emir_sonuclari:
-            if 'futures_hata' in emir_sonuclari:
-                print(f"⚠️ VADELİ EMİR REDDEDİLDİ: {emir_sonuclari['futures_hata']}")
             if 'spot' in emir_sonuclari and 'futures_hata' in emir_sonuclari:
                 client.create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=spot_quantity)
             return False, 0, 0
@@ -253,6 +243,8 @@ def arbitraj_tarama_dongusu():
     global arbitraj_pozisyonlari
     while True:
         try:
+            aktif_firsatlar = []
+            
             with data_lock:
                 for symbol in SYMBOLS:
                     spot_fiyat = piyasa_verisi[symbol]["spot_price"]
@@ -266,13 +258,15 @@ def arbitraj_tarama_dongusu():
                     pos = arbitraj_pozisyonlari[symbol]
                     
                     if not pos["aktif"]:
-                        # Ekrana artı ve eksi makasların tamamı canlı basılıyor
-                        if anlik_makas >= 0:
-                            print(f"📊 [İZLEME] {coin_label} Makas: +%{anlik_makas:.3f} | Sp: {spot_fiyat} | Fu: {futures_fiyat}")
-                        else:
-                            print(f"🔻 [İZLEME] {coin_label} Makas: -%{abs(anlik_makas):.3f} | Sp: {spot_fiyat} | Fu: {futures_fiyat}")
+                        # İleride en yüksek 3'ü bulabilmek için havuzu topluyoruz
+                        aktif_firsatlar.append({
+                            "symbol": coin_label,
+                            "makas": anlik_makas,
+                            "sp": spot_fiyat,
+                            "fu": futures_fiyat
+                        })
                         
-                        # 🛡️ Giriş Koşulu: Sadece belirlenen pozitif eşiği geçerse işleme dalar
+                        # 🛡️ Giriş Koşulu Kontrolü
                         if anlik_makas >= GIRIS_MAKAS_YUZDE:
                             _, _, net = net_kar_hesapla(anlik_makas, CIKIS_MAKAS_YUZDE)
                             if net <= 0: continue
@@ -289,14 +283,28 @@ def arbitraj_tarama_dongusu():
                                     _, _, net = net_kar_hesapla(pos["giris_makas"], anlik_makas)
                                     telegram_bildir(f"🤝 <b>🔒 POZİSYON KAPATILDI</b>\nRealize Kâr: {net:.4f} USDT")
                                     pos["aktif"] = False
+            
+            # 🎯 [LOG MEKANİZMASI]: Tüm koinleri makas büyüklüğüne göre (büyükten küçüğe) sırala ve ilk 3'ünü bas
+            if aktif_firsatlar:
+                aktif_firsatlar.sort(key=lambda x: x["makas"], reverse=True)
+                print("\n🔥 --- EN YÜKSEK MAKASLI İLK 3 PARİTE ---")
+                for f in aktif_firsatlar[:3]:
+                    if f["makas"] >= 0:
+                        print(f"📊 [İZLEME] {f['symbol']} Makas: +%{f['makas']:.3f} | Sp: {f['sp']} | Fu: {f['fu']}")
+                    else:
+                        print(f"🔻 [İZLEME] {f['symbol']} Makas: -%{abs(f['makas']):.3f} | Sp: {f['sp']} | Fu: {f['fu']}")
+                print("------------------------------------------")
                             
         except Exception as e: 
             print(f"❌ Döngü hatası: {e}")
         time.sleep(1.0) 
 
 if __name__ == "__main__":
-    # 🎯 Genişletilmiş kontrollü hacimli liste
-    SYMBOLS = ["dydxusdt", "opusdt", "arbusdt", "ldousdt", "tiausdt", "solusdt", "avaxusdt", "linkusdt", "suiusdt"]
+    SYMBOLS = [
+        "dydxusdt", "opusdt", "arbusdt", "ldousdt", "tiausdt", 
+        "solusdt", "avaxusdt", "linkusdt", "suiusdt", "ethusdt", 
+        "bnbusdt", "xrpusdt", "adausdt", "dotusdt", "maticusdt"
+    ]
     
     set_all_leverages()
     tum_hassasiyetleri_yukle()
@@ -308,5 +316,5 @@ if __name__ == "__main__":
     
     time.sleep(4.0) 
     
-    telegram_bildir("🎯 <b>9 Hacimli Koin Aktif! Arbitraj Botu Yayında.</b>")
+    telegram_bildir("🎯 <b>15 Koinli Akıllı Dinamik Log Botu Başlatıldı!</b>")
     arbitraj_tarama_dongusu()
