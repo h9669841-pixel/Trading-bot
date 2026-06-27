@@ -304,7 +304,9 @@ def arbitraj_tarama_dongusu():
         time.sleep(1.0) # 👈 1 saniyede bir milimetrik tarama (DYDX tahtasında körlük bitti)
 
 if __name__ == "__main__":
-    SYMBOLS = get_all_futures_symbols()
+    # 🎯 150 koin çekmek yerine doğrudan DYDX'i listeye kilitliyoruz
+    SYMBOLS = ["dydxusdt"] 
+    
     piyasa_verisi = {symbol: {"spot_price": None, "futures_price": None} for symbol in SYMBOLS}
     arbitraj_pozisyonlari = {symbol: {"aktif": False, "giris_makas": 0.0, "spot_adet": 0.0, "futures_adet": 0.0} for symbol in SYMBOLS}
     
