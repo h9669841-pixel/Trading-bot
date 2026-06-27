@@ -305,7 +305,7 @@ def arbitraj_tarama_dongusu():
         time.sleep(1.0) # 👈 1 saniyede bir hızlı tarama döngüsü
 
 if __name__ == "__main__":
-    # 🎯 Tamamen güvenli ve hacimli seçkin koin listesi
+    # 🎯 Hacimli ve güvenli pariteleri doğrudan listeye kilitliyoruz (Küçük harf zorunlu!)
     SYMBOLS = ["dydxusdt", "opusdt", "arbusdt", "ldousdt", "tiausdt"]
     
     piyasa_verisi = {symbol: {"spot_price": None, "futures_price": None} for symbol in SYMBOLS}
