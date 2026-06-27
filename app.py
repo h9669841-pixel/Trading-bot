@@ -35,19 +35,19 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY)
 
-# --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI (DYDX İÇİN OPTİMİZE) ---
-GIRIS_MAKAS_YUZDE = 0.50       # DYDX derin tahta olduğu için %0.50 temiz kalır
-CIKIS_MAKAS_YUZDE = 0.05       # Makasın tam daraldığı saniyeyi kovalıyoruz
+# --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI (HACİMLİ PARİTELER İÇİN) ---
+GIRIS_MAKAS_YUZDE = 0.50       # Derin tahtalarda %0.50 temiz ve kaymasız kâr bırakır
+CIKIS_MAKAS_YUZDE = 0.05       # Makasın tam kapandığı saniyeyi kovalıyoruz
 
-SPOT_BAKIYE = 10.0  # Spot 10$ sınırına takılmamak için 11$ kilitli
+SPOT_BAKIYE = 10.0  # Spot limitine takılmamak için 11$ kilitli
 FUTURES_BAKIYE = 10.0  
 KALDIRAC = 1  
 
 SPOT_FEE_RATE = 0.0750 / 100
 FUTURES_FEE_RATE = 0.0450 / 100
 
-# 🎯 TEK KOİN ODAKLI SİSTEM
-SYMBOLS = ["dydxusdt"]
+# 🎯 HACİMLİ VE GÜVENLİ PARİTE LİSTESİ (Kör Noktasız Tarama)
+SYMBOLS = ["dydxusdt", "opusdt", "arbusdt", "ldousdt", "tiausdt"]
 piyasa_verisi = {}
 arbitraj_pozisyonlari = {}
 
@@ -58,7 +58,7 @@ FUTURES_HASSASIYETLERI = {}
 data_lock = threading.Lock()
 
 def senkronize_et_mevcut_pozisyonlar():
-    print("⏳ Binance Vadeli İşlemlerdeki aktif DYDX pozisyonunuz kırıntı filtresiyle taranıyor...")
+    print("⏳ Binance Vadeli İşlemlerdeki aktif pozisyonlarınız kırıntı filtresiyle taranıyor...")
     try:
         account_info = client.futures_account()
         positions = account_info.get("positions", [])
@@ -86,7 +86,7 @@ def senkronize_et_mevcut_pozisyonlar():
                 elif amt != 0 and notional_degeri < 5.0:
                     print(f"🧹 KIRINTI ELENDİ: {symbol_upper} üzerinde {notional_degeri:.2f} USDT'lik ufak bir parça var.")
         
-        print(f"✅ Filtreleme tamamlandı. Toplam {acik_sayac} gerçek pozisyon başarıyla koruma altına kaldırıldı.")
+        print(f"✅ Filtreleme tamamlandı. Toplam {acik_sayac} gerçek pozisyon başarıyla koruma altına alındı.")
     except Exception as e:
         print(f"❌ Pozisyonlar senkronize edilirken hata: {e}. Bot boş hafızayla başlıyor.")
 
@@ -100,14 +100,14 @@ def set_all_leverages():
         else: print(f"⚠️ Pozisyon modu değiştirilemedi: {e.message}")
     except Exception as e: print(f"⚠️ Pozisyon modu genel hata: {e}")
 
-    print(f"⏳ Kaldıraç {KALDIRAC}x olarak ayarlanıyor...")
+    print(f"⏳ Kaldıraçlar {KALDIRAC}x olarak ayarlanıyor...")
     for symbol in SYMBOLS:
         try:
             client.futures_change_leverage(symbol=symbol.upper(), leverage=KALDIRAC)
         except Exception: pass
 
 def tum_hassasiyetleri_yukle():
-    print("⏳ DYDX Lot hassasiyetleri önbelleğe alınıyor...")
+    print("⏳ Lot hassasiyetleri önbelleğe alınıyor...")
     try:
         spot_info = client.get_exchange_info()
         for market in spot_info['symbols']:
@@ -278,8 +278,9 @@ def arbitraj_tarama_dongusu():
                     pos = arbitraj_pozisyonlari[symbol]
                     
                     if not pos["aktif"]:
-                        # Ekrana saniyelik DYDX durumunu canlı basıyoruz
-                        print(f"📊 [CANLI TAKİP] {coin_label} Makas: +%{anlik_makas:.4f} | Sp: {spot_fiyat} | Fu: {futures_fiyat}")
+                        # 5 koinin durumunu saniyede bir ekrana basarak canlı izlemeni sağlar
+                        if anlik_makas > 0.10: 
+                            print(f"📊 [İZLEME] {coin_label} Makas: +%{anlik_makas:.3f} | Sp: {spot_fiyat} | Fu: {futures_fiyat}")
                         
                         if anlik_makas >= GIRIS_MAKAS_YUZDE:
                             _, _, net = net_kar_hesapla(anlik_makas, CIKIS_MAKAS_YUZDE)
@@ -288,24 +289,24 @@ def arbitraj_tarama_dongusu():
                             basarili, s_qty, f_qty = execute_arbitrage_entry(symbol, spot_fiyat, futures_fiyat)
                             if basarili:
                                 pos.update({"aktif": True, "giris_makas": anlik_makas, "spot_adet": s_qty, "futures_adet": f_qty})
-                                telegram_bildir(f"🤖 <b>DYDX İŞLEME GİRİLDİ (+)</b>\n\n⚡ <b>Giriş Makası:</b> +%{anlik_makas:.4f}\n💵 <b>Tahmini Net Kâr:</b> {net:.4f} USDT")
+                                telegram_bildir(f"🤖 <b>{coin_label} İŞLEME GİRİLDİ (+)</b>\n\n⚡ <b>Giriş Makası:</b> +%{anlik_makas:.4f}\n💵 <b>Tahmini Net Kâr:</b> {net:.4f} USDT")
                     else:
                         print(f"⏳ [POZİSYONDASIN] {coin_label} Hedef Kapanış: +%{CIKIS_MAKAS_YUZDE:.2f} | Anlık Makas: +%{anlik_makas:.4f}")
                         if anlik_makas <= CIKIS_MAKAS_YUZDE:
                             if pos["aktif"]:
                                 if execute_arbitrage_exit(symbol, pos["spot_adet"], pos["futures_adet"]):
                                     brut, kesinti, net = net_kar_hesapla(pos["giris_makas"], anlik_makas)
-                                    telegram_bildir(f"🤝 <b>🔒 DYDX POZİSYONU KAPATILDI</b>\n🎉 Net Realize Kâr: {net:.4f} USDT")
+                                    telegram_bildir(f"🤝 <b>🔒 POZİSYON KAPATILDI</b>\n🎉 Koin: {coin_label}\nNet Realize Kâr: {net:.4f} USDT")
                                     pos["aktif"] = False
                             
         except Exception as e: 
             print(f"❌ Döngü hatası: {e}")
             traceback.print_exc()
-        time.sleep(1.0) # 👈 1 saniyede bir milimetrik tarama (DYDX tahtasında körlük bitti)
+        time.sleep(1.0) # 👈 1 saniyede bir hızlı tarama döngüsü
 
 if __name__ == "__main__":
-    # 🎯 150 koin çekmek yerine doğrudan DYDX'i listeye kilitliyoruz
-    SYMBOLS = ["dydxusdt"] 
+    # 🎯 Tamamen güvenli ve hacimli seçkin koin listesi
+    SYMBOLS = ["dydxusdt", "opusdt", "arbusdt", "ldousdt", "tiausdt"]
     
     piyasa_verisi = {symbol: {"spot_price": None, "futures_price": None} for symbol in SYMBOLS}
     arbitraj_pozisyonlari = {symbol: {"aktif": False, "giris_makas": 0.0, "spot_adet": 0.0, "futures_adet": 0.0} for symbol in SYMBOLS}
@@ -314,7 +315,7 @@ if __name__ == "__main__":
     tum_hassasiyetleri_yukle()
     senkronize_et_mevcut_pozisyonlar()
     
-    telegram_bildir("🎯 <b>DYDX Odaklı Saniyelik Ultra Arbitraj Botu Başlatıldı!</b>")
+    telegram_bildir("🎯 <b>5 Hacimli Koin Odaklı Güvenli Arbitraj Botu Başlatıldı!</b>")
     
     threading.Thread(target=start_multi_spot_ws, daemon=True).start()
     threading.Thread(target=start_multi_futures_ws, daemon=True).start()
