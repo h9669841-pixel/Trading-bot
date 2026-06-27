@@ -39,7 +39,7 @@ client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY)
 GIRIS_MAKAS_YUZDE = 0.50       # DYDX derin tahta olduğu için %0.50 temiz kalır
 CIKIS_MAKAS_YUZDE = 0.05       # Makasın tam daraldığı saniyeyi kovalıyoruz
 
-SPOT_BAKIYE = 11.0  # Spot 10$ sınırına takılmamak için 11$ kilitli
+SPOT_BAKIYE = 10.0  # Spot 10$ sınırına takılmamak için 11$ kilitli
 FUTURES_BAKIYE = 10.0  
 KALDIRAC = 1  
 
