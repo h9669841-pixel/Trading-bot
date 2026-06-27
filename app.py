@@ -46,8 +46,8 @@ KALDIRAC = 1
 SPOT_FEE_RATE = 0.0750 / 100
 FUTURES_FEE_RATE = 0.0450 / 100
 
-# 🎯 HACİMLİ VE GÜVENLİ PARİTE LİSTESİ (Küçük Harf)
-SYMBOLS = ["dydxusdt", "opusdt", "arbusdt", "ldousdt", "tiausdt"]
+# 🎯 KONTROLLÜ VE DERİN PARİTE LİSTESİ (Toplam 9 Adet Hacimli Koin)
+SYMBOLS = ["dydxusdt", "opusdt", "arbusdt", "ldousdt", "tiausdt", "solusdt", "avaxusdt", "linkusdt", "suiusdt"]
 piyasa_verisi = {symbol: {"spot_price": None, "futures_price": None} for symbol in SYMBOLS}
 arbitraj_pozisyonlari = {symbol: {"aktif": False, "giris_makas": 0.0, "spot_adet": 0.0, "futures_adet": 0.0} for symbol in SYMBOLS}
 
@@ -90,7 +90,7 @@ def set_all_leverages():
     print("⏳ Pozisyon Modu 'One-Way' (Tek Yönlü) olarak zorlanıyor...")
     try:
         client.futures_change_position_mode(dualSidePosition="false")
-        print("✅ Pozisyon Modu başarıyla Tek Yönlü (One-Way) yapıldı.")
+        print("✅ Pozisyon Modu Microsoft altyapısında zaten Tek Yönlü (One-Way).")
     except BinanceAPIException as e:
         if e.code == -4059: print("✅ Pozisyon Modu zaten Tek Yönlü (One-Way).")
         else: print(f"⚠️ Pozisyon modu değiştirilemedi: {e.message}")
@@ -266,13 +266,13 @@ def arbitraj_tarama_dongusu():
                     pos = arbitraj_pozisyonlari[symbol]
                     
                     if not pos["aktif"]:
-                        # 📝 [GÜNCELLEME]: Makas + veya - ne olursa olsun ekrana canlı yazar
+                        # Ekrana artı ve eksi makasların tamamı canlı basılıyor
                         if anlik_makas >= 0:
                             print(f"📊 [İZLEME] {coin_label} Makas: +%{anlik_makas:.3f} | Sp: {spot_fiyat} | Fu: {futures_fiyat}")
                         else:
                             print(f"🔻 [İZLEME] {coin_label} Makas: -%{abs(anlik_makas):.3f} | Sp: {spot_fiyat} | Fu: {futures_fiyat}")
                         
-                        # 🛡️ Sadece hedef pozitif makasa ulaştığında emre girer, eksi değerde asla girmez
+                        # 🛡️ Giriş Koşulu: Sadece belirlenen pozitif eşiği geçerse işleme dalar
                         if anlik_makas >= GIRIS_MAKAS_YUZDE:
                             _, _, net = net_kar_hesapla(anlik_makas, CIKIS_MAKAS_YUZDE)
                             if net <= 0: continue
@@ -295,7 +295,8 @@ def arbitraj_tarama_dongusu():
         time.sleep(1.0) 
 
 if __name__ == "__main__":
-    SYMBOLS = ["dydxusdt", "opusdt", "arbusdt", "ldousdt", "tiausdt"]
+    # 🎯 Genişletilmiş kontrollü hacimli liste
+    SYMBOLS = ["dydxusdt", "opusdt", "arbusdt", "ldousdt", "tiausdt", "solusdt", "avaxusdt", "linkusdt", "suiusdt"]
     
     set_all_leverages()
     tum_hassasiyetleri_yukle()
@@ -307,5 +308,5 @@ if __name__ == "__main__":
     
     time.sleep(4.0) 
     
-    telegram_bildir("🎯 <b>Güvenli Arbitraj Botu Yayında! Tüm Makaslar İzleniyor.</b>")
+    telegram_bildir("🎯 <b>9 Hacimli Koin Aktif! Arbitraj Botu Yayında.</b>")
     arbitraj_tarama_dongusu()
