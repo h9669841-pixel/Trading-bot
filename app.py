@@ -36,10 +36,9 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY)
 
 # --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
-GIRIS_MAKAS_YUZDE = 0.50       
+GIRIS_MAKAS_YUZDE = 0.80       
 CIKIS_MAKAS_YUZDE = 0.05       
 
-# 💰 [GÜNCELLEME]: Yatırım miktarları 10$ spot, 10$ vadeli olarak eşitlendi
 SPOT_BAKIYE = 10.0  
 FUTURES_BAKIYE = 10.0  
 KALDIRAC = 1  
@@ -47,7 +46,7 @@ KALDIRAC = 1
 SPOT_FEE_RATE = 0.0750 / 100
 FUTURES_FEE_RATE = 0.0450 / 100
 
-# 🎯 EN GENİŞ GÜVENLİ VE HACİMLİ PARİTE LİSTESİ (Tam 25 Adet Koin)
+# 🎯 EN GENİŞ GÜVENLİ VE HACİMLİ PARİTE LİSTESİ (25 Adet Koin)
 SYMBOLS = [
     "dydxusdt", "opusdt", "arbusdt", "ldousdt", "tiausdt", 
     "solusdt", "avaxusdt", "linkusdt", "suiusdt", "ethusdt", 
@@ -56,7 +55,18 @@ SYMBOLS = [
     "atomusdt", "ltcusdt", "uniusdt", "aptusdt", "filusdt"
 ]
 piyasa_verisi = {symbol: {"spot_price": None, "futures_price": None} for symbol in SYMBOLS}
-arbitraj_pozisyonlari = {symbol: {"aktif": False, "giris_makas": 0.0, "spot_adet": 0.0, "futures_adet": 0.0} for symbol in SYMBOLS}
+
+# 🔄 [GÜNCELLEME]: Çift teyit için giriş ve çıkış onay sayaçları eklendi
+arbitraj_pozisyonlari = {
+    symbol: {
+        "aktif": False, 
+        "giris_makas": 0.0, 
+        "spot_adet": 0.0, 
+        "futures_adet": 0.0,
+        "giris_onay_sayac": 0,  # Giriş teyit sayacı
+        "cikis_onay_sayac": 0   # Çıkış teyit sayacı
+    } for symbol in SYMBOLS
+}
 
 SPOT_HASSASIYETLERI = {}
 FUTURES_HASSASIYETLERI = {}
@@ -85,7 +95,9 @@ def senkronize_et_mevcut_pozisyonlar():
                         "aktif": True,
                         "giris_makas": GIRIS_MAKAS_YUZDE, 
                         "spot_adet": v_adet,             
-                        "futures_adet": v_adet
+                        "futures_adet": v_adet,
+                        "giris_onay_sayac": 0,
+                        "cikis_onay_sayac": 0
                     })
                     acik_sayac += 1
                     print(f"⚠️ AKTİF POZİSYON KİLİTLENDİ: {symbol_upper} ({notional_degeri:.2f} USDT büyüklüğünde).")
@@ -262,48 +274,86 @@ def arbitraj_tarama_dongusu():
                     pos = arbitraj_pozisyonlari[symbol]
                     
                     if not pos["aktif"]:
+                        # Çıkış sayacını sıfırla (Pozisyonda değiliz)
+                        pos["cikis_onay_sayac"] = 0
+                        
                         aktif_firsatlar.append({
                             "symbol": coin_label,
                             "makas": anlik_makas,
                             "sp": spot_fiyat,
-                            "fu": futures_fiyat
+                            "fu": futures_fiyat,
+                            "onay_durum": pos["giris_onay_sayac"]
                         })
                         
-                        # 🛡️ Giriş Koşulu
+                        # 🛡️ GİRİŞ KOŞULU KONTROLÜ
                         if anlik_makas >= GIRIS_MAKAS_YUZDE:
-                            _, _, net = net_kar_hesapla(anlik_makas, CIKIS_MAKAS_YUZDE)
-                            if net <= 0: continue
-                                
-                            basarili, s_qty, f_qty = execute_arbitrage_entry(symbol, spot_fiyat, futures_fiyat)
-                            if basarili:
-                                pos.update({"aktif": True, "giris_makas": anlik_makas, "spot_adet": s_qty, "futures_adet": f_qty})
-                                telegram_bildir(f"🤖 <b>{coin_label} İŞLEME GİRİLDİ (+)</b>\n⚡ Bakiye: 10/10$ | Makas: +%{anlik_makas:.4f}")
+                            pos["giris_onay_sayac"] += 1
+                            print(f"👁️‍🗨️ TEYİT ALINIYOR -> {coin_label} Makas %0.50 üstünde! Onay Adımı: {pos['giris_onay_sayac']}/2")
+                            
+                            # İkinci fiyat karşılaştırmasında da hala şart sağlanıyorsa gir
+                            if pos["giris_onay_sayac"] >= 2:
+                                _, _, net = net_kar_hesapla(anlik_makas, CIKIS_MAKAS_YUZDE)
+                                if net <= 0: 
+                                    pos["giris_onay_sayac"] = 0
+                                    continue
+                                    
+                                basarili, s_qty, f_qty = execute_arbitrage_entry(symbol, spot_fiyat, futures_fiyat)
+                                if basarili:
+                                    pos.update({
+                                        "aktif": True, 
+                                        "giris_makas": anlik_makas, 
+                                        "spot_adet": s_qty, 
+                                        "futures_adet": f_qty,
+                                        "giris_onay_sayac": 0
+                                    })
+                                    telegram_bildir(f"🤖 <b>{coin_label} ÇİFT ONAYLA İŞLEME GİRİLDİ (+)</b>\n⚡ Makas: +%{anlik_makas:.4f}")
+                        else:
+                            # Fiyat 0.50'nin altına anlık düştüyse onay sayacını sıfırla (kesintisiz üst üste 2 defa olmalı)
+                            pos["giris_onay_sayac"] = 0
                     else:
-                        print(f"⏳ [POZİSYONDASIN] {coin_label} Hedef Kapanış: +% {CIKIS_MAKAS_YUZDE:.2f} | Anlık Makas: +%{anlik_makas:.4f}")
+                        # Giriş sayacını sıfırla (Zaten pozisyondayız)
+                        pos["giris_onay_sayac"] = 0
+                        
+                        # 🤝 ÇIKIŞ KOŞULU KONTROLÜ
                         if anlik_makas <= CIKIS_MAKAS_YUZDE:
-                            if pos["aktif"]:
-                                if execute_arbitrage_exit(symbol, pos["spot_adet"], pos["futures_adet"]):
-                                    _, _, net = net_kar_hesapla(pos["giris_makas"], anlik_makas)
-                                    telegram_bildir(f"🤝 <b>🔒 POZİSYON KAPATILDI</b>\nRealize Kâr: {net:.4f} USDT")
-                                    pos["aktif"] = False
+                            pos["cikis_onay_sayac"] += 1
+                            print(f"🔄 ÇIKIŞ TEYİDİ ALINIYOR -> {coin_label} Makas kapandı! Onay Adımı: {pos['cikis_onay_sayac']}/2")
+                            
+                            if pos["cikis_onay_sayac"] >= 2:
+                                # İkinci teyitte hala kar edip etmediğimizi kontrol et
+                                _, _, anlik_net_kar = net_kar_hesapla(pos["giris_makas"], anlik_makas)
+                                
+                                if anlik_net_kar > 0:
+                                    if execute_arbitrage_exit(symbol, pos["spot_adet"], pos["futures_adet"]):
+                                        telegram_bildir(f"🤝 <b>🔒 POZİSYON ÇİFT ONAYLA KAPATILDI</b>\nRealize Kâr: {anlik_net_kar:.4f} USDT")
+                                        pos["aktif"] = False
+                                        pos["cikis_onay_sayac"] = 0
+                                else:
+                                    print(f"⚠️ {coin_label} makas kapandı fakat komisyonlar düşüldüğünde zarar yazıyor ({anlik_net_kar:.4f} USDT). Çıkış ertelendi.")
+                                    pos["cikis_onay_sayac"] = 0
+                        else:
+                            # Makas tekrar açıldıysa teyit sayacını sıfırla
+                            pos["cikis_onay_sayac"] = 0
+                            print(f"⏳ [POZİSYONDASIN] {coin_label} Hedef Kapanış: +%{CIKIS_MAKAS_YUZDE:.2f} | Anlık Makas: +%{anlik_makas:.4f}")
             
             # 🎯 Akıllı Sıralama: En yüksek makası veren ilk 3 pariteyi ekrana basar
             if aktif_firsatlar:
                 aktif_firsatlar.sort(key=lambda x: x["makas"], reverse=True)
-                print("\n🔥 --- EN YÜKSEK MAKASLI İLK 3 PARİTE (Havuz: 25 Koin) ---")
+                print("\n🔥 --- EN YÜKSEK MAKASLI İLK 3 PARİTE (Çift Onay Aktif) ---")
                 for f in aktif_firsatlar[:3]:
+                    onay_notu = f" [Teyit: {f['onay_durum']}/2]" if f['onay_durum'] > 0 else ""
                     if f["makas"] >= 0:
-                        print(f"📊 [İZLEME] {f['symbol']} Makas: +%{f['makas']:.3f} | Sp: {f['sp']} | Fu: {f['fu']}")
+                        print(f"📊 [İZLEME] {f['symbol']} Makas: +%{f['makas']:.3f} | Sp: {f['sp']} | Fu: {f['fu']}{onay_notu}")
                     else:
-                        print(f"🔻 [İZLEME] {f['symbol']} Makas: -%{abs(f['makas']):.3f} | Sp: {f['sp']} | Fu: {f['fu']}")
+                        print(f"🔻 [İZLEME] {f['symbol']} Makas: -%{abs(f['makas']):.3f} | Sp: {f['sp']} | Fu: {f['fu']}{onay_notu}")
                 print("---------------------------------------------------------")
                             
         except Exception as e: 
             print(f"❌ Döngü hatası: {e}")
+            traceback.print_exc()
         time.sleep(1.0) 
 
 if __name__ == "__main__":
-    # 🎯 25 Koinli Likit Havuz
     SYMBOLS = [
         "dydxusdt", "opusdt", "arbusdt", "ldousdt", "tiausdt", 
         "solusdt", "avaxusdt", "linkusdt", "suiusdt", "ethusdt", 
@@ -322,5 +372,5 @@ if __name__ == "__main__":
     
     time.sleep(4.0) 
     
-    telegram_bildir("🎯 <b>25 Parite & 10/10$ Ayarlı Çekirdek Bot Başlatıldı!</b>")
+    telegram_bildir("🎯 <b>Güvenli Çift Onay Motoru Devreye Alındı! Bot Başlatıldı.</b>")
     arbitraj_tarama_dongusu()
