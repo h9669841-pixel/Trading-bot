@@ -98,7 +98,7 @@ def kontrollu_coin_ekle(coin_adi):
         # 3. Kontrol: Likidite & Hacim (Son 24 saatlik hacim > 1,000,000 USDT)
         ticker_24h = client.get_ticker(symbol=coin_upper)
         hacim_usdt = float(ticker_24h.get('quoteVolume', 0))
-        if hacim_usdt < 900000.0:
+        if hacim_usdt < 850000.0:
             print(f"⚠️ {coin_upper} Hacmi yetersiz ({hacim_usdt/1000:,.0f}K USDT). Güvenlik için elendi.")
             return False
 
