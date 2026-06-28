@@ -35,35 +35,29 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY)
 
-# --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
-GIRIS_MAKAS_YUZDE = 1.50       
+# --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI (USDC TABANLI) ---
+GIRIS_MAKAS_YUZDE = 0.50       
 CIKIS_MAKAS_YUZDE = 0.05       
 
-SPOT_BAKIYE = 11.0  
-FUTURES_BAKIYE = 11.0  
+SPOT_BAKIYE = 11.0          # 11 USDC
+FUTURES_BAKIYE = 11.0        # 11 USDC
 KALDIRAC = 1  
 
 SPOT_FEE_RATE = 0.0750 / 100
 FUTURES_FEE_RATE = 0.0450 / 100
 
-# 🎯 [GENİŞLETİLMİŞ HAVUZ] - Tam 50 Adet En Yüksek Hacimli Arbitraj Koini
+# 🎯 [USDC HAVUZU] - En Yüksek Hacimli USDC Pariteleri
 ADAY_SYMBOLS = [
-    # --- Mevcut Güvenli Koinler (25 Adet) ---
-    "dydxusdt", "opusdt", "arbusdt", "ldousdt", "tiausdt", 
-    "solusdt", "avaxusdt", "linkusdt", "suiusdt", "ethusdt", 
-    "bnbusdt", "xrpusdt", "adausdt", "dotusdt", "maticusdt",
-    "btcusdt", "dogeusdt", "shibusdt", "nearusdt", "ftmusdt",
-    "atomusdt", "ltcusdt", "uniusdt", "aptusdt", "filusdt",
-    
-    # --- Yeni Eklenen Yüksek Hacimli Koinler (25 Adet) ---
-    "injusdt", "seiusdt", "fetusdt", "renderusdt", "flokusdt",
-    "pepeusdt", "bonkusdt", "wifusdt", "jupusdt", "pythusdt",
-    "avaxusdt", "galadusdt", "grtusdt", "avaxusdt", "stxusdt",
-    "imxusdt", "rndrusdt", "gmtusdt", "apeusdt", "axsusdt",
-    "sandusdt", "manausdt", "chzusdt", "etcusdt", "vetusdt"
+    "btcusdc", "ethusdc", "solusdc", "xrpusdc", "adausdc", 
+    "bnbusdc", "dogeusdc", "linkusdc", "avaxusdc", "dotusdc", 
+    "maticusdc", "shibusdc", "nearusdc", "ftmusdc", "atomusdt", 
+    "ltcusdc", "uniusdc", "aptusdc", "filusdc", "suiusdc",
+    "opusdc", "arbusdc", "ldousdc", "tiausdc", "injusdc",
+    "seiusdc", "fetusdc", "renderusdc", "jupusdc", "pythusdc",
+    "chzusdc", "etcusdc", "vetusdc", "gmtusdc", "apeusdc"
 ]
 
-# Çift kayıtları (varsa) temizlemek için akıllı filtreleme
+# Çift kayıtları temizle
 ADAY_SYMBOLS = list(set(ADAY_SYMBOLS))
 
 SYMBOLS = [] 
@@ -75,7 +69,7 @@ FUTURES_HASSASIYETLERI = {}
 # 🔒 Veri Güvenlik Kilidi
 data_lock = threading.Lock()
 
-# --- 🛡️ DİNAMİK VE KONTROLLÜ COIN EKLEME MOTORU ---
+# --- 🛡️ DİNAMİK VE KONTROLLÜ COIN EKLEME MOTORU (USDC) ---
 def kontrollu_coin_ekle(coin_adi):
     coin_lower = coin_adi.lower().strip()
     coin_upper = coin_lower.upper()
@@ -95,11 +89,11 @@ def kontrollu_coin_ekle(coin_adi):
         except Exception:
             return False
             
-        # 3. Kontrol: Likidite & Hacim (Son 24 saatlik hacim > 1,000,000 USDT)
+        # 3. Kontrol: Likidite & Hacim (Son 24 saatlik hacim > 1,000,000 USDC)
         ticker_24h = client.get_ticker(symbol=coin_upper)
-        hacim_usdt = float(ticker_24h.get('quoteVolume', 0))
-        if hacim_usdt < 850000.0:
-            print(f"⚠️ {coin_upper} Hacmi yetersiz ({hacim_usdt/1000:,.0f}K USDT). Güvenlik için elendi.")
+        hacim_usdc = float(ticker_24h.get('quoteVolume', 0))
+        if hacim_usdc < 1000000.0:
+            print(f"⚠️ {coin_upper} Hacmi yetersiz ({hacim_usdc/1000:,.0f}K USDC). Güvenlik için elendi.")
             return False
 
         # Lot filtre hassasiyetini çek
@@ -116,7 +110,7 @@ def kontrollu_coin_ekle(coin_adi):
             piyasa_verisi[coin_lower] = {"spot_price": None, "futures_price": None}
             arbitraj_pozisyonlari[coin_lower] = {
                 "aktif": False, "giris_makas": 0.0, "spot_adet": 0.0, "futures_adet": 0.0,
-                "giris_onay_sayac": 0, "cikis_onay_sayac": 0, "giris_spot_usdt": 0.0, "giris_futures_usdt": 0.0
+                "giris_onay_sayac": 0, "cikis_onay_sayac": 0, "giris_spot_usdc": 0.0, "giris_futures_usdc": 0.0
             }
         return True
         
@@ -124,7 +118,7 @@ def kontrollu_coin_ekle(coin_adi):
         return False
 
 def senkronize_et_mevcut_pozisyonlar():
-    print("⏳ Binance Vadeli İşlemlerdeki aktif pozisyonlarınız taranıyor...")
+    print("⏳ Binance Vadeli İşlemlerdeki aktif USDC pozisyonlarınız taranıyor...")
     try:
         account_info = client.futures_account()
         positions = account_info.get("positions", [])
@@ -138,15 +132,16 @@ def senkronize_et_mevcut_pozisyonlar():
                 amt = float(pos.get("positionAmt", 0))
                 notional_degeri = abs(float(pos.get("notional", 0)))
                 
+                # 5 USDC üzerindeki pozisyonları kilitle
                 if amt != 0 and notional_degeri >= 5.0:
                     v_adet = abs(amt)
                     arbitraj_pozisyonlari[symbol_lower].update({
                         "aktif": True, "giris_makas": GIRIS_MAKAS_YUZDE, "spot_adet": v_adet, "futures_adet": v_adet,
-                        "giris_onay_sayac": 0, "cikis_onay_sayac": 0, "giris_spot_usdt": SPOT_BAKIYE, "giris_futures_usdt": FUTURES_BAKIYE
+                        "giris_onay_sayac": 0, "cikis_onay_sayac": 0, "giris_spot_usdc": SPOT_BAKIYE, "giris_futures_usdc": FUTURES_BAKIYE
                     })
                     acik_sayac += 1
-                    print(f"⚠️ AKTİF POZİSYON KİLİTLENDİ: {symbol_upper} ({notional_degeri:.2f} USDT büyüklüğünde).")
-        print(f"✅ Filtreleme tamamlandı. Toplam {acik_sayac} gerçek pozisyon başarıyla koruma altına alındı.")
+                    print(f"⚠️ AKTİF POZİSYON KİLİTLENDİ: {symbol_upper} ({notional_degeri:.2f} USDC büyüklüğünde).")
+        print(f"✅ Filtreleme tamamlandı. Toplam {acik_sayac} gerçek USDC pozisyonu koruma altına alındı.")
     except Exception as e:
         print(f"❌ Pozisyonlar senkronize edilirken hata: {e}. Bot boş hafızayla başlıyor.")
 
@@ -174,10 +169,10 @@ def telegram_bildir(mesaj):
 
 def net_kar_hesapla(giris_makas, kapanis_makas):
     brut_oran_farki = giris_makas - kapanis_makas
-    brut_kazanc_usdt = SPOT_BAKIYE * (brut_oran_farki / 100)
-    toplam_kesinti_usdt = ((SPOT_BAKIYE * SPOT_FEE_RATE) * 2) + ((FUTURES_BAKIYE * FUTURES_FEE_RATE) * 2)
-    net_kazanc_usdt = brut_kazanc_usdt - toplam_kesinti_usdt
-    return brut_kazanc_usdt, toplam_kesinti_usdt, net_kazanc_usdt
+    brut_kazanc_usdc = SPOT_BAKIYE * (brut_oran_farki / 100)
+    toplam_kesinti_usdc = ((SPOT_BAKIYE * SPOT_FEE_RATE) * 2) + ((FUTURES_BAKIYE * FUTURES_FEE_RATE) * 2)
+    net_kazanc_usdc = brut_kazanc_usdc - toplam_kesinti_usdc
+    return brut_kazanc_usdc, toplam_kesinti_usdc, net_kazanc_usdc
 
 # --- 🚀 EMİR MOTORLARI ---
 def _hizli_emir_gonder_spot(coin_label, quantity, sonuclar):
@@ -207,7 +202,7 @@ def execute_arbitrage_entry(symbol, spot_price, futures_price):
         raw_futures_qty = (FUTURES_BAKIYE / KALDIRAC) / futures_price
         
         tahmini_notional = raw_futures_qty * KALDIRAC * futures_price
-        if tahmini_notional < 5.1: return False, 0, 0, 0, 0
+        if tahmini_notional < 5.1: return False, 0, 0, 0, 0 # Minimum 5.1 USDC kontrolü
         
         spot_quantity = float(int(raw_spot_qty * (10 ** spot_precision))) / (10 ** spot_precision) if spot_precision > 0 else int(raw_spot_qty)
         futures_quantity = float(int(raw_futures_qty * (10 ** futures_precision))) / (10 ** futures_precision) if futures_precision > 0 else int(raw_futures_qty)
@@ -230,10 +225,10 @@ def execute_arbitrage_entry(symbol, spot_price, futures_price):
                 except Exception: pass
             return False, 0, 0, 0, 0
             
-        gercek_spot_usdt = float(emir_sonuclari['spot'].get('cummulativeQuoteQty', SPOT_BAKIYE))
-        gercek_futures_usdt = futures_quantity * futures_price
+        gercek_spot_usdc = float(emir_sonuclari['spot'].get('cummulativeQuoteQty', SPOT_BAKIYE))
+        gercek_futures_usdc = futures_quantity * futures_price
         
-        return True, spot_quantity, futures_quantity, gercek_spot_usdt, gercek_futures_usdt
+        return True, spot_quantity, futures_quantity, gercek_spot_usdc, gercek_futures_usdc
     except Exception as e:
         print(f"❌ Giriş Hatası: {e}"); return False, 0, 0, 0, 0
 
@@ -251,12 +246,12 @@ def execute_arbitrage_exit(symbol, spot_qty, futures_qty):
         
         t1.start(); t2.start(); t1.join(); t2.join()
         
-        cikis_spot_usdt = float(emir_sonuclari['spot'].get('cummulativeQuoteQty', 0)) if 'spot' in emir_sonuclari else 0.0
+        cikis_spot_usdc = float(emir_sonuclari['spot'].get('cummulativeQuoteQty', 0)) if 'spot' in emir_sonuclari else 0.0
         with data_lock:
             f_price = piyasa_verisi[symbol]["futures_price"] or 0
-        cikis_futures_usdt = futures_qty * f_price
+        cikis_futures_usdc = futures_qty * f_price
             
-        return True, cikis_spot_usdt, cikis_futures_usdt
+        return True, cikis_spot_usdc, cikis_futures_usdc
     except Exception as e:
         print(f"❌ Kritik Çıkış Hatası: {e}"); return False, 0, 0
 
@@ -309,30 +304,30 @@ def arbitraj_tarama_dongusu():
                                 _, _, net = net_kar_hesapla(anlik_makas, CIKIS_MAKAS_YUZDE)
                                 if net <= 0: {pos.update({"giris_onay_sayac": 0})}; continue
                                     
-                                basarili, s_qty, f_qty, sp_usdt, fu_usdt = execute_arbitrage_entry(symbol, spot_fiyat, futures_fiyat)
+                                basarili, s_qty, f_qty, sp_usdc, fu_usdc = execute_arbitrage_entry(symbol, spot_fiyat, futures_fiyat)
                                 if basarili:
-                                    pos.update({"aktif": True, "giris_makas": anlik_makas, "spot_adet": s_qty, "futures_adet": f_qty, "giris_onay_sayac": 0, "giris_spot_usdt": sp_usdt, "giris_futures_usdt": fu_usdt})
-                                    telegram_bildir(f"🤖 <b>{coin_label} İŞLEME GİRİLDİ (+)</b>\n⚡ Maliyet: {sp_usdt + fu_usdt:.2f} USDT")
+                                    pos.update({"aktif": True, "giris_makas": anlik_makas, "spot_adet": s_qty, "futures_adet": f_qty, "giris_onay_sayac": 0, "giris_spot_usdc": sp_usdc, "giris_futures_usdc": fu_usdc})
+                                    telegram_bildir(f"🤖 <b>{coin_label} İŞLEME GİRİLDİ (+)</b>\n⚡ Maliyet: {sp_usdc + fu_usdc:.2f} USDC")
                         else: pos["giris_onay_sayac"] = 0
                     else:
                         pos["giris_onay_sayac"] = 0
                         if anlik_makas <= CIKIS_MAKAS_YUZDE:
                             pos["cikis_onay_sayac"] += 1
                             if pos["cikis_onay_sayac"] >= 2:
-                                basarili_cikis, cikis_sp_usdt, cikis_fu_usdt = execute_arbitrage_exit(symbol, pos["spot_adet"], pos["futures_adet"])
+                                basarili_cikis, cikis_sp_usdc, cikis_fu_usdc = execute_arbitrage_exit(symbol, pos["spot_adet"], pos["futures_adet"])
                                 if basarili_cikis:
-                                    spot_farki = cikis_sp_usdt - pos["giris_spot_usdt"]
-                                    futures_farki = pos["giris_futures_usdt"] - cikis_fu_usdt
+                                    spot_farki = cikis_sp_usdc - pos["giris_spot_usdc"]
+                                    futures_farki = pos["giris_futures_usdc"] - cikis_fu_usdc
                                     gercek_net_kar = spot_farki + futures_farki
                                     
-                                    durum = f"🟢 <b>KÂR:</b> +{gercek_net_kar:.4f} USDT" if gercek_net_kar > 0 else f"🔴 <b>ZARAR:</b> {gercek_net_kar:.4f} USDT"
+                                    durum = f"🟢 <b>KÂR:</b> +{gercek_net_kar:.4f} USDC" if gercek_net_kar > 0 else f"🔴 <b>ZARAR:</b> {gercek_net_kar:.4f} USDC"
                                     telegram_bildir(f"🤝 <b>{coin_label} İşlemi Kapandı</b>\n{durum}")
                                     pos["aktif"] = False; pos["cikis_onay_sayac"] = 0
                         else: pos["cikis_onay_sayac"] = 0
             
             if aktif_firsatlar:
                 aktif_firsatlar.sort(key=lambda x: x["makas"], reverse=True)
-                print("\n🔥 --- EN YÜKSEK MAKASLI İLK 3 PARİTE ---")
+                print("\n🔥 --- EN YÜKSEK MAKASLI İLK 3 USDC PARİTESİ ---")
                 for f in aktif_firsatlar[:3]:
                     onay_notu = f" [Teyit: {f['onay_durum']}/2]" if f['onay_durum'] > 0 else ""
                     print(f"📊 [İZLEME] {f['symbol']} Makas: +%{f['makas']:.3f} | Sp: {f['sp']} | Fu: {f['fu']}{onay_notu}")
@@ -342,11 +337,11 @@ def arbitraj_tarama_dongusu():
         time.sleep(1.0) 
 
 if __name__ == "__main__":
-    print("⏳ 50 Aday coin havuzu filtreleniyor...")
+    print("⏳ 35 Aday USDC coin havuzu filtreleniyor...")
     for coin in ADAY_SYMBOLS:
         kontrollu_coin_ekle(coin)
         
-    print(f"🚀 Filtreleme Bitti! Toplam {len(SYMBOLS)} adet güvenli pariteyle motor kuruldu.")
+    print(f"🚀 Filtreleme Bitti! Toplam {len(SYMBOLS)} adet güvenli USDC paritesiyle motor kuruldu.")
     
     tum_futures_hassasiyetlerini_yukle()
     senkronize_et_mevcut_pozisyonlar()
@@ -356,5 +351,5 @@ if __name__ == "__main__":
     threading.Thread(target=start_multi_futures_ws, daemon=True).start()
     
     time.sleep(4.0) 
-    telegram_bildir(f"🎯 <b>50 Parite Kapasiteli Bot Başlatıldı! Aktif Koin Sayısı: {len(SYMBOLS)}</b>")
+    telegram_bildir(f"🎯 <b>USDC Tabanlı Bot Başlatıldı! Aktif Koin Sayısı: {len(SYMBOLS)}</b>")
     arbitraj_tarama_dongusu()
