@@ -3,25 +3,7 @@ import json
 import time
 import requests
 import threading
-import socket
-from urllib.parse import urlparse, unquote
 from websocket import WebSocketApp
-
-# --- 🌐 GLOBAL SOCKS5 ENJEKSİYONU ---
-PROXY_URL = os.environ.get("PROXY_URL")
-if PROXY_URL:
-    try:
-        import socks
-        parsed_proxy = urlparse(PROXY_URL)
-        proxy_host = parsed_proxy.hostname
-        proxy_port = parsed_proxy.port
-        proxy_user = unquote(parsed_proxy.username) if parsed_proxy.username else None
-        proxy_pass = unquote(parsed_proxy.password) if parsed_proxy.password else None
-        print(f"🌐 SOCKS5 Protokolü Çekirdeğe Enjekte Ediliyor: {proxy_host}:{proxy_port}")
-        socks.set_default_proxy(socks.SOCKS5, addr=proxy_host, port=proxy_port, username=proxy_user, password=proxy_pass, rdns=True)
-        socket.socket = socks.socksocket
-    except ImportError:
-        print("❌ HATA: PySocks eksik.")
 
 # --- 🔑 TELEGRAM ALARM AYARLARI ---
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -160,7 +142,7 @@ def arbitraj_tarama_dongusu():
         time.sleep(1.0) 
 
 if __name__ == "__main__":
-    print(f"🚀 {len(SYMBOLS)} parite için fiyat takip motoru kuruldu.")
+    print(f"🚀 {len(SYMBOLS)} parite için fiyatsal takip motoru kuruldu (Doğrudan Bağlantı).")
     
     print("⏳ WebSocket hatlarına bağlanılıyor...")
     threading.Thread(target=start_multi_spot_ws, daemon=True).start()
