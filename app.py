@@ -105,7 +105,7 @@ def arbitraj_tarama_dongusu():
     while True:
         try:
             aktif_firsatlar = []
-            su an = time.time()
+            su_an = time.time()
             
             with data_lock:
                 for symbol in SYMBOLS:
