@@ -10,7 +10,7 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 # --- 📊 ARBİTRAJ TAKİP AYARLARI ---
-GIRIS_MAKAS_YUZDE = 1.50       
+GIRIS_MAKAS_YUZDE = 10.50       
 TEYIT_ESIGI = 2  # Sinyal üretilmeden önce makasın kaç döngü boyunca eşikte kalması gerektiği
 
 # 🎯 Takip Edilecek En Yüksek Hacimli Arbitraj Koinleri
