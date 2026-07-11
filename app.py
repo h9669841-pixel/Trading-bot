@@ -60,7 +60,7 @@ ADAY_SYMBOLS = [
     "pepeusdt", "bonkusdt", "wifusdt", "jupusdt", "pythusdt",
     "galausdt", "grtusdt", "stxusdt", "imxusdt", "gmtusdt", 
     "apeusdt", "axsusdt", "sandusdt", "manausdt", "chzusdt", 
-    "etcusdt", "vetusdt"
+    "etcusdt", "vetusdt", "enausdt"
 ]
 
 ADAY_SYMBOLS = list(set(ADAY_SYMBOLS))
