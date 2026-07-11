@@ -3,9 +3,11 @@ import json
 import time
 import requests
 import threading
+import traceback
 import socket
 from binance.client import Client
 from binance.enums import *
+from binance.exceptions import BinanceAPIException
 from websocket import WebSocketApp
 
 # --- 🌐 GLOBAL SOCKS5 ENJEKSİYONU ---
@@ -33,32 +35,36 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY)
 
-# --- 📊 ARBİTRAJ DİNAMİK AYARLARI (AYARLANABİLİR SINIF) ---
-class BotConfig:
-    def __init__(self):
-        self.GIRIS_MAKAS_YUZDE = 1.50       
-        self.CIKIS_MAKAS_YUZDE = 0.05       
-        self.SPOT_BAKIYE = 11.0  
-        self.FUTURES_BAKIYE = 11.0  
-        self.KALDIRAC = 1  
-        self.SPOT_FEE_RATE = 0.0750 / 100
-        self.FUTURES_FEE_RATE = 0.0450 / 100
+# --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
+GIRIS_MAKAS_YUZDE = 10.50       
+CIKIS_MAKAS_YUZDE = 0.05       
 
-config = BotConfig()
+SPOT_BAKIYE = 11.0  
+FUTURES_BAKIYE = 11.0  
+KALDIRAC = 1  
 
-# 🎯 Güncellenmiş ve Temizlenmiş 50 Adet Yüksek Hacimli Arbitraj Koini
+SPOT_FEE_RATE = 0.0750 / 100
+FUTURES_FEE_RATE = 0.0450 / 100
+
+# 🎯 [GENİŞLETİLMİŞ HAVUZ] - Tam 50 Adet En Yüksek Hacimli Arbitraj Koini
 ADAY_SYMBOLS = [
+    # --- Mevcut Güvenli Koinler (25 Adet) ---
     "dydxusdt", "opusdt", "arbusdt", "ldousdt", "tiausdt", 
     "solusdt", "avaxusdt", "linkusdt", "suiusdt", "ethusdt", 
     "bnbusdt", "xrpusdt", "adausdt", "dotusdt", "maticusdt",
     "btcusdt", "dogeusdt", "shibusdt", "nearusdt", "ftmusdt",
     "atomusdt", "ltcusdt", "uniusdt", "aptusdt", "filusdt",
+    
+    # --- Yeni Eklenen Yüksek Hacimli Koinler (25 Adet) ---
     "injusdt", "seiusdt", "fetusdt", "renderusdt", "flokusdt",
     "pepeusdt", "bonkusdt", "wifusdt", "jupusdt", "pythusdt",
-    "galausdt", "grtusdt", "stxusdt", "imxusdt", "gmtusdt", 
-    "apeusdt", "axsusdt", "sandusdt", "manausdt", "chzusdt", 
-    "etcusdt", "vetusdt"
+    "avaxusdt", "galadusdt", "grtusdt", "avaxusdt", "stxusdt",
+    "imxusdt", "rndrusdt", "gmtusdt", "apeusdt", "axsusdt",
+    "sandusdt", "manausdt", "chzusdt", "etcusdt", "vetusdt"
 ]
+
+# Çift kayıtları (varsa) temizlemek için akıllı filtreleme
+ADAY_SYMBOLS = list(set(ADAY_SYMBOLS))
 
 SYMBOLS = [] 
 piyasa_verisi = {}
@@ -66,9 +72,10 @@ arbitraj_pozisyonlari = {}
 SPOT_HASSASIYETLERI = {}
 FUTURES_HASSASIYETLERI = {}
 
+# 🔒 Veri Güvenlik Kilidi
 data_lock = threading.Lock()
 
-# --- 🛡️ DİNAMİK COIN EKLEME MOTORU ---
+# --- 🛡️ DİNAMİK VE KONTROLLÜ COIN EKLEME MOTORU ---
 def kontrollu_coin_ekle(coin_adi):
     coin_lower = coin_adi.lower().strip()
     coin_upper = coin_lower.upper()
@@ -77,15 +84,25 @@ def kontrollu_coin_ekle(coin_adi):
         return True
         
     try:
+        # 1. Kontrol: Spot aktif mi?
         spot_info = client.get_symbol_info(coin_upper)
         if not spot_info or spot_info.get('status') != 'TRADING':
             return False
             
+        # 2. Kontrol: Vadeli aktif mi?
         try:
-            client.futures_change_leverage(symbol=coin_upper, leverage=config.KALDIRAC)
+            client.futures_change_leverage(symbol=coin_upper, leverage=KALDIRAC)
         except Exception:
             return False
+            
+        # 3. Kontrol: Likidite & Hacim (Son 24 saatlik hacim > 1,000,000 USDT)
+        ticker_24h = client.get_ticker(symbol=coin_upper)
+        hacim_usdt = float(ticker_24h.get('quoteVolume', 0))
+        if hacim_usdt < 850000.0:
+            print(f"⚠️ {coin_upper} Hacmi yetersiz ({hacim_usdt/1000:,.0f}K USDT). Güvenlik için elendi.")
+            return False
 
+        # Lot filtre hassasiyetini çek
         for f in spot_info['filters']:
             if f['filterType'] == 'LOT_SIZE':
                 step_size_str = str(f['stepSize']).rstrip('0')
@@ -102,6 +119,7 @@ def kontrollu_coin_ekle(coin_adi):
                 "giris_onay_sayac": 0, "cikis_onay_sayac": 0, "giris_spot_usdt": 0.0, "giris_futures_usdt": 0.0
             }
         return True
+        
     except Exception:
         return False
 
@@ -123,8 +141,8 @@ def senkronize_et_mevcut_pozisyonlar():
                 if amt != 0 and notional_degeri >= 5.0:
                     v_adet = abs(amt)
                     arbitraj_pozisyonlari[symbol_lower].update({
-                        "aktif": True, "giris_makas": config.GIRIS_MAKAS_YUZDE, "spot_adet": v_adet, "futures_adet": v_adet,
-                        "giris_onay_sayac": 0, "cikis_onay_sayac": 0, "giris_spot_usdt": config.SPOT_BAKIYE, "giris_futures_usdt": config.FUTURES_BAKIYE
+                        "aktif": True, "giris_makas": GIRIS_MAKAS_YUZDE, "spot_adet": v_adet, "futures_adet": v_adet,
+                        "giris_onay_sayac": 0, "cikis_onay_sayac": 0, "giris_spot_usdt": SPOT_BAKIYE, "giris_futures_usdt": FUTURES_BAKIYE
                     })
                     acik_sayac += 1
                     print(f"⚠️ AKTİF POZİSYON KİLİTLENDİ: {symbol_upper} ({notional_degeri:.2f} USDT büyüklüğünde).")
@@ -156,75 +174,10 @@ def telegram_bildir(mesaj):
 
 def net_kar_hesapla(giris_makas, kapanis_makas):
     brut_oran_farki = giris_makas - kapanis_makas
-    brut_kazanc_usdt = config.SPOT_BAKIYE * (brut_oran_farki / 100)
-    toplam_kesinti_usdt = ((config.SPOT_BAKIYE * config.SPOT_FEE_RATE) * 2) + ((config.FUTURES_BAKIYE * config.FUTURES_FEE_RATE) * 2)
+    brut_kazanc_usdt = SPOT_BAKIYE * (brut_oran_farki / 100)
+    toplam_kesinti_usdt = ((SPOT_BAKIYE * SPOT_FEE_RATE) * 2) + ((FUTURES_BAKIYE * FUTURES_FEE_RATE) * 2)
     net_kazanc_usdt = brut_kazanc_usdt - toplam_kesinti_usdt
     return brut_kazanc_usdt, toplam_kesinti_usdt, net_kazanc_usdt
-
-# --- 💬 TELEGRAM KONTROL ARAYÜZÜ (YENİ OZELLİK) ---
-def telegram_komut_dinleyici():
-    """Botun sizden gelen ayar komutlarını dinlemesini sağlar"""
-    if not TELEGRAM_TOKEN: return
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
-    last_update_id = 0
-    
-    # İlk açılışta eski mesajları erit
-    try:
-        r = requests.get(url, params={"timeout": 1}, timeout=5).json()
-        if r.get("result"): last_update_id = r["result"][-1]["update_id"]
-    except Exception: pass
-
-    print("💬 Telegram Canlı Kontrol Arayüzü Aktif.")
-    while True:
-        try:
-            r = requests.get(url, params={"offset": last_update_id + 1, "timeout": 10}, timeout=15).json()
-            for update in r.get("result", []):
-                last_update_id = update["update_id"]
-                message = update.get("message", {})
-                text = message.get("text", "").strip()
-                chat_id = str(message.get("chat", {}).get("id", ""))
-                
-                if chat_id != str(TELEGRAM_CHAT_ID): continue # Yabancı biri yazarsa engelle
-                
-                # Komutları Ayrıştır
-                if text == "/ayarlar":
-                    rapor = (
-                        f"📊 <b>Mevcut Bot Ayarları:</b>\n"
-                        f"• Giriş Makas: %{config.GIRIS_MAKAS_YUZDE}\n"
-                        f"• Çıkış Makas: %{config.CIKIS_MAKAS_YUZDE}\n"
-                        f"• Spot Bakiye: {config.SPOT_BAKIYE} USDT\n"
-                        f"• Vadeli Bakiye: {config.FUTURES_BAKIYE} USDT\n"
-                        f"• Kaldıraç: {config.KALDIRAC}x"
-                    )
-                    telegram_bildir(rapor)
-                    
-                elif text.startswith("/set_giris "):
-                    try:
-                        val = float(text.split(" ")[1])
-                        config.GIRIS_MAKAS_YUZDE = val
-                        telegram_bildir(f"✅ Giriş makas eşiği <b>%{val}</b> olarak güncellendi.")
-                    except: telegram_bildir("❌ Hatalı kullanım. Örn: /set_giris 1.85")
-                    
-                elif text.startswith("/set_bakiye "):
-                    try:
-                        val = float(text.split(" ")[1])
-                        config.SPOT_BAKIYE = val
-                        config.FUTURES_BAKIYE = val
-                        telegram_bildir(f"✅ İşlem bakiyeleri parite başına <b>{val} USDT</b> olarak güncellendi.")
-                    except: telegram_bildir("❌ Hatalı kullanım. Örn: /set_bakiye 20")
-                    
-                elif text.startswith("/set_kaldirac "):
-                    try:
-                        val = int(text.split(" ")[1])
-                        config.KALDIRAC = val
-                        # Tüm koinlerin kaldıracını borsada da güncelle
-                        for s in SYMBOLS:
-                            try: client.futures_change_leverage(symbol=s.upper(), leverage=val)
-                            except: pass
-                        telegram_bildir(f"✅ Kaldıraç oranı tüm paritelerde <b>{val}x</b> yapıldı.")
-                    except: telegram_bildir("❌ Hatalı kullanım. Örn: /set_kaldirac 3")
-                    
-        except Exception: time.sleep(2)
 
 # --- 🚀 EMİR MOTORLARI ---
 def _hizli_emir_gonder_spot(coin_label, quantity, sonuclar):
@@ -233,7 +186,8 @@ def _hizli_emir_gonder_spot(coin_label, quantity, sonuclar):
 
 def _hizli_emir_gonder_futures(coin_label, quantity, sonuclar):
     try: sonuclar['futures'] = client.futures_create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=quantity)
-    except Exception as e: sonuclar['futures_hata'] = f"{e}"
+    except BinanceAPIException as e: sonuclar['futures_hata'] = f"Binance Borsası Emri Reddetti -> Kod: {e.code}, Mesaj: {e.message}"
+    except Exception as e: sonuclar['futures_hata'] = f"Sistemsel Bağlantı Hatası -> {e}"
 
 def _hizli_cikis_gonder_spot(coin_label, quantity, sonuclar):
     try: sonuclar['spot'] = client.create_order(symbol=coin_label, side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=quantity)
@@ -249,10 +203,10 @@ def execute_arbitrage_entry(symbol, spot_price, futures_price):
         spot_precision = SPOT_HASSASIYETLERI.get(symbol.lower(), 2)
         futures_precision = FUTURES_HASSASIYETLERI.get(symbol.lower(), 2)
         
-        raw_spot_qty = config.SPOT_BAKIYE / spot_price
-        raw_futures_qty = (config.FUTURES_BAKIYE / config.KALDIRAC) / futures_price
+        raw_spot_qty = SPOT_BAKIYE / spot_price
+        raw_futures_qty = (FUTURES_BAKIYE / KALDIRAC) / futures_price
         
-        tahmini_notional = raw_futures_qty * config.KALDIRAC * futures_price
+        tahmini_notional = raw_futures_qty * KALDIRAC * futures_price
         if tahmini_notional < 5.1: return False, 0, 0, 0, 0
         
         spot_quantity = float(int(raw_spot_qty * (10 ** spot_precision))) / (10 ** spot_precision) if spot_precision > 0 else int(raw_spot_qty)
@@ -276,11 +230,12 @@ def execute_arbitrage_entry(symbol, spot_price, futures_price):
                 except Exception: pass
             return False, 0, 0, 0, 0
             
-        gercek_spot_usdt = float(emir_sonuclari['spot'].get('cummulativeQuoteQty', config.SPOT_BAKIYE))
-        gercek_futures_usdt = float(emir_sonuclari['futures'].get('cumQuote', futures_quantity * futures_price))
+        gercek_spot_usdt = float(emir_sonuclari['spot'].get('cummulativeQuoteQty', SPOT_BAKIYE))
+        gercek_futures_usdt = futures_quantity * futures_price
         
         return True, spot_quantity, futures_quantity, gercek_spot_usdt, gercek_futures_usdt
-    except Exception as e: return False, 0, 0, 0, 0
+    except Exception as e:
+        print(f"❌ Giriş Hatası: {e}"); return False, 0, 0, 0, 0
 
 def execute_arbitrage_exit(symbol, spot_qty, futures_qty):
     coin_label = symbol.upper()
@@ -297,39 +252,36 @@ def execute_arbitrage_exit(symbol, spot_qty, futures_qty):
         t1.start(); t2.start(); t1.join(); t2.join()
         
         cikis_spot_usdt = float(emir_sonuclari['spot'].get('cummulativeQuoteQty', 0)) if 'spot' in emir_sonuclari else 0.0
-        cikis_futures_usdt = float(emir_sonuclari['futures'].get('cumQuote', 0)) if 'futures' in emir_sonuclari else 0.0
+        with data_lock:
+            f_price = piyasa_verisi[symbol]["futures_price"] or 0
+        cikis_futures_usdt = futures_qty * f_price
             
         return True, cikis_spot_usdt, cikis_futures_usdt
-    except Exception as e: return False, 0, 0
+    except Exception as e:
+        print(f"❌ Kritik Çıkış Hatası: {e}"); return False, 0, 0
 
 # --- 🌐 WEBSOCKET SÜRÜCÜLERİ ---
 def on_spot_message(ws, message):
     data = json.loads(message)
-    symbol = data.get("stream", "").split("@")[0].lower()
+    stream_name = data.get("stream", "")
+    symbol = stream_name.split("@")[0].lower()
     with data_lock:
         if symbol in piyasa_verisi: piyasa_verisi[symbol]["spot_price"] = float(data.get("data", {}).get("p", 0))
 
 def on_futures_message(ws, message):
     data = json.loads(message)
-    symbol = data.get("stream", "").split("@")[0].lower()
+    stream_name = data.get("stream", "")
+    symbol = stream_name.split("@")[0].lower()
     with data_lock:
         if symbol in piyasa_verisi: piyasa_verisi[symbol]["futures_price"] = float(data.get("data", {}).get("p", 0))
 
 def start_multi_spot_ws():
     streams = "/".join([f"{s}@trade" for s in SYMBOLS])
-    while True:
-        try:
-            ws = WebSocketApp(f"wss://stream.binance.com:9443/stream?streams={streams}", on_message=on_spot_message)
-            ws.run_forever()
-        except Exception: time.sleep(5)
+    WebSocketApp(f"wss://stream.binance.com:9443/stream?streams={streams}", on_message=on_spot_message).run_forever()
 
 def start_multi_futures_ws():
     streams = "/".join([f"{s}@trade" for s in SYMBOLS])
-    while True:
-        try:
-            ws = WebSocketApp(f"wss://fstream.binance.com/stream?streams={streams}", on_message=on_futures_message)
-            ws.run_forever()
-        except Exception: time.sleep(5)
+    WebSocketApp(f"wss://fstream.binance.com/stream?streams={streams}", on_message=on_futures_message).run_forever()
 
 # --- 🎯 ARBİTRAJ MOTORU ---
 def arbitraj_tarama_dongusu():
@@ -351,10 +303,10 @@ def arbitraj_tarama_dongusu():
                         pos["cikis_onay_sayac"] = 0
                         aktif_firsatlar.append({"symbol": coin_label, "makas": anlik_makas, "sp": spot_fiyat, "fu": futures_fiyat, "onay_durum": pos["giris_onay_sayac"]})
                         
-                        if anlik_makas >= config.GIRIS_MAKAS_YUZDE:
+                        if anlik_makas >= GIRIS_MAKAS_YUZDE:
                             pos["giris_onay_sayac"] += 1
                             if pos["giris_onay_sayac"] >= 2:
-                                _, _, net = net_kar_hesapla(anlik_makas, config.CIKIS_MAKAS_YUZDE)
+                                _, _, net = net_kar_hesapla(anlik_makas, CIKIS_MAKAS_YUZDE)
                                 if net <= 0: {pos.update({"giris_onay_sayac": 0})}; continue
                                     
                                 basarili, s_qty, f_qty, sp_usdt, fu_usdt = execute_arbitrage_entry(symbol, spot_fiyat, futures_fiyat)
@@ -364,7 +316,7 @@ def arbitraj_tarama_dongusu():
                         else: pos["giris_onay_sayac"] = 0
                     else:
                         pos["giris_onay_sayac"] = 0
-                        if anlik_makas <= config.CIKIS_MAKAS_YUZDE:
+                        if anlik_makas <= CIKIS_MAKAS_YUZDE:
                             pos["cikis_onay_sayac"] += 1
                             if pos["cikis_onay_sayac"] >= 2:
                                 basarili_cikis, cikis_sp_usdt, cikis_fu_usdt = execute_arbitrage_exit(symbol, pos["spot_adet"], pos["futures_adet"])
@@ -380,23 +332,29 @@ def arbitraj_tarama_dongusu():
             
             if aktif_firsatlar:
                 aktif_firsatlar.sort(key=lambda x: x["makas"], reverse=True)
-                print(f"📊 [İZLEME] En Yüksek: {aktif_firsatlar[0]['symbol']} (%{aktif_firsatlar[0]['makas']:.2f})")
+                print("\n🔥 --- EN YÜKSEK MAKASLI İLK 3 PARİTE ---")
+                for f in aktif_firsatlar[:3]:
+                    onay_notu = f" [Teyit: {f['onay_durum']}/2]" if f['onay_durum'] > 0 else ""
+                    print(f"📊 [İZLEME] {f['symbol']} Makas: +%{f['makas']:.3f} | Sp: {f['sp']} | Fu: {f['fu']}{onay_notu}")
+                print("---------------------------------------------------------")
                             
         except Exception as e: print(f"❌ Döngü hatası: {e}")
         time.sleep(1.0) 
 
 if __name__ == "__main__":
-    FOR_LOOP_LIST = list(set([s.lower().strip() for s in ADAY_SYMBOLS]))
-    for coin in FOR_LOOP_LIST: kontrollu_coin_ekle(coin)
+    print("⏳ 50 Aday coin havuzu filtreleniyor...")
+    for coin in ADAY_SYMBOLS:
+        kontrollu_coin_ekle(coin)
         
+    print(f"🚀 Filtreleme Bitti! Toplam {len(SYMBOLS)} adet güvenli pariteyle motor kuruldu.")
+    
     tum_futures_hassasiyetlerini_yukle()
     senkronize_et_mevcut_pozisyonlar()
     
-    # 🧵 İŞ PARÇACIKLARI (THREADS) BAŞLATILIYOR
+    print("⏳ WebSocket hatlarına bağlanılıyor...")
     threading.Thread(target=start_multi_spot_ws, daemon=True).start()
     threading.Thread(target=start_multi_futures_ws, daemon=True).start()
-    threading.Thread(target=telegram_komut_dinleyici, daemon=True).start() # 👈 Yeni Dinleyici Sürücüsü
     
     time.sleep(4.0) 
-    telegram_bildir(f"🎯 <b>Dinamik Kontrollü Bot Başlatıldı! Active Koin: {len(SYMBOLS)}</b>\nAyarları görmek için bota <code>/ayarlar</code> yazabilirsiniz.")
+    telegram_bildir(f"🎯 <b>50 Parite Kapasiteli Bot Başlatıldı! Aktif Koin Sayısı: {len(SYMBOLS)}</b>")
     arbitraj_tarama_dongusu()
