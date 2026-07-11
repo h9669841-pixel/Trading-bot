@@ -1,7 +1,7 @@
 import os
 import json
 import time
-import requests
+import requests  # 👈 Eksik import eklendi
 import threading
 import traceback
 import socket
@@ -230,7 +230,6 @@ def telegram_komut_dinleyici():
                 elif text.startswith("/botu_durdur"):
                     if config.BOT_CALISIYOR:
                         config.BOT_CALISIYOR = False
-                        # Aktif soket hatlarını kapatarak veri akışını (kota harcamasını) sıfırlıyoruz
                         try:
                             if ws_spot_client: ws_spot_client.close()
                             if ws_futures_client: ws_futures_client.close()
@@ -242,7 +241,6 @@ def telegram_komut_dinleyici():
                 elif text.startswith("/botu_baslat"):
                     if not config.BOT_CALISIYOR:
                         config.BOT_CALISIYOR = True
-                        # Soket hatlarını yeni iş parçacıklarında temiz hatla baştan açıyoruz
                         threading.Thread(target=start_multi_spot_ws, daemon=True).start()
                         threading.Thread(target=start_multi_futures_ws, daemon=True).start()
                         telegram_bildir("🚀 <b>Bot Yeniden Başlatıldı!</b>\nVeri hatları bağlandı, arbitraj tarayıcısı aktif hale getirildi.")
@@ -390,7 +388,6 @@ def arbitraj_tarama_dongusu():
     global arbitraj_pozisyonlari
     while True:
         try:
-            # Bot durdurulduysa döngü beklemeye geçer ve işlem taraması yapmaz
             if not config.BOT_CALISIYOR:
                 time.sleep(2.0)
                 continue
@@ -414,7 +411,9 @@ def arbitraj_tarama_dongusu():
                             pos["giris_onay_sayac"] += 1
                             if pos["giris_onay_sayac"] >= 2:
                                 _, _, net = net_kar_hesapla(anlik_makas, config.CIKIS_MAKAS_YUZDE)
-                                if net <= 0: {pos.update({"giris_onay_sayac": 0})}; continue
+                                if net <= 0: 
+                                    pos["giris_onay_sayac"] = 0  # 👈 Syntax düzeltildi
+                                    continue
                                     
                                 basarili, s_qty, f_qty, sp_usdt, fu_usdt = execute_arbitrage_entry(symbol, spot_fiyat, futures_fiyat)
                                 if basarili:
