@@ -35,7 +35,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY)
 
-# --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI (AYARLANABİLİR YAPILDI) ---
+# --- 📊 ARBİTRAJ STRATEJİ VE HESAP AYARLARI ---
 class BotConfig:
     def __init__(self):
         self.GIRIS_MAKAS_YUZDE = 1.50       
@@ -45,6 +45,7 @@ class BotConfig:
         self.KALDIRAC = 1  
         self.SPOT_FEE_RATE = 0.0750 / 100
         self.FUTURES_FEE_RATE = 0.0450 / 100
+        self.BOT_CALISIYOR = True  # 👈 Botun aktiflik durumunu tutan bayrak
 
 config = BotConfig()
 
@@ -71,6 +72,8 @@ SPOT_HASSASIYETLERI = {}
 FUTURES_HASSASIYETLERI = {}
 
 data_lock = threading.Lock()
+ws_spot_client = None
+ws_futures_client = None
 
 # --- 🛡️ DİNAMİK VE KONTROLLÜ COIN EKLEME MOTORU ---
 def kontrollu_coin_ekle(coin_adi):
@@ -171,7 +174,25 @@ def net_kar_hesapla(giris_makas, kapanis_makas):
     net_kazanc_usdt = brut_kazanc_usdt - toplam_kesinti_usdt
     return brut_kazanc_usdt, toplam_kesinti_usdt, net_kazanc_usdt
 
-# --- 💬 TELEGRAM KOMUT DİNLEYİCİ ARAYÜZÜ (YENİ) ---
+# --- 🎛️ TELEGRAM MAVİ MENÜ BUTONLARINI OLUŞTURMA MOTORU ---
+def set_telegram_menu_commands():
+    if not TELEGRAM_TOKEN: return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setMyCommands"
+    
+    commands_payload = {
+        "commands": [
+            {"command": "ayarlar", "description": "📊 Güncel bot ayarlarını ve bakiyeleri raporlar"},
+            {"command": "botu_durdur", "description": "🛑 Botu duraklatır ve proxy kotasını dondurur"},
+            {"command": "botu_baslat", "description": "🚀 Botu uyandırır ve taramayı başlatır"},
+            {"command": "set_giris", "description": "📈 Giriş makas eşiğini değiştirir (Örn: /set_giris 1.8)"},
+            {"command": "set_bakiye", "description": "💰 İşlem yapılacak dolar miktarını değiştirir"},
+            {"command": "set_kaldirac", "description": "⚙️ Kaldıraç oranını günceller"}
+        ]
+    }
+    try: requests.post(url, json=commands_payload, timeout=5)
+    except Exception: pass
+
+# --- 💬 TELEGRAM KOMUT DİNLEYİCİ ARAYÜZÜ ---
 def telegram_komut_dinleyici():
     if not TELEGRAM_TOKEN: return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
@@ -193,9 +214,11 @@ def telegram_komut_dinleyici():
                 
                 if chat_id != str(TELEGRAM_CHAT_ID): continue
                 
-                if text == "/ayarlar":
+                if text.startswith("/ayarlar"):
+                    durum_str = "🟢 Çalışıyor" if config.BOT_CALISIYOR else "🛑 DURDURULDU (Kota Dostu Mod)"
                     rapor = (
-                        f"📊 <b>Anlık Bot Ayarları:</b>\n"
+                        f"📊 <b>Anlık Bot Raporu:</b>\n"
+                        f"• Durum: <b>{durum_str}</b>\n"
                         f"• Giriş Makas: %{config.GIRIS_MAKAS_YUZDE}\n"
                         f"• Çıkış Makas: %{config.CIKIS_MAKAS_YUZDE}\n"
                         f"• Spot Bakiye: {config.SPOT_BAKIYE} USDT\n"
@@ -204,22 +227,44 @@ def telegram_komut_dinleyici():
                     )
                     telegram_bildir(rapor)
                     
-                elif text.startswith("/set_giris "):
+                elif text.startswith("/botu_durdur"):
+                    if config.BOT_CALISIYOR:
+                        config.BOT_CALISIYOR = False
+                        # Aktif soket hatlarını kapatarak veri akışını (kota harcamasını) sıfırlıyoruz
+                        try:
+                            if ws_spot_client: ws_spot_client.close()
+                            if ws_futures_client: ws_futures_client.close()
+                        except: pass
+                        telegram_bildir("🛑 <b>Bot Başarıyla Durduruldu!</b>\nWebSocket bağlantıları kesildi ve veri akışı donduruldu. Şu an proxy kotanız harcanmıyor.")
+                    else:
+                        telegram_bildir("⚠️ Bot zaten durdurulmuş durumda.")
+                        
+                elif text.startswith("/botu_baslat"):
+                    if not config.BOT_CALISIYOR:
+                        config.BOT_CALISIYOR = True
+                        # Soket hatlarını yeni iş parçacıklarında temiz hatla baştan açıyoruz
+                        threading.Thread(target=start_multi_spot_ws, daemon=True).start()
+                        threading.Thread(target=start_multi_futures_ws, daemon=True).start()
+                        telegram_bildir("🚀 <b>Bot Yeniden Başlatıldı!</b>\nVeri hatları bağlandı, arbitraj tarayıcısı aktif hale getirildi.")
+                    else:
+                        telegram_bildir("⚠️ Bot zaten aktif olarak çalışıyor.")
+                    
+                elif text.startswith("/set_giris"):
                     try:
                         val = float(text.split(" ")[1])
                         config.GIRIS_MAKAS_YUZDE = val
                         telegram_bildir(f"✅ Giriş makas eşiği <b>%{val}</b> yapıldı.")
-                    except: telegram_bildir("❌ Hata! Örn: /set_giris 1.85")
+                    except: telegram_bildir("❌ Hata! Kullanım: <code>/set_giris 1.85</code>")
                     
-                elif text.startswith("/set_bakiye "):
+                elif text.startswith("/set_bakiye"):
                     try:
                         val = float(text.split(" ")[1])
                         config.SPOT_BAKIYE = val
                         config.FUTURES_BAKIYE = val
                         telegram_bildir(f"✅ İşlem bakiyeleri parite başına <b>{val} USDT</b> yapıldı.")
-                    except: telegram_bildir("❌ Hata! Örn: /set_bakiye 25")
+                    except: telegram_bildir("❌ Hata! Kullanım: <code>/set_bakiye 25</code>")
                     
-                elif text.startswith("/set_kaldirac "):
+                elif text.startswith("/set_kaldirac"):
                     try:
                         val = int(text.split(" ")[1])
                         config.KALDIRAC = val
@@ -227,7 +272,7 @@ def telegram_komut_dinleyici():
                             try: client.futures_change_leverage(symbol=s.upper(), leverage=val)
                             except: pass
                         telegram_bildir(f"✅ Kaldıraç oranı borsada <b>{val}x</b> olarak güncellendi.")
-                    except: telegram_bildir("❌ Hata! Örn: /set_kaldirac 2")
+                    except: telegram_bildir("❌ Hata! Kullanım: <code>/set_kaldirac 2</code>")
         except Exception: time.sleep(2)
 
 # --- 🚀 EMİR MOTORLARI ---
@@ -311,8 +356,9 @@ def execute_arbitrage_exit(symbol, spot_qty, futures_qty):
     except Exception as e:
         print(f"❌ Kritik Çıkış Hatası: {e}"); return False, 0, 0
 
-# --- 🌐 WEBSOCKET SÜRÜCÜLERİ ---
+# --- 🌐 WEBSOCKET SÜRÜCÜLERI ---
 def on_spot_message(ws, message):
+    if not config.BOT_CALISIYOR: return
     data = json.loads(message)
     stream_name = data.get("stream", "")
     symbol = stream_name.split("@")[0].lower()
@@ -320,6 +366,7 @@ def on_spot_message(ws, message):
         if symbol in piyasa_verisi: piyasa_verisi[symbol]["spot_price"] = float(data.get("data", {}).get("p", 0))
 
 def on_futures_message(ws, message):
+    if not config.BOT_CALISIYOR: return
     data = json.loads(message)
     stream_name = data.get("stream", "")
     symbol = stream_name.split("@")[0].lower()
@@ -327,18 +374,27 @@ def on_futures_message(ws, message):
         if symbol in piyasa_verisi: piyasa_verisi[symbol]["futures_price"] = float(data.get("data", {}).get("p", 0))
 
 def start_multi_spot_ws():
+    global ws_spot_client
     streams = "/".join([f"{s}@trade" for s in SYMBOLS])
-    WebSocketApp(f"wss://stream.binance.com:9443/stream?streams={streams}", on_message=on_spot_message).run_forever()
+    ws_spot_client = WebSocketApp(f"wss://stream.binance.com:9443/stream?streams={streams}", on_message=on_spot_message)
+    ws_spot_client.run_forever()
 
 def start_multi_futures_ws():
+    global ws_futures_client
     streams = "/".join([f"{s}@trade" for s in SYMBOLS])
-    WebSocketApp(f"wss://fstream.binance.com/stream?streams={streams}", on_message=on_futures_message).run_forever()
+    ws_futures_client = WebSocketApp(f"wss://fstream.binance.com/stream?streams={streams}", on_message=on_futures_message)
+    ws_futures_client.run_forever()
 
 # --- 🎯 ARBİTRAJ MOTORU ---
 def arbitraj_tarama_dongusu():
     global arbitraj_pozisyonlari
     while True:
         try:
+            # Bot durdurulduysa döngü beklemeye geçer ve işlem taraması yapmaz
+            if not config.BOT_CALISIYOR:
+                time.sleep(2.0)
+                continue
+                
             aktif_firsatlar = []
             with data_lock:
                 for symbol in SYMBOLS:
@@ -393,6 +449,8 @@ def arbitraj_tarama_dongusu():
         time.sleep(1.0) 
 
 if __name__ == "__main__":
+    set_telegram_menu_commands()
+    
     print("⏳ 50 Aday coin havuzu filtreleniyor...")
     for coin in ADAY_SYMBOLS:
         kontrollu_coin_ekle(coin)
@@ -405,8 +463,8 @@ if __name__ == "__main__":
     print("⏳ WebSocket hatlarına bağlanılıyor...")
     threading.Thread(target=start_multi_spot_ws, daemon=True).start()
     threading.Thread(target=start_multi_futures_ws, daemon=True).start()
-    threading.Thread(target=telegram_komut_dinleyici, daemon=True).start() # 👈 Sizi dinleyen yeni iş parçacığı
+    threading.Thread(target=telegram_komut_dinleyici, daemon=True).start()
     
     time.sleep(4.0) 
-    telegram_bildir(f"🎯 <b>Dinamik Ayarlı Bot Başlatıldı! Aktif Koin Sayısı: {len(SYMBOLS)}</b>\nAyarları canlı yönetmek için bota <code>/ayarlar</code> yazabilirsiniz.")
+    telegram_bildir(f"🎯 <b>Dinamik Ayarlı Bot Başlatıldı! Aktif Koin Sayısı: {len(SYMBOLS)}</b>\nKotanızı korumak istediğinizde sol alttaki menüden <code>/botu_durdur</code> komutunu verebilirsiniz.")
     arbitraj_tarama_dongusu()
