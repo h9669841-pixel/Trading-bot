@@ -307,7 +307,7 @@ def canlı_radar_dongusu():
                         continue
                     
                     if pos["aktif"]:
-                        continue # Halihazırda açık pozisyonu olanı radara dahil etme
+                        continue 
 
                     anlik_fiyat = v["anlik_fiyat"]
                     kapanislar_canli = v["kapanislar"] + [anlik_fiyat]
@@ -319,19 +319,16 @@ def canlı_radar_dongusu():
                     if not fib or "fib_618" not in fib: 
                         continue
 
-                    # LONG skoru hesaplama (Fiyat alt banta ne kadar yakın, RSI dipte mi ve Fib'e mesafesi ne?)
                     dist_bb_long = max(0, anlik_fiyat - alt_bant) / (anlik_fiyat if anlik_fiyat > 0 else 1)
                     dist_fib_long = min(abs(anlik_fiyat - fib.get("fib_618", 0)), abs(anlik_fiyat - fib.get("fib_786", 0))) / anlik_fiyat
                     rsi_score_long = max(0, current_rsi - config.RSI_ASTR_SATIM)
                     long_yakınlık_skoru = dist_bb_long + dist_fib_long + (rsi_score_long / 100)
 
-                    # SHORT skoru hesaplama (Fiyat üst banta ne kadar yakın, RSI tepede mi ve Fib'e mesafesi ne?)
                     dist_bb_short = max(0, ust_bant - anlik_fiyat) / (anlik_fiyat if anlik_fiyat > 0 else 1)
                     dist_fib_short = min(abs(anlik_fiyat - fib.get("fib_236", 0)), abs(anlik_fiyat - fib.get("fib_382", 0))) / anlik_fiyat
                     rsi_score_short = max(0, config.RSI_ASTR_ALIM - current_rsi)
                     short_yakınlık_skoru = dist_bb_short + dist_fib_short + (rsi_score_short / 100)
 
-                    # Hangi yönün stratejisine daha yakınsa onu adaya ekle
                     if long_yakınlık_skoru < short_yakınlık_skoru:
                         radar_adaylari.append({
                             "symbol": symbol.upper(),
@@ -349,7 +346,6 @@ def canlı_radar_dongusu():
                             "skor": short_yakınlık_skoru
                         })
 
-            # Skoru en düşük olan (yani strateji bariyerlerine en yakın olan) ilk 3 coini seç
             en_yakin_uclü = sorted(radar_adaylari, key=lambda x: x["skor"])[:3]
 
             if len(en_yakin_uclü) >= 3:
@@ -366,7 +362,6 @@ def canlı_radar_dongusu():
 # --- 🎯 1 SANİYELİK KOTA DOSTU HİBRİT MOTOR ---
 def hibrit_tarama_dongusu():
     last_kline_sync = 0
-    # Canlı radar yapısını arka planda başlatıyoruz
     threading.Thread(target=canlı_radar_dongusu, daemon=True).start()
 
     while True:
@@ -442,7 +437,7 @@ def hibrit_tarama_dongusu():
                                     telegram_bildir(f"🚀 <b>{symbol.upper()} SHORT {islem_tipi}!</b>\nTetikleyici: {neden}\nFiyat: {anlik_fiyat}\nMevcut RSI: {current_rsi:.1f}")
                                 except Exception: pass
                     
-                    # 🎯 ÇIKIŞ MANTIĞI (KOMİSYON KORUMALI)
+                    # 🎯 ÇIKIŞ MANTIĞI
                     if pos["aktif"]:
                         maliyet = pos["giris_fiyati"]
                         if maliyet <= 0: continue
@@ -475,3 +470,39 @@ def hibrit_tarama_dongusu():
         except Exception as e:
             print(f"❌ Ana döngü hatası: {e}")
             time.sleep(1.0)
+
+# --- 🚀 ANA ÇALIŞTIRICI SİSTEM (MAIN GENERATOR) ---
+if __name__ == "__main__":
+    print("🎬 Bot başlatılıyor...")
+    
+    # 1. En yüksek hacimli ilk 100 coini Binance vadeli işlemlerden dinamik çek
+    hacimli_coinler = ilk_100_hacimli_coin_bul()
+    print(f"📋 İlk etapta {len(hacimli_coinler)} adet hacimli coin tespit edildi.")
+    
+    # 2. Coinleri tek tek kaldıraç, izole mod ve hassasiyet süzgecinden geçirerek sisteme kaydet
+    eklenen_sayac = 0
+    for c in hacimli_coinler:
+        if kontrollu_coin_ekle(c):
+            eklenen_sayac += 1
+            
+    print(f"✅ Filtreleri geçen {eklenen_sayac} coin tarama listesine eklendi.")
+    
+    # 3. Geçmiş mum verilerini (15m klines) ve Binance üzerindeki mevcut açık pozisyonları senkronize et
+    tüm_gecmis_verileri_guncelle()
+    acik_pozisyonlari_binanceden_guncelle()
+    
+    # 4. Asenkron Arka Plan Thread Yapılarını Ateşle
+    # a) Telegram komut dinleyicisi
+    if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
+        threading.Thread(target=telegram_gelen_mesaj_dinleyici, daemon=True).start()
+        telegram_bildir("🤖 <b>İzole Avcı Botu Railway Üzerinde Başarıyla Başlatıldı!</b>")
+    
+    # b) Binance Hesap Verisi Değişim WebSocket'i (Account Update)
+    threading.Thread(target=start_user_data_ws, daemon=True).start()
+    
+    # c) Canlı Fiyat Takip (Market Ticker) WebSocket'i
+    threading.Thread(target=start_market_data_ws, daemon=True).start()
+    
+    # 5. Ana Motoru (Tarama ve Emir Döngüsünü) Ana Thread Üzerinde Çalıştır
+    print("⚡ Tüm sistemler aktif. Tarama motoru ve asenkron Canlı Radar başlatıldı.")
+    hibrit_tarama_dongusu()
