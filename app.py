@@ -94,7 +94,7 @@ def rsi_hesapla(kapanislar, periyod=14):
         ort_kazanc = (ort_kazanc * (periyod - 1) + kazanclar[i]) / periyod
         ort_kayip = (ort_kayip * (periyod - 1) + kayiplar[i]) / periyod
         
-    if ort_kayip == 0: return 100.0
+    if ort_kayip <= 0.00000001: return 100.0  # 🛡️ Sıfıra bölünme koruması artırıldı
     return 100.0 - (100.0 / (1.0 + (ort_kazanc / ort_kayip)))
 
 def bollinger_bands(kapanislar, periyod=20, standart_sapma=2):
@@ -102,6 +102,7 @@ def bollinger_bands(kapanislar, periyod=20, standart_sapma=2):
     veri = kapanislar[-periyod:]
     orta_bant = sum(veri) / periyod
     varyans = sum((x - orta_bant) ** 2 for x in veri) / periyod
+    if varyans <= 0: varyans = 0.00000001  # 🛡️ Sıfır varyans koruması
     ust_bant = orta_bant + (standart_sapma * math.sqrt(varyans))
     alt_bant = orta_bant - (standart_sapma * math.sqrt(varyans))
     return ust_bant, orta_bant, alt_bant
@@ -111,6 +112,7 @@ def fibonacci_seviyelerini_hesapla(yuksekler, dusukler):
     en_yuksek = max(yuksekler[-40:])
     en_dusuk = min(dusukler[-40:])
     fark = en_yuksek - en_dusuk
+    if fark <= 0: fark = 0.00000001  # 🛡️ Sıfır yatay piyasa fark koruması
     return {
         "fib_618": en_yuksek - (0.618 * fark),
         "fib_786": en_yuksek - (0.786 * fark),
@@ -204,8 +206,6 @@ def telegram_komut_dinleyici():
                 
                 if text.startswith("/ayarlar"):
                     durum = "🟢 İzole Mod Aktif" if config.BOT_CALISIYOR else "🛑 Durduruldu"
-                    
-                    # Mevcut aktif pozisyon sayısını say
                     acik_sayisi = sum(1 for s in SYMBOLS if aktif_pozisyonlar[s]["aktif"])
                     
                     rapor = f"⚙️ <b>İzole 20x Avcı Botu</b>\n• Sistem: <b>{durum}</b>\n• Marjin: {config.ISLEM_MARJIN} USDT\n• Kaldıraç: {config.KALDIRAC}x (İZOLE)\n• Poz Büyüklüğü: {config.ISLEM_MARJIN * config.KALDIRAC} USDT\n• Risk Limiti: {acik_sayisi}/{config.MAX_ACIK_POZISYON} Pozisyon\n• TP Hedefi: %1.0\n• SL Durumu: ❌ KAPALI (Liq Yönetimi)\n\n⚡ <b>Açık İşlemler:</b>\n"
@@ -280,20 +280,20 @@ def trend_tarama_dongusu():
                 time.sleep(2.0); continue
                 
             with data_lock:
-                # Toplam açık pozisyon sayısını anlık hesapla
                 guncel_acik_pozisyon_sayisi = sum(1 for s in SYMBOLS if aktif_pozisyonlar[s]["aktif"])
 
                 for symbol in SYMBOLS:
                     v = piyasa_verisi[symbol]
                     pos = aktif_pozisyonlar[symbol]
                     
-                    if len(v["kapanislar"]) < 20 or not v["anlik_fiyat"]: continue
+                    # 🛡️ Fiyat verisi yoksa veya sıfırsa anlık pas geç (Sıfıra bölünme koruması)
+                    if len(v["kapanislar"]) < 20 or not v["anlik_fiyat"] or v["anlik_fiyat"] <= 0: 
+                        continue
                     
                     anlik_fiyat = v["anlik_fiyat"]
                     
                     # 📈 1. GİRİŞ TAKİBİ
                     if not pos["aktif"]:
-                        # Eğer maksimum limit (10 pozisyon) aşılmışsa veya limite ulaşılmışsa yeni giriş yapma
                         if guncel_acik_pozisyon_sayisi >= config.MAX_ACIK_POZISYON:
                             continue
 
@@ -301,34 +301,41 @@ def trend_tarama_dongusu():
                         rsi = rsi_hesapla(v["kapanislar"])
                         fib = fibonacci_seviyelerini_hesapla(v["yuksekler"], v["dusukler"])
                         
+                        # 🛡️ Fibonacci verisi boş geldiyse döngü kırılmasın, sonraki koine geçsin
+                        if not fib or "fib_618" not in fib:
+                            continue
+
                         precision = FUTURES_HASSASIYETLERI.get(symbol, 2)
                         
-                        # 💎 1$ Marjin * 20x Kaldıraç = 20 USDT Büyüklüğünde Hassas Lot Hesaplama
                         qty = (config.ISLEM_MARJIN * config.KALDIRAC) / anlik_fiyat
                         qty = float(int(qty * (10 ** precision))) / (10 ** precision) if precision > 0 else int(qty)
                         if qty <= 0: continue
 
                         # LONG GİRİŞ
                         if anlik_fiyat <= alt_bant and rsi <= config.RSI_ASTR_SATIM:
+                            # 🛡️ Payda koruması (anlik_fiyat bölmesi için ek kontrol)
                             if abs(anlik_fiyat - fib["fib_618"]) / anlik_fiyat < 0.006 or abs(anlik_fiyat - fib["fib_786"]) / anlik_fiyat < 0.006:
                                 ok, giris_f = execute_order(symbol, SIDE_BUY, qty)
                                 if ok:
                                     pos.update({"aktif": True, "yon": "LONG", "adet": qty, "giris_fiyati": giris_f})
-                                    guncel_acik_pozisyon_sayisi += 1 # Sayaç simülasyonunu anlık güncelle
+                                    guncel_acik_pozisyon_sayisi += 1
                                     telegram_bildir(f"⚡ <b>{symbol.upper()} 20x İZOLE LONG</b>\n💰 Giriş: {giris_f}\n💵 Marjin: 1.00 USDT\n🛡️ Poz Büyüklüğü: 20.00 USDT\n📊 Pozisyon Havuzu: {guncel_acik_pozisyon_sayisi}/{config.MAX_ACIK_POZISYON}\n🎯 TP: %1.0 | 🚨 SL: Yok (1$ Liq)")
                                     
                         # SHORT GİRİŞ
                         elif anlik_fiyat >= ust_bant and rsi >= config.RSI_ASTR_ALIM:
+                            # 🛡️ Payda koruması (anlik_fiyat bölmesi için ek kontrol)
                             if abs(anlik_fiyat - fib["fib_236"]) / anlik_fiyat < 0.006 or abs(anlik_fiyat - fib["fib_382"]) / anlik_fiyat < 0.006:
                                 ok, giris_f = execute_order(symbol, SIDE_SELL, qty)
                                 if ok:
                                     pos.update({"aktif": True, "yon": "SHORT", "adet": qty, "giris_fiyati": giris_f})
-                                    guncel_acik_pozisyon_sayisi += 1 # Sayaç simülasyonunu anlık güncelle
+                                    guncel_acik_pozisyon_sayisi += 1
                                     telegram_bildir(f"⚡ <b>{symbol.upper()} 20x İZOLE SHORT</b>\n💰 Giriş: {giris_f}\n💵 Marjin: 1.00 USDT\n🛡️ Poz Büyüklüğü: 20.00 USDT\n📊 Pozisyon Havuzu: {guncel_acik_pozisyon_sayisi}/{config.MAX_ACIK_POZISYON}\n🎯 TP: %1.0 | 🚨 SL: Yok (1$ Liq)")
                     
                     # 🎯 2. KÂR AL (TP) TAKİBİ
                     else:
                         maliyet = pos["giris_fiyati"]
+                        if maliyet <= 0: continue # 🛡️ Sıfır maliyet koruması
+                        
                         fark_yuzde = (anlik_fiyat - maliyet) / maliyet
                         
                         # LONG ÇIKIŞ
@@ -349,7 +356,10 @@ def trend_tarama_dongusu():
                                     pos["aktif"] = False
                                     guncel_acik_pozisyon_sayisi -= 1
 
-        except Exception as e: print(f"❌ Döngü hatası: {e}")
+        except Exception as e:
+            # 💡 Eğer başka beklenmedik bir hata olursa tam detayını (satır numarasını) konsola basar
+            print("❌ Döngü kritik hatası detayları:")
+            traceback.print_exc()
         time.sleep(2.0)
 
 if __name__ == "__main__":
@@ -366,5 +376,5 @@ if __name__ == "__main__":
     threading.Thread(target=telegram_komut_dinleyici, daemon=True).start()
     
     time.sleep(3.0)
-    telegram_bildir(f"🤖 <b>10 Poz Limitiyle İzole 20x Bot Canlıda!</b>\n💰 Poz Büyüklüğü: 20 USDT\n🛑 Maks Eşzamanlı Poz: {config.MAX_ACIK_POZISYON}\n🎯 Hedef: %1 Fiyat Hareketi (+0.20$ PnL)\n🚨 Risk: Maksimum 1$ Liq\nTarama döngüsü başlatıldı.")
+    telegram_bildir(f"🤖 <b>Güvenli Filtreli İzole 20x Bot Canlıda!</b>\n💰 Poz Büyüklüğü: 20 USDT\n🛑 Maks Eşzamanlı Poz: {config.MAX_ACIK_POZISYON}\n🎯 Hedef: %1 Fiyat Hareketi (+0.20$ PnL)\n🚨 Risk: Maksimum 1$ Liq\nTarama döngüsü başlatıldı.")
     trend_tarama_dongusu()
