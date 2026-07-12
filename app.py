@@ -358,7 +358,7 @@ def hibrit_tarama_dongusu():
                             except Exception: pass
 
         except Exception: traceback.print_exc()
-        time.sleep(15.0)
+        time.sleep(1.0)
 
 if __name__ == "__main__":
     aday_listesi = ilk_100_hacimli_coin_bul()
