@@ -343,6 +343,7 @@ def on_user_message(ws, message):
                         if pa == 0:
                             aktif_pozisyonlar[sym]["aktif"] = False
                             aktif_pozisyonlar[sym]["adet"] = 0.0
+                            aktif_pozisyonlar[sym]["giris_fiyati"] = 0.0
                             pozisyon_acilis_zamanlari[sym] = 0.0
                         else:
                             if not aktif_pozisyonlar[sym]["aktif"]:
@@ -462,7 +463,9 @@ def hibrit_tarama_dongusu():
                 time.sleep(1.0); continue
                 
             su_an_ts = time.time()
-            if su_an_ts - last_kline_sync > 1:
+            
+            # 30 saniyede bir API üzerinden genel kontrol ve senkronizasyon (Güvenlik Önlemi)
+            if su_an_ts - last_kline_sync > 30:
                 tüm_gecmis_verileri_guncelle()
                 acik_pozisyonlari_binanceden_guncelle()  
                 last_kline_sync = su_an_ts
@@ -474,6 +477,7 @@ def hibrit_tarama_dongusu():
                     yerel_liste.append({
                         "symbol": symbol,
                         "v": dict(piyasa_verisi[symbol]),
+                        # Pozisyon verileri anlık olarak User Data WebSocket'ten güncellenir
                         "pos": dict(aktif_pozisyonlar[symbol]),
                         "son_islem": son_islem_zamanlari[symbol],
                         "acilis_zamani": pozisyon_acilis_zamanlari.get(symbol, 0),
@@ -489,14 +493,14 @@ def hibrit_tarama_dongusu():
                 anlik_fiyat = v["anlik_fiyat"]
 
                 # ==========================================
-                # 🎯 ÇIKIŞ MANTIĞI (0.15 USDT Net Kâr Kontrolü)
+                # 🎯 ÇIKIŞ MANTIĞI (WebSocket Canlı Pozisyon Verileri ile 0.15$ Kâr Kontrolü)
                 # ==========================================
                 if pos["aktif"]:
                     maliyet = pos["giris_fiyati"]
                     adet = pos["adet"]
                     if maliyet <= 0 or adet <= 0: continue
 
-                    # Anlık Dolar bazlı kâr hesaplaması
+                    # Anlık Dolar bazlı net kâr hesaplaması
                     if pos["yon"] == "LONG":
                         anlik_kar_dolar = (anlik_fiyat - maliyet) * adet
                     else:  # SHORT
