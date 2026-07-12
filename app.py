@@ -393,8 +393,6 @@ def hibrit_tarama_dongusu():
                     # 📈 GİRİŞ VE EKLEME MANTIĞI
                     if guncel_acik_pozisyon_sayisi < config.MAX_ACIK_POZISYON:
                         ust_bant, _, alt_bant = bollinger_bands(kapanislar_canli)
-                        
-                        prev_rsi = rsi_hesapla(v["kapanislar"]) 
                         current_rsi = rsi_hesapla(kapanislar_canli)
                         
                         fib = fibonacci_seviyelerini_hesapla(v["yuksekler"], v["dusukler"])
@@ -405,36 +403,28 @@ def hibrit_tarama_dongusu():
                         qty = float(int(qty * (10 ** precision))) / (10 ** precision) if precision > 0 else int(qty)
                         if qty <= 0: continue
 
-                        # LONG EMİR
+                        # LONG EMİR (Sadece limit içi kontrol)
                         if pos["yon"] != "SHORT":
                             yakin_fib_long = (abs(anlik_fiyat - fib.get("fib_618", 0)) / anlik_fiyat <= 0.015 or abs(anlik_fiyat - fib.get("fib_786", 0)) / anlik_fiyat <= 0.015)
                             
-                            standart_long = anlik_fiyat <= alt_bant and current_rsi <= config.RSI_ASTR_SATIM and yakin_fib_long
-                            rsi_donus_long = prev_rsi < 25 and current_rsi >= 25 and anlik_fiyat <= alt_bant 
-                            
-                            if standart_long or rsi_donus_long:
+                            if anlik_fiyat <= alt_bant and current_rsi <= config.RSI_ASTR_SATIM and yakin_fib_long:
                                 try:
                                     client.futures_create_order(symbol=symbol.upper(), side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=qty)
                                     son_islem_zamanlari[symbol] = su_an_ts  
                                     islem_tipi = "Ekleme Yapıldı" if pos["aktif"] else "Yeni Pozisyon"
-                                    neden = "RSI Dipten Dönüş" if rsi_donus_long else "Standart Strateji"
-                                    telegram_bildir(f"🚀 <b>{symbol.upper()} LONG {islem_tipi}!</b>\nTetikleyici: {neden}\nFiyat: {anlik_fiyat}\nMevcut RSI: {current_rsi:.1f}")
+                                    telegram_bildir(f"🚀 <b>{symbol.upper()} LONG {islem_tipi}!</b>\nTetikleyici: Standart Strateji\nFiyat: {anlik_fiyat}\nMevcut RSI: {current_rsi:.1f}")
                                 except Exception: pass
                                     
-                        # SHORT EMİR
+                        # SHORT EMİR (Sadece limit içi kontrol)
                         elif pos["yon"] != "LONG":
                             yakin_fib_short = (abs(anlik_fiyat - fib.get("fib_236", 0)) / anlik_fiyat <= 0.015 or abs(anlik_fiyat - fib.get("fib_382", 0)) / anlik_fiyat <= 0.015)
                             
-                            standart_short = anlik_fiyat >= ust_bant and current_rsi >= config.RSI_ASTR_ALIM and yakin_fib_short
-                            rsi_donus_short = prev_rsi > 75 and current_rsi <= 75 and anlik_fiyat >= ust_bant 
-                            
-                            if standart_short or rsi_donus_short:
+                            if anlik_fiyat >= ust_bant and current_rsi >= config.RSI_ASTR_ALIM and yakin_fib_short:
                                 try:
                                     client.futures_create_order(symbol=symbol.upper(), side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=qty)
                                     son_islem_zamanlari[symbol] = su_an_ts  
                                     islem_tipi = "Ekleme Yapıldı" if pos["aktif"] else "Yeni Pozisyon"
-                                    neden = "RSI Tepeden Dönüş" if rsi_donus_short else "Standart Strateji"
-                                    telegram_bildir(f"🚀 <b>{symbol.upper()} SHORT {islem_tipi}!</b>\nTetikleyici: {neden}\nFiyat: {anlik_fiyat}\nMevcut RSI: {current_rsi:.1f}")
+                                    telegram_bildir(f"🚀 <b>{symbol.upper()} SHORT {islem_tipi}!</b>\nTetikleyici: Standart Strateji\nFiyat: {anlik_fiyat}\nMevcut RSI: {current_rsi:.1f}")
                                 except Exception: pass
                     
                     # 🎯 ÇIKIŞ MANTIĞI
@@ -475,11 +465,9 @@ def hibrit_tarama_dongusu():
 if __name__ == "__main__":
     print("🎬 Bot başlatılıyor...")
     
-    # 1. En yüksek hacimli ilk 100 coini Binance vadeli işlemlerden dinamik çek
     hacimli_coinler = ilk_100_hacimli_coin_bul()
     print(f"📋 İlk etapta {len(hacimli_coinler)} adet hacimli coin tespit edildi.")
     
-    # 2. Coinleri tek tek kaldıraç, izole mod ve hassasiyet süzgecinden geçirerek sisteme kaydet
     eklenen_sayac = 0
     for c in hacimli_coinler:
         if kontrollu_coin_ekle(c):
@@ -487,22 +475,15 @@ if __name__ == "__main__":
             
     print(f"✅ Filtreleri geçen {eklenen_sayac} coin tarama listesine eklendi.")
     
-    # 3. Geçmiş mum verilerini (15m klines) ve Binance üzerindeki mevcut açık pozisyonları senkronize et
     tüm_gecmis_verileri_guncelle()
     acik_pozisyonlari_binanceden_guncelle()
     
-    # 4. Asenkron Arka Plan Thread Yapılarını Ateşle
-    # a) Telegram komut dinleyicisi
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
         threading.Thread(target=telegram_gelen_mesaj_dinleyici, daemon=True).start()
         telegram_bildir("🤖 <b>İzole Avcı Botu Railway Üzerinde Başarıyla Başlatıldı!</b>")
     
-    # b) Binance Hesap Verisi Değişim WebSocket'i (Account Update)
     threading.Thread(target=start_user_data_ws, daemon=True).start()
-    
-    # c) Canlı Fiyat Takip (Market Ticker) WebSocket'i
     threading.Thread(target=start_market_data_ws, daemon=True).start()
     
-    # 5. Ana Motoru (Tarama ve Emir Döngüsünü) Ana Thread Üzerinde Çalıştır
     print("⚡ Tüm sistemler aktif. Tarama motoru ve asenkron Canlı Radar başlatıldı.")
     hibrit_tarama_dongusu()
