@@ -34,7 +34,7 @@ class TrendBotConfig:
         self.KALDIRAC = 20             
         self.MAX_ACIK_POZISYON = 10     
         self.BOT_CALISIYOR = True
-        self.COOLDOWN_SURESI = 300     
+        self.COOLDOWN_SURESI = 0     
         
         # === Pine Script Strateji Parametreleri ===
         self.BB_LEN = 20
