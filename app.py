@@ -500,7 +500,7 @@ def hibrit_tarama_dongusu():
                     fiyat_degisim_yuzde = (anlik_fiyat - maliyet) / maliyet
                     
                     # 🟢 SABİTLENDİ: Pozu kimin, ne zaman açtığı fark etmeksizin %1 kâr barajı
-                    SABIT_TP_ORANI = 0.01
+                    SABIT_TP_ORANI = 0.005
 
                     # LONG KAPATMA
                     if pos["yon"] == "LONG" and fiyat_degisim_yuzde >= SABIT_TP_ORANI:
