@@ -40,7 +40,7 @@ class TrendBotConfig:
         self.BOLLINGER_STANDART_SAPMA = 2
         self.TAHMINI_TP_YUZDE = 0.010   
         self.BOT_CALISIYOR = True
-        self.COOLDOWN_SURESI = 300     # ⏱️ Aynı coine tekrar ekleme yapmak için beklenecek süre (Saniye cinsinden - 5 Dakika)
+        self.COOLDOWN_SURESI = 300     # ⏱️ 5 Dakika zaman kilidi
 
 config = TrendBotConfig()
 
@@ -48,7 +48,7 @@ SYMBOLS = []
 piyasa_verisi = {}
 aktif_pozisyonlar = {}
 FUTURES_HASSASIYETLERI = {}
-son_islem_zamanlari = {}  # ⏱️ Cooldown takibi için yeni hafıza havuzu
+son_islem_zamanlari = {}  
 
 data_lock = threading.Lock()
 listen_key = None
@@ -128,9 +128,35 @@ def kontrollu_coin_ekle(coin_adi):
             SYMBOLS.append(coin_lower)
             piyasa_verisi[coin_lower] = {"anlik_fiyat": None, "kapanislar": [], "yuksekler": [], "dusukler": []}
             aktif_pozisyonlar[coin_lower] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0}
-            son_islem_zamanlari[coin_lower] = 0.0  # Başlangıçta zaman kilidi sıfır
+            son_islem_zamanlari[coin_lower] = 0.0  
         return True
     except Exception: return False
+
+# 🔍 MEVCUT AÇIK POZİSYONLARI ZORUNLU SENKRONİZE EDEN YENİ SİHİRLİ FONKSİYON
+def acik_pozisyonlari_binanceden_guncelle():
+    """WebSocket gecikmelerine karşı API'den açık pozisyonları zorla çeker."""
+    try:
+        # Proxy ayarları atanmış client üzerinden güvenli istek atıyoruz
+        pozisyonlar = client.futures_position_information()
+        with data_lock:
+            # Önce tüm listeyi temizle (kapandıysa sıfırlansın)
+            for s in SYMBOLS:
+                aktif_pozisyonlar[s] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0}
+            
+            # Sadece adeti 0'dan farklı olan aktif pozları haritaya işle
+            for p in pozisyonlar:
+                sym = p.get("symbol", "").lower()
+                if sym in aktif_pozisyonlar:
+                    amt = float(p.get("positionAmt", 0))
+                    entry_price = float(p.get("entryPrice", 0))
+                    if amt != 0:
+                        aktif_pozisyonlar[sym]["aktif"] = True
+                        aktif_pozisyonlar[sym]["yon"] = "LONG" if amt > 0 else "SHORT"
+                        aktif_pozisyonlar[sym]["adet"] = abs(amt)
+                        aktif_pozisyonlar[sym]["giris_fiyati"] = entry_price
+        print("🔄 [API Senkronizasyonu] Mevcut açık pozisyonlar başarıyla güncellendi.")
+    except Exception as e:
+        print(f"❌ Pozisyon senkronizasyon hatası: {e}")
 
 def tüm_gecmis_verileri_guncelle():
     for s in SYMBOLS:
@@ -160,6 +186,9 @@ def ana_menu_olustur():
     }
 
 def telegram_canli_rapor_uret():
+    # Rapor üretilmeden hemen önce API'den bir kez daha zorunlu senkronizasyon yapalım ki veriler %100 doğru olsun
+    acik_pozisyonlari_binanceden_guncelle()
+    
     with data_lock:
         acik_pozlar = sum(1 for s in SYMBOLS if aktif_pozisyonlar[s]["aktif"])
         durum_str = "🟢 İzole Mod Aktif" if config.BOT_CALISIYOR else "🔴 Sistem Durduruldu"
@@ -253,6 +282,7 @@ def hibrit_tarama_dongusu():
             su_an_ts = time.time()
             if su_an_ts - last_kline_sync > 300:
                 tüm_gecmis_verileri_guncelle()
+                acik_pozisyonlari_binanceden_guncelle()  # 🔄 Her 5 dakikada bir pozisyonları API'den zorunlu check et
                 last_kline_sync = su_an_ts
 
             prices_raw = requests.get("https://fapi.binance.com/fapi/v1/ticker/price", timeout=10).json()
@@ -271,7 +301,6 @@ def hibrit_tarama_dongusu():
                     if len(v["kapanislar"]) < 20 or not v["anlik_fiyat"] or v["anlik_fiyat"] <= 0: continue
                     anlik_fiyat = v["anlik_fiyat"]
                     
-                    # ⏱️ CRITICAL LOCK: Son emirden bu yana Cooldown süresi (5 dk) geçti mi kontrolü
                     if su_an_ts - son_islem_zamanlari[symbol] < config.COOLDOWN_SURESI:
                         continue
 
@@ -288,22 +317,22 @@ def hibrit_tarama_dongusu():
                         qty = float(int(qty * (10 ** precision))) / (10 ** precision) if precision > 0 else int(qty)
                         if qty <= 0: continue
 
-                        # LONG EMİR (Poz yokken veya zaten LONG yönündeyken ekleme)
+                        # LONG EMİR
                         if anlik_fiyat <= alt_bant and rsi <= config.RSI_ASTR_SATIM and pos["yon"] != "SHORT":
                             if abs(anlik_fiyat - fib["fib_618"]) / anlik_fiyat < 0.006 or abs(anlik_fiyat - fib["fib_786"]) / anlik_fiyat < 0.006:
                                 try:
                                     client.futures_create_order(symbol=symbol.upper(), side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=qty)
-                                    son_islem_zamanlari[symbol] = su_an_ts  # 🔒 Zaman kilidini devreye sok
+                                    son_islem_zamanlari[symbol] = su_an_ts  
                                     islem_tipi = "Ekleme Yapıldı" if pos["aktif"] else "Yeni Pozisyon"
                                     telegram_bildir(f"🚀 <b>{symbol.upper()} LONG {islem_tipi}!</b>\nFiyat: {anlik_fiyat}")
                                 except Exception: pass
                                     
-                        # SHORT EMİR (Poz yokken veya zaten SHORT yönündeyken ekleme)
+                        # SHORT EMİR
                         elif anlik_fiyat >= ust_bant and rsi >= config.RSI_ASTR_ALIM and pos["yon"] != "LONG":
                             if abs(anlik_fiyat - fib["fib_236"]) / anlik_fiyat < 0.006 or abs(anlik_fiyat - fib["fib_382"]) / anlik_fiyat < 0.006:
                                 try:
                                     client.futures_create_order(symbol=symbol.upper(), side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=qty)
-                                    son_islem_zamanlari[symbol] = su_an_ts  # 🔒 Zaman kilidini devreye sok
+                                    son_islem_zamanlari[symbol] = su_an_ts  
                                     islem_tipi = "Ekleme Yapıldı" if pos["aktif"] else "Yeni Pozisyon"
                                     telegram_bildir(f"🚀 <b>{symbol.upper()} SHORT {islem_tipi}!</b>\nFiyat: {anlik_fiyat}")
                                 except Exception: pass
@@ -317,14 +346,14 @@ def hibrit_tarama_dongusu():
                         if pos["yon"] == "LONG" and fark_yuzde >= config.TAHMINI_TP_YUZDE:
                             try:
                                 client.futures_create_order(symbol=symbol.upper(), side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=pos["adet"])
-                                son_islem_zamanlari[symbol] = 0.0  # Pozisyon tamamen kapandığı için kilidi sıfırla
+                                son_islem_zamanlari[symbol] = 0.0  
                                 telegram_bildir(f"💰 <b>{symbol.upper()} LONG Kar Alındı!</b>\nNet Kar: %{config.TAHMINI_TP_YUZDE * 100:.1f}")
                             except Exception: pass
                                     
                         elif pos["yon"] == "SHORT" and fark_yuzde <= -config.TAHMINI_TP_YUZDE:
                             try:
                                 client.futures_create_order(symbol=symbol.upper(), side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=pos["adet"])
-                                son_islem_zamanlari[symbol] = 0.0  # Pozisyon tamamen kapandığı için kilidi sıfırla
+                                son_islem_zamanlari[symbol] = 0.0  
                                 telegram_bildir(f"💰 <b>{symbol.upper()} SHORT Kar Alındı!</b>\nNet Kar: %{config.TAHMINI_TP_YUZDE * 100:.1f}")
                             except Exception: pass
 
@@ -335,7 +364,10 @@ if __name__ == "__main__":
     aday_listesi = ilk_100_hacimli_coin_bul()
     if not aday_listesi: exit()
     for coin in aday_listesi: kontrollu_coin_ekle(coin)
+    
+    # 🚀 İLK AÇILIŞTA MEVCUT POZİSYONLARI APIden ÇEKİP HAFIZAYI DOLDURUYORUZ
     tüm_gecmis_verileri_guncelle()
+    acik_pozisyonlari_binanceden_guncelle()
     
     threading.Thread(target=start_user_data_ws, daemon=True).start()
     threading.Thread(target=telegram_gelen_mesaj_dinleyici, daemon=True).start()
