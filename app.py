@@ -33,9 +33,9 @@ class TrendBotConfig:
         self.ISLEM_MARJIN = 1.0        
         self.KALDIRAC = 20             
         self.MAX_ACIK_POZISYON = 10     
-        self.TAHMINI_TP_YUZDE = 0.010   # Fiyat yönümüzde net %1 giderse kapatır.
+        self.TAHMINI_TP_YUZDE = 0.010   
         self.BOT_CALISIYOR = True
-        self.COOLDOWN_SURESI = 300     # ⏱️ Zararla kapanan veya yeni işlem sonrası giriş engeli (5 dk)
+        self.COOLDOWN_SURESI = 300     
         
         # === Pine Script Strateji Parametreleri ===
         self.BB_LEN = 20
@@ -59,8 +59,9 @@ SYMBOLS = []
 piyasa_verisi = {}
 aktif_pozisyonlar = {}
 FUTURES_HASSASIYETLERI = {}
-son_islem_zamanlari = {}        # Sadece YENİ GİRİŞLERİ engellemek için cooldown takibi
-pozisyon_acilis_zamanlari = {}  # Hayalet kapanışları engellemek için milisaniyelik takip
+son_islem_zamanlari = {}        
+pozisyon_acilis_zamanlari = {}  
+emir_beklemede_durumu = {} # 🟢 DÜZELTME: Mükerrer emirleri engellemek için state kilidi
 
 data_lock = threading.Lock()
 listen_key = None
@@ -117,14 +118,20 @@ def atr_hesapla(yuksekler, dusukler, kapanislar, periyod=14):
     return [0.0] * (periyod - 1) + atr
 
 def strateji_sinyal_uret(v, anlik_fiyat):
-    kapanislar = v["kapanislar"] + [anlik_fiyat]
-    yuksekler = v["yuksekler"] + [v["yuksekler"][-1]] 
-    dusukler = v["dusukler"] + [v["dusukler"][-1]]
+    kapanislar = list(v["kapanislar"])
+    yuksekler = list(v["yuksekler"])
+    dusukler = list(v["dusukler"])
+    
+    if not kapanislar or anlik_fiyat <= 0: return "HOLD"
+    
+    # 🟢 DÜZELTME: Kesinleşmiş barı ezmemek için canlı fiyat listeye yeni bar (milisaniyelik) olarak eklenir
+    kapanislar.append(anlik_fiyat)
+    yuksekler.append(max(anlik_fiyat, yuksekler[-1] if yuksekler else anlik_fiyat))
+    dusukler.append(min(anlik_fiyat, dusukler[-1] if dusukler else anlik_fiyat))
 
     L = len(kapanislar)
     gerekli_uzunluk = max(config.BB_LEN, config.ATR_LEN, config.RSI_LEN) + config.BARS_CHECK + 3
-    if L < gerekli_uzunluk:
-        return "HOLD"
+    if L < gerekli_uzunluk: return "HOLD"
 
     basis = sma(kapanislar, config.BB_LEN)
     dev = stdev(kapanislar, config.BB_LEN)
@@ -136,10 +143,12 @@ def strateji_sinyal_uret(v, anlik_fiyat):
     lower_kc = [basis[i] - (kc_atr[i] * config.KC_MULT) for i in range(L)]
 
     squeeze_on = [(upper_bb[i] < upper_kc[i]) and (lower_bb[i] > lower_kc[i]) for i in range(L)]
-    target_idx = -(config.BARS_CHECK + 2)
+    
+    # Geçici bar eklendiği için indeks derinliği 1 kaydırıldı
+    target_idx = -(config.BARS_CHECK + 3)
 
     if squeeze_on[target_idx]:
-        dilim_yuksekler = yuksekler[-(config.BARS_CHECK + 1):-1]
+        dilim_yuksekler = yuksekler[-(config.BARS_CHECK + 2):-2]
         high_avg_prev_n = sum(dilim_yuksekler) / len(dilim_yuksekler)
 
         current_close = kapanislar[-1]
@@ -161,10 +170,8 @@ def strateji_sinyal_uret(v, anlik_fiyat):
             long_ok = long_ok and (rsi_val > config.RSI_OS)
             short_ok = short_ok and (rsi_val < config.RSI_OB)
 
-        if long_ok:
-            return "BUY"
-        elif short_ok:
-            return "SELL"
+        if long_ok: return "BUY"
+        elif short_ok: return "SELL"
 
     return "HOLD"
 
@@ -191,6 +198,7 @@ def kontrollu_coin_ekle(coin_adi):
         market_info = next((m for m in r.get("symbols", []) if m["symbol"] == coin_upper), None)
         if not market_info or market_info.get('status') != 'TRADING': return False
         
+        time.sleep(0.20) 
         client.futures_change_leverage(symbol=coin_upper, leverage=config.KALDIRAC)
         try: client.futures_change_margin_type(symbol=coin_upper, marginType="ISOLATED")
         except BinanceAPIException as e:
@@ -208,6 +216,7 @@ def kontrollu_coin_ekle(coin_adi):
             aktif_pozisyonlar[coin_lower] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0}
             son_islem_zamanlari[coin_lower] = 0.0  
             pozisyon_acilis_zamanlari[coin_lower] = 0.0
+            emir_beklemede_durumu[coin_lower] = False
         return True
     except Exception: return False
 
@@ -216,10 +225,12 @@ def acik_pozisyonlari_binanceden_guncelle():
         pozisyonlar = client.futures_position_information()
         with data_lock:
             for s in SYMBOLS:
-                aktif_pozisyonlar[s] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0}
+                if not emir_beklemede_durumu.get(s, False):
+                    aktif_pozisyonlar[s] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0}
             for p in pozisyonlar:
                 sym = p.get("symbol", "").lower()
                 if sym in aktif_pozisyonlar:
+                    if emir_beklemede_durumu.get(sym, False): continue
                     amt = float(p.get("positionAmt", 0))
                     entry_price = float(p.get("entryPrice", 0))
                     if amt != 0:
@@ -236,12 +247,18 @@ def tüm_gecmis_verileri_guncelle():
         try:
             url = f"https://fapi.binance.com/fapi/v1/klines?symbol={s.upper()}&interval={config.TIMEFRAME}&limit=60"
             k = requests.get(url, timeout=10).json()
+            if not k or len(k) == 0: continue
+            
+            kapanislar_yeni = [float(x[4]) for x in k]
+            yuksekler_yeni = [float(x[2]) for x in k]
+            dusukler_yeni = [float(x[3]) for x in k]
+            
             with data_lock:
-                piyasa_verisi[s]["kapanislar"] = [float(x[4]) for x in k]
-                piyasa_verisi[s]["yuksekler"] = [float(x[2]) for x in k]
-                piyasa_verisi[s]["dusukler"] = [float(x[3]) for x in k]
-                if k and len(k) > 0 and piyasa_verisi[s]["anlik_fiyat"] is None:
-                    piyasa_verisi[s]["anlik_fiyat"] = float(k[-1][4])
+                piyasa_verisi[s]["kapanislar"] = kapanislar_yeni
+                piyasa_verisi[s]["yuksekler"] = yuksekler_yeni
+                piyasa_verisi[s]["dusukler"] = dusukler_yeni
+                if piyasa_verisi[s]["anlik_fiyat"] is None:
+                    piyasa_verisi[s]["anlik_fiyat"] = kapanislar_yeni[-1]
         except Exception: pass
 
 # --- 🎛️ TELEGRAM YÖNETİMİ ---
@@ -263,7 +280,7 @@ def telegram_canli_rapor_uret():
     acik_pozisyonlari_binanceden_guncelle()
     with data_lock:
         acik_pozlar = sum(1 for s in SYMBOLS if aktif_pozisyonlar[s]["aktif"])
-        durum_str = "🟢 Squeeze Mod Aktif" if config.BOT_CALISIYOR else "🔴 Sistem Durduruldu"
+        durum_str = "🟢 Squeeze Mod Active" if config.BOT_CALISIYOR else "🔴 Sistem Durduruldu"
         poz_buyuklugu = config.ISLEM_MARJIN * config.KALDIRAC
 
         rapor = (
@@ -321,13 +338,14 @@ def on_user_message(ws, message):
             for p in positions:
                 sym = p.get("s", "").lower()
                 if sym in aktif_pozisyonlar:
-                    pa = float(p.get("pa", 0))
-                    ep = float(p.get("ep", 0))
                     with data_lock:
+                        if emir_beklemede_durumu.get(sym, False): continue # Bot emri işlerken WS verisi ezmesin
+                        pa = float(p.get("pa", 0))
+                        ep = float(p.get("ep", 0))
                         if pa == 0:
-                            if aktif_pozisyonlar[sym]["aktif"]:
-                                aktif_pozisyonlar[sym]["aktif"] = False
-                                pozisyon_acilis_zamanlari[sym] = 0.0
+                            aktif_pozisyonlar[sym]["aktif"] = False
+                            aktif_pozisyonlar[sym]["adet"] = 0.0
+                            pozisyon_acilis_zamanlari[sym] = 0.0
                         else:
                             if not aktif_pozisyonlar[sym]["aktif"]:
                                 pozisyon_acilis_zamanlari[sym] = time.time()
@@ -337,33 +355,56 @@ def on_user_message(ws, message):
                             aktif_pozisyonlar[sym]["giris_fiyati"] = ep
     except Exception: pass
 
+def _listen_key_keepalive_loop():
+    global listen_key
+    while True:
+        try:
+            time.sleep(1200) 
+            if listen_key:
+                client.futures_stream_keepalive(listenKey=listen_key)
+        except Exception as e:
+            print(f"❌ Listen Key yenileme hatası: {e}")
+
 def start_user_data_ws():
     global listen_key
-    try:
-        listen_key = client.futures_stream_get_listen_key()
-        threading.Thread(target=lambda: (time.sleep(1800), client.futures_stream_keepalive(listenKey=listen_key)), daemon=True).start()
-        ws = WebSocketApp(f"wss://fstream.binance.com/ws/{listen_key}", on_message=on_user_message, on_close=lambda ws,c,m: time.sleep(5))
-        ws.run_forever(reconnect=5)
-    except Exception: pass
+    while True:
+        try:
+            listen_key = client.futures_stream_get_listen_key()
+            threading.Thread(target=_listen_key_keepalive_loop, daemon=True).start()
+            
+            ws = WebSocketApp(
+                f"wss://fstream.binance.com/ws/{listen_key}", 
+                on_message=on_user_message, 
+                on_close=lambda ws,c,m: print("⚠️ User Data Stream kapandı, yeniden bağlanılıyor...")
+            )
+            ws.run_forever()
+        except Exception as e:
+            print(f"❌ User Data WS Hatası, 10sn içinde yeniden denenecek: {e}")
+            time.sleep(10)
 
 def on_market_data_message(ws, message):
     try:
         data = json.loads(message)
         if isinstance(data, list):
-            with data_lock:
-                for ticker in data:
-                    sym = ticker.get("s", "").lower()
-                    if sym in piyasa_verisi:
+            for ticker in data:
+                sym = ticker.get("s", "").lower()
+                if sym in piyasa_verisi:
+                    with data_lock:
                         piyasa_verisi[sym]["anlik_fiyat"] = float(ticker.get("c", 0))
     except Exception: pass
 
 def start_market_data_ws():
-    try:
-        ws = WebSocketApp("wss://fstream.binance.com/ws/!ticker@arr", 
-                          on_message=on_market_data_message, 
-                          on_close=lambda ws,c,m: time.sleep(2))
-        ws.run_forever(reconnect=5)
-    except Exception: pass
+    while True:
+        try:
+            ws = WebSocketApp(
+                "wss://fstream.binance.com/ws/!ticker@arr", 
+                on_message=on_market_data_message, 
+                on_close=lambda ws,c,m: print("⚠️ Piyasa veri akışı koptu, yeniden bağlanılıyor...")
+            )
+            ws.run_forever()
+        except Exception as e:
+            print(f"❌ Market WS Hatası, 5sn içinde yeniden denenecek: {e}")
+            time.sleep(5)
 
 # --- 🛰️ ASENKRON CANLI RADAR EK MOTORU (15s DÖNGÜSÜ) ---
 def canlı_radar_dongusu():
@@ -375,23 +416,31 @@ def canlı_radar_dongusu():
             radar_adaylari = []
             su_an_ts = time.time()
 
+            yerel_piyasa_kopya = {}
             with data_lock:
                 for symbol in SYMBOLS:
-                    v = piyasa_verisi[symbol]
-                    pos = aktif_pozisyonlar[symbol]
-                    
-                    if len(v["kapanislar"]) < 40 or not v["anlik_fiyat"] or v["anlik_fiyat"] <= 0: continue
-                    if su_an_ts - son_islem_zamanlari[symbol] < config.COOLDOWN_SURESI: continue
-                    if pos["aktif"]: continue 
+                    if su_an_ts - son_islem_zamanlari[symbol] < config.COOLDOWN_SURESI and not aktif_pozisyonlar[symbol]["aktif"]:
+                        continue
+                    yerel_piyasa_kopya[symbol] = {
+                        "v": dict(piyasa_verisi[symbol]),
+                        "pos": dict(aktif_pozisyonlar[symbol])
+                    }
 
-                    sinyal_durumu = strateji_sinyal_uret(v, v["anlik_fiyat"])
-                    if sinyal_durumu != "HOLD":
-                        radar_adaylari.append({
-                            "symbol": symbol.upper(),
-                            "yon": "LONG Yönü" if sinyal_durumu == "BUY" else "SHORT Yönü",
-                            "fiyat": v["anlik_fiyat"],
-                            "sinyal": sinyal_durumu
-                        })
+            for symbol, data in yerel_piyasa_kopya.items():
+                v = data["v"]
+                pos = data["pos"]
+                
+                if len(v["kapanislar"]) < 40 or not v["anlik_fiyat"] or v["anlik_fiyat"] <= 0: continue
+                if pos["aktif"]: continue 
+
+                sinyal_durumu = strateji_sinyal_uret(v, v["anlik_fiyat"])
+                if sinyal_durumu != "HOLD":
+                    radar_adaylari.append({
+                        "symbol": symbol.upper(),
+                        "yon": "LONG Yönü" if sinyal_durumu == "BUY" else "SHORT Yönü",
+                        "fiyat": v["anlik_fiyat"],
+                        "sinyal": sinyal_durumu
+                    })
 
             if radar_adaylari:
                 zaman_str = datetime.now().strftime("%H:%M:%S")
@@ -420,118 +469,129 @@ def hibrit_tarama_dongusu():
                 acik_pozisyonlari_binanceden_guncelle()  
                 last_kline_sync = su_an_ts
 
+            yerel_liste = []
             with data_lock:
+                guncel_acik_pozisyon_sayisi = sum(1 for s in SYMBOLS if aktif_pozisyonlar[s]["aktif"])
                 for symbol in SYMBOLS:
-                    v = piyasa_verisi[symbol]
-                    pos = aktif_pozisyonlar[symbol]
+                    yerel_liste.append({
+                        "symbol": symbol,
+                        "v": dict(piyasa_verisi[symbol]),
+                        "pos": dict(aktif_pozisyonlar[symbol]),
+                        "son_islem": son_islem_zamanlari[symbol],
+                        "acilis_zamani": pozisyon_acilis_zamanlari.get(symbol, 0),
+                        "acik_poz_sayisi": guncel_acik_pozisyon_sayisi
+                    })
+
+            for item in yerel_liste:
+                symbol = item["symbol"]
+                v = item["v"]
+                pos = item["pos"]
+                
+                if len(v["kapanislar"]) < 40 or not v["anlik_fiyat"] or v["anlik_fiyat"] <= 0: continue
+                anlik_fiyat = v["anlik_fiyat"]
+
+                # ==========================================
+                # 🎯 ÇIKIŞ MANTIĞI (% TP Kontrolü)
+                # ==========================================
+                if pos["aktif"]:
+                    maliyet = pos["giris_fiyati"]
+                    if maliyet <= 0: continue
                     
-                    if len(v["kapanislar"]) < 40 or not v["anlik_fiyat"] or v["anlik_fiyat"] <= 0: continue
-                    anlik_fiyat = v["anlik_fiyat"]
+                    if item["acilis_zamani"] == 0 or (su_an_ts - item["acilis_zamani"] < 10):
+                        continue
 
-                    # ==========================================
-                    # 🎯 ÇIKIŞ MANTIĞI (% TP Kontrolü)
-                    # ==========================================
-                    if pos["aktif"]:
-                        maliyet = pos["giris_fiyati"]
-                        if maliyet <= 0: continue
-                        
-                        # 🛑 HAYALET KAPANMA ENGELİ: Pozisyon açılalı 10 saniye geçmeden TP kontrolü yapma
-                        if pozisyon_acilis_zamanlari.get(symbol, 0) == 0 or (su_an_ts - pozisyon_acilis_zamanlari[symbol] < 10):
-                            continue
-
-                        # Fiyatın saf yüzde değişimi
-                        fiyat_degisim_yuzde = (anlik_fiyat - maliyet) / maliyet
-                        
-                        # LONG KAPATMA
-                        if pos["yon"] == "LONG" and fiyat_degisim_yuzde >= config.TAHMINI_TP_YUZDE:
-                            try:
-                                qty_to_close = pos["adet"]
-                                if qty_to_close > 0:
-                                    client.futures_create_order(
-                                        symbol=symbol.upper(), 
-                                        side=SIDE_SELL, 
-                                        type=ORDER_TYPE_MARKET, 
-                                        quantity=qty_to_close,
-                                        reduceOnly=True
-                                    )
-                                    son_islem_zamanlari[symbol] = su_an_ts  # Kapanış sonrası cooldown başlasın
-                                    pozisyon_acilis_zamanlari[symbol] = 0.0
-                                    pos["aktif"] = False
-                                    telegram_bildir(f"💰 <b>{symbol.upper()} LONG Kar Alındı!</b>\nFiyat Hareketi: %{fiyat_degisim_yuzde * 100:.2f}\nTahmini ROE: %{fiyat_degisim_yuzde * config.KALDIRAC * 100:.2f}")
-                            except Exception as e:
-                                print(f"❌ Long kapatma hatası ({symbol}): {e}")
-                                    
-                        # SHORT KAPATMA
-                        elif pos["yon"] == "SHORT" and fiyat_degisim_yuzde <= -config.TAHMINI_TP_YUZDE:
-                            try:
-                                qty_to_close = pos["adet"]
-                                if qty_to_close > 0:
-                                    client.futures_create_order(
-                                        symbol=symbol.upper(), 
-                                        side=SIDE_BUY, 
-                                        type=ORDER_TYPE_MARKET, 
-                                        quantity=qty_to_close,
-                                        reduceOnly=True
-                                    )
-                                    son_islem_zamanlari[symbol] = su_an_ts  # Kapanış sonrası cooldown başlasın
-                                    pozisyon_acilis_zamanlari[symbol] = 0.0
-                                    pos["aktif"] = False
-                                    telegram_bildir(f"💰 <b>{symbol.upper()} SHORT Kar Alındı!</b>\nFiyat Hareketi: %{-fiyat_degisim_yuzde * 100:.2f}\nTahmini ROE: %{-fiyat_degisim_yuzde * config.KALDIRAC * 100:.2f}")
-                            except Exception as e:
-                                print(f"❌ Short kapatma hatası ({symbol}): {e}")
+                    fiyat_degisim_yuzde = (anlik_fiyat - maliyet) / maliyet
                     
-                    # ==========================================
-                    # 📈 GİRİŞ MANTIĞI (SQUEEZE + N BARS)
-                    # ==========================================
-                    if not pos["aktif"]:
-                        
-                        # COOLDOWN KONTROLÜ: Sadece yeni girişi engeller, çıkışı etkilemez!
-                        if su_an_ts - son_islem_zamanlari[symbol] < config.COOLDOWN_SURESI: 
-                            continue
+                    # LONG KAPATMA
+                    if pos["yon"] == "LONG" and fiyat_degisim_yuzde >= config.TAHMINI_TP_YUZDE:
+                        # 🟢 DÜZELTME: Emir gönderilmeden hemen önce kilit kontrolü (Mükerrerlik Koruması)
+                        with data_lock:
+                            if emir_beklemede_durumu[symbol]: continue
+                            emir_beklemede_durumu[symbol] = True
 
-                        guncel_acik_pozisyon_sayisi = sum(1 for s in SYMBOLS if aktif_pozisyonlar[s]["aktif"])
-                        if guncel_acik_pozisyon_sayisi >= config.MAX_ACIK_POZISYON:
-                            continue 
+                        try:
+                            precision = FUTURES_HASSASIYETLERI.get(symbol, 2)
+                            # 🟢 DÜZELTME: Küsurat yuvarlama hatası nedeniyle reduceOnly reddini önlemek için math.floor kullanıldı
+                            qty_to_close = float(int(pos["adet"] * (10 ** precision))) / (10 ** precision) if precision > 0 else int(pos["adet"])
+                            
+                            if qty_to_close > 0:
+                                client.futures_create_order(
+                                    symbol=symbol.upper(), side=SIDE_SELL, type=ORDER_TYPE_MARKET, 
+                                    quantity=qty_to_close, reduceOnly=True
+                                )
+                                with data_lock:
+                                    son_islem_zamanlari[symbol] = su_an_ts  
+                                    aktif_pozisyonlar[symbol] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0}
+                                telegram_bildir(f"💰 <b>{symbol.upper()} LONG Kar Alındı!</b>\nFiyat: {anlik_fiyat}")
+                        except Exception as e:
+                            print(f"❌ Long kapatma hatası ({symbol}): {e}")
+                        finally:
+                            with data_lock: emir_beklemede_durumu[symbol] = False
+                                
+                    # SHORT KAPATMA
+                    elif pos["yon"] == "SHORT" and fiyat_degisim_yuzde <= -config.TAHMINI_TP_YUZDE:
+                        with data_lock:
+                            if emir_beklemede_durumu[symbol]: continue
+                            emir_beklemede_durumu[symbol] = True
 
-                        sinyal = strateji_sinyal_uret(v, anlik_fiyat)
+                        try:
+                            precision = FUTURES_HASSASIYETLERI.get(symbol, 2)
+                            qty_to_close = float(int(pos["adet"] * (10 ** precision))) / (10 ** precision) if precision > 0 else int(pos["adet"])
+                            
+                            if qty_to_close > 0:
+                                client.futures_create_order(
+                                    symbol=symbol.upper(), side=SIDE_BUY, type=ORDER_TYPE_MARKET, 
+                                    quantity=qty_to_close, reduceOnly=True
+                                )
+                                with data_lock:
+                                    son_islem_zamanlari[symbol] = su_an_ts  
+                                    aktif_pozisyonlar[symbol] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0}
+                                telegram_bildir(f"💰 <b>{symbol.upper()} SHORT Kar Alındı!</b>\nFiyat: {anlik_fiyat}")
+                        except Exception as e:
+                            print(f"❌ Short kapatma hatası ({symbol}): {e}")
+                        finally:
+                            with data_lock: emir_beklemede_durumu[symbol] = False
+                
+                # ==========================================
+                # 📈 GİRİŞ MANTIĞI (SQUEEZE + N BARS)
+                # ==========================================
+                if not pos["aktif"]:
+                    if su_an_ts - item["son_islem"] < config.COOLDOWN_SURESI: continue
+                    if item["acik_poz_sayisi"] >= config.MAX_ACIK_POZISYON: continue 
 
-                        if sinyal != "HOLD":
+                    sinyal = strateji_sinyal_uret(v, anlik_fiyat)
+
+                    if sinyal != "HOLD":
+                        # 🟢 DÜZELTME: Ağ isteği gecikmesi sırasında mükerrer emir tetiklenmesini önleyen state kilidi
+                        with data_lock:
+                            if emir_beklemede_durumu[symbol] or aktif_pozisyonlar[symbol]["aktif"]: continue
+                            emir_beklemede_durumu[symbol] = True
+
+                        try:
                             precision = FUTURES_HASSASIYETLERI.get(symbol, 2)
                             qty = (config.ISLEM_MARJIN * config.KALDIRAC) / anlik_fiyat
                             qty = float(int(qty * (10 ** precision))) / (10 ** precision) if precision > 0 else int(qty)
-                            if qty <= 0: continue
-
-                            # LONG EMİR
-                            if sinyal == "BUY" and pos["yon"] != "SHORT":
-                                try:
+                            
+                            if qty > 0:
+                                # LONG EMİR
+                                if sinyal == "BUY":
                                     client.futures_create_order(symbol=symbol.upper(), side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=qty)
-                                    
-                                    # Hafıza Senkronizasyonu
-                                    pos["aktif"] = True
-                                    pos["yon"] = "LONG"
-                                    pos["adet"] = qty
-                                    pos["giris_fiyati"] = anlik_fiyat
-                                    pozisyon_acilis_zamanlari[symbol] = su_an_ts
-                                    
-                                    telegram_bildir(f"🚀 <b>{symbol.upper()} LONG Pozisyonu Açıldı!</b>\nTetikleyici: Squeeze + N Bars Kırılımı\nFiyat: {anlik_fiyat}")
-                                except Exception as e:
-                                    print(f"❌ Long emir hatası ({symbol}): {e}")
+                                    with data_lock:
+                                        aktif_pozisyonlar[symbol] = {"aktif": True, "yon": "LONG", "adet": qty, "giris_fiyati": anlik_fiyat}
+                                        pozisyon_acilis_zamanlari[symbol] = su_an_ts
+                                    telegram_bildir(f"🚀 <b>{symbol.upper()} LONG Pozisyonu Açıldı!</b>\nFiyat: {anlik_fiyat}")
                                         
-                            # SHORT EMİR
-                            elif sinyal == "SELL" and pos["yon"] != "LONG":
-                                try:
+                                # SHORT EMİR
+                                elif sinyal == "SELL":
                                     client.futures_create_order(symbol=symbol.upper(), side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=qty)
-                                    
-                                    # Hafıza Senkronizasyonu
-                                    pos["aktif"] = True
-                                    pos["yon"] = "SHORT"
-                                    pos["adet"] = qty
-                                    pos["giris_fiyati"] = anlik_fiyat
-                                    pozisyon_acilis_zamanlari[symbol] = su_an_ts
-                                    
-                                    telegram_bildir(f"🚀 <b>{symbol.upper()} SHORT Pozisyonu Açıldı!</b>\nTetikleyici: Squeeze + N Bars Kırılımı\nFiyat: {anlik_fiyat}")
-                                except Exception as e:
-                                    print(f"❌ Short emir hatası ({symbol}): {e}")
+                                    with data_lock:
+                                        aktif_pozisyonlar[symbol] = {"aktif": True, "yon": "SHORT", "adet": qty, "giris_fiyati": anlik_fiyat}
+                                        pozisyon_acilis_zamanlari[symbol] = su_an_ts
+                                    telegram_bildir(f"🚀 <b>{symbol.upper()} SHORT Pozisyonu Açıldı!</b>\nFiyat: {anlik_fiyat}")
+                        except Exception as e:
+                            print(f"❌ Emir gönderme hatası ({symbol}): {e}")
+                        finally:
+                            with data_lock: emir_beklemede_durumu[symbol] = False
             time.sleep(1.0)
         except Exception as e:
             print(f"❌ Ana döngü hatası: {e}")
