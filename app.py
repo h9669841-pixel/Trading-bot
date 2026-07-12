@@ -462,7 +462,7 @@ def hibrit_tarama_dongusu():
                 time.sleep(1.0); continue
                 
             su_an_ts = time.time()
-            if su_an_ts - last_kline_sync > 300:
+            if su_an_ts - last_kline_sync > 1:
                 tüm_gecmis_verileri_guncelle()
                 acik_pozisyonlari_binanceden_guncelle()  
                 last_kline_sync = su_an_ts
