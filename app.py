@@ -33,7 +33,7 @@ class TrendBotConfig:
         self.ISLEM_MARJIN = 1.0        
         self.KALDIRAC = 20             
         self.MAX_ACIK_POZISYON = 10     
-        self.TAHMINI_TP_YUZDE = 0.18   
+        self.TAHMINI_TP_YUZDE = 0.010   
         self.BOT_CALISIYOR = True
         self.COOLDOWN_SURESI = 300     # ⏱️ 5 Dakika zaman kilidi
         
@@ -110,45 +110,34 @@ def atr_hesapla(yuksekler, dusukler, kapanislar, periyod=14):
         lc = abs(dusukler[i] - kapanislar[i-1])
         tr.append(max(hl, hc, lc))
     
-    # Pine Script RMA (Running Moving Average) mantığı ile ATR düzeltmesi
     atr = [sum(tr[:periyod]) / periyod]
     for i in range(periyod, len(tr)):
         atr.append((atr[-1] * (periyod - 1) + tr[i]) / periyod)
     return [0.0] * (periyod - 1) + atr
 
 def strateji_sinyal_uret(v, anlik_fiyat):
-    """ Pine Script Squeeze + N Bars Kırılım stratejisini çalıştırır """
     kapanislar = v["kapanislar"] + [anlik_fiyat]
-    yuksekler = v["yuksekler"] + [v["yuksekler"][-1]] # Canlı bar için tahmini yüksek sabitlemesi
+    yuksekler = v["yuksekler"] + [v["yuksekler"][-1]] 
     dusukler = v["dusukler"] + [v["dusukler"][-1]]
 
     L = len(kapanislar)
-    # Gerekli minimum veri kontrolü
     gerekli_uzunluk = max(config.BB_LEN, config.ATR_LEN, config.RSI_LEN) + config.BARS_CHECK + 3
     if L < gerekli_uzunluk:
         return "HOLD"
 
-    # Bollinger Bands
     basis = sma(kapanislar, config.BB_LEN)
     dev = stdev(kapanislar, config.BB_LEN)
     upper_bb = [basis[i] + (config.BB_MULT * dev[i]) for i in range(L)]
     lower_bb = [basis[i] - (config.BB_MULT * dev[i]) for i in range(L)]
 
-    # Keltner Channels (BB_LEN penceresi tabanlı ATR ile)
     kc_atr = atr_hesapla(yuksekler, dusukler, kapanislar, config.BB_LEN)
     upper_kc = [basis[i] + (kc_atr[i] * config.KC_MULT) for i in range(L)]
     lower_kc = [basis[i] - (kc_atr[i] * config.KC_MULT) for i in range(L)]
 
-    # Squeeze Durum Listesi
     squeeze_on = [(upper_bb[i] < upper_kc[i]) and (lower_bb[i] > lower_kc[i]) for i in range(L)]
-
-    # Sinyal tarama noktası: Pine Script'teki 'bar_index == squeezeBarIndex + barsCheck + 1'
-    # Yani geriye dönük tam olarak (BARS_CHECK + 2). barda squeeze aktif olmalı
     target_idx = -(config.BARS_CHECK + 2)
 
     if squeeze_on[target_idx]:
-        # Squeeze barından sonraki N adet barın en yükseklerinin ortalaması
-        # Pine Script: ta.sma(high, barsCheck)[1]
         dilim_yuksekler = yuksekler[-(config.BARS_CHECK + 1):-1]
         high_avg_prev_n = sum(dilim_yuksekler) / len(dilim_yuksekler)
 
@@ -163,12 +152,10 @@ def strateji_sinyal_uret(v, anlik_fiyat):
         long_ok = current_close > high_avg_prev_n
         short_ok = current_close < high_avg_prev_n
 
-        # ATR Filtresi
         if config.USE_ATR_FILTER:
             long_ok = long_ok and (ext_up <= config.MAX_EXT_LONG_ATR * atr_val)
             short_ok = short_ok and (ext_down <= config.MAX_EXT_SHORT_ATR * atr_val)
 
-        # RSI Filtresi
         if config.USE_RSI_FILTER:
             long_ok = long_ok and (rsi_val > config.RSI_OS)
             short_ok = short_ok and (rsi_val < config.RSI_OB)
@@ -392,7 +379,6 @@ def canlı_radar_dongusu():
                     if su_an_ts - son_islem_zamanlari[symbol] < config.COOLDOWN_SURESI: continue
                     if pos["aktif"]: continue 
 
-                    # Canlı tarama durum analizi
                     sinyal_durumu = strateji_sinyal_uret(v, v["anlik_fiyat"])
                     if sinyal_durumu != "HOLD":
                         radar_adaylari.append({
@@ -430,8 +416,6 @@ def hibrit_tarama_dongusu():
                 last_kline_sync = su_an_ts
 
             with data_lock:
-                guncel_acik_pozisyon_sayisi = sum(1 for s in SYMBOLS if aktif_pozisyonlar[s]["aktif"])
-
                 for symbol in SYMBOLS:
                     v = piyasa_verisi[symbol]
                     pos = aktif_pozisyonlar[symbol]
@@ -442,9 +426,14 @@ def hibrit_tarama_dongusu():
                     if su_an_ts - son_islem_zamanlari[symbol] < config.COOLDOWN_SURESI: continue
 
                     # 📈 SQUEEZE + N BARS GİRİŞ MANTIĞI
-                    if guncel_acik_pozisyon_sayisi < config.MAX_ACIK_POZISYON and not pos["aktif"]:
+                    if not pos["aktif"]:
                         
-                        # Pine Script sinyal tetikleyicisini çalıştır
+                        # 🛑 ANLIK SAYIM: Döngü içinde güncel açık pozisyon sayısı anlık olarak hesaplanır
+                        guncel_acik_pozisyon_sayisi = sum(1 for s in SYMBOLS if aktif_pozisyonlar[s]["aktif"])
+                        
+                        if guncel_acik_pozisyon_sayisi >= config.MAX_ACIK_POZISYON:
+                            continue # Limit doluysa sonraki coine geç
+
                         sinyal = strateji_sinyal_uret(v, anlik_fiyat)
 
                         if sinyal != "HOLD":
@@ -453,20 +442,34 @@ def hibrit_tarama_dongusu():
                             qty = float(int(qty * (10 ** precision))) / (10 ** precision) if precision > 0 else int(qty)
                             if qty <= 0: continue
 
-                            # LONG EMİR (Squeeze Yukarı Kırılım + ATR + RSI Filtreleri Onaylı)
+                            # LONG EMİR
                             if sinyal == "BUY" and pos["yon"] != "SHORT":
                                 try:
                                     client.futures_create_order(symbol=symbol.upper(), side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=qty)
                                     son_islem_zamanlari[symbol] = su_an_ts  
+                                    
+                                    # 🛑 ANLIK SENKRONİZASYON: Yerel durumu hemen güncelle ki sonraki döngü adımında sayılabilsin
+                                    aktif_pozisyonlar[symbol]["aktif"] = True
+                                    aktif_pozisyonlar[symbol]["yon"] = "LONG"
+                                    aktif_pozisyonlar[symbol]["adet"] = qty
+                                    aktif_pozisyonlar[symbol]["giris_fiyati"] = anlik_fiyat
+                                    
                                     telegram_bildir(f"🚀 <b>{symbol.upper()} LONG Pozisyonu Açıldı!</b>\nTetikleyici: Squeeze + N Bars Kırılımı\nFiyat: {anlik_fiyat}")
                                 except Exception as e:
                                     print(f"❌ Long emir hatası ({symbol}): {e}")
                                         
-                            # SHORT EMİR (Squeeze Aşağı Kırılım + ATR + RSI Filtreleri Onaylı)
+                            # SHORT EMİR
                             elif sinyal == "SELL" and pos["yon"] != "LONG":
                                 try:
                                     client.futures_create_order(symbol=symbol.upper(), side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=qty)
                                     son_islem_zamanlari[symbol] = su_an_ts  
+                                    
+                                    # 🛑 ANLIK SENKRONİZASYON: Yerel durumu hemen güncelle
+                                    aktif_pozisyonlar[symbol]["aktif"] = True
+                                    aktif_pozisyonlar[symbol]["yon"] = "SHORT"
+                                    aktif_pozisyonlar[symbol]["adet"] = qty
+                                    aktif_pozisyonlar[symbol]["giris_fiyati"] = anlik_fiyat
+                                    
                                     telegram_bildir(f"🚀 <b>{symbol.upper()} SHORT Pozisyonu Açıldı!</b>\nTetikleyici: Squeeze + N Bars Kırılımı\nFiyat: {anlik_fiyat}")
                                 except Exception as e:
                                     print(f"❌ Short emir hatası ({symbol}): {e}")
@@ -485,6 +488,7 @@ def hibrit_tarama_dongusu():
                                 if qty_to_close > 0:
                                     client.futures_create_order(symbol=symbol.upper(), side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=qty_to_close)
                                     son_islem_zamanlari[symbol] = 0.0  
+                                    aktif_pozisyonlar[symbol]["aktif"] = False
                                     telegram_bildir(f"💰 <b>{symbol.upper()} LONG Kar Alındı!</b>\nNet Kar: %{fark_yuzde * 100:.2f}")
                             except Exception as e:
                                 print(f"❌ Long kapatma hatası ({symbol}): {e}")
@@ -497,6 +501,7 @@ def hibrit_tarama_dongusu():
                                 if qty_to_close > 0:
                                     client.futures_create_order(symbol=symbol.upper(), side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=qty_to_close)
                                     son_islem_zamanlari[symbol] = 0.0  
+                                    aktif_pozisyonlar[symbol]["aktif"] = False
                                     telegram_bildir(f"💰 <b>{symbol.upper()} SHORT Kar Alındı!</b>\nNet Kar: %{-fark_yuzde * 100:.2f}")
                             except Exception as e:
                                 print(f"❌ Short kapatma hatası ({symbol}): {e}")
