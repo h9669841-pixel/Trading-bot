@@ -33,13 +33,25 @@ class TrendBotConfig:
         self.ISLEM_MARJIN = 1.0        
         self.KALDIRAC = 20             
         self.MAX_ACIK_POZISYON = 10     
-        self.RSI_PERIYOD = 14
-        self.RSI_ASTR_SATIM = 32       
-        self.RSI_ASTR_ALIM = 68        
-        self.TAHMINI_TP_YUZDE = 0.010   
+        self.TAHMINI_TP_YUZDE = 0.18   
         self.BOT_CALISIYOR = True
         self.COOLDOWN_SURESI = 300     # ⏱️ 5 Dakika zaman kilidi
-        self.FIB_TOLERANS = 0.025      # 🎯 Fib seviyesine %2.5 yakınlık toleransı
+        
+        # === Pine Script Strateji Parametreleri ===
+        self.BB_LEN = 20
+        self.BB_MULT = 2.0
+        self.KC_MULT = 1.5
+        self.BARS_CHECK = 2            # Squeeze sonrası kontrol edilecek bar sayısı (N)
+        
+        self.USE_ATR_FILTER = True
+        self.ATR_LEN = 14
+        self.MAX_EXT_LONG_ATR = 0.8
+        self.MAX_EXT_SHORT_ATR = 1.6
+        
+        self.USE_RSI_FILTER = True
+        self.RSI_LEN = 14
+        self.RSI_OB = 70
+        self.RSI_OS = 30
 
 config = TrendBotConfig()
 
@@ -52,7 +64,28 @@ son_islem_zamanlari = {}
 data_lock = threading.Lock()
 listen_key = None
 
-# --- 🛠️ TEKNİK ANALİZ MOTORU ---
+# --- 🛠️ MATEMATİKSEL İNDİKATÖR MOTORU (PINE SCRIPT UYUMLU) ---
+
+def sma(seri, periyod):
+    if len(seri) < periyod: return [0.0] * len(seri)
+    res = []
+    current_sum = sum(seri[:periyod])
+    res.append(current_sum / periyod)
+    for i in range(periyod, len(seri)):
+        current_sum += seri[i] - seri[i - periyod]
+        res.append(current_sum / periyod)
+    return [0.0] * (periyod - 1) + res
+
+def stdev(seri, periyod):
+    if len(seri) < periyod: return [0.0] * len(seri)
+    res = [0.0] * (periyod - 1)
+    for i in range(periyod, len(seri) + 1):
+        pencere = seri[i - periyod:i]
+        ort = sum(pencere) / periyod
+        varyans = sum((x - ort) ** 2 for x in pencere) / periyod
+        res.append(math.sqrt(varyans))
+    return res
+
 def rsi_hesapla(kapanislar, periyod=14):
     if len(kapanislar) < periyod + 1: return 50.0
     kazanclar, kayiplar = [], []
@@ -68,18 +101,86 @@ def rsi_hesapla(kapanislar, periyod=14):
     if ort_kayip <= 0.00000001: return 100.0  
     return 100.0 - (100.0 / (1.0 + (ort_kazanc / ort_kayip)))
 
-def fibonacci_seviyelerini_hesapla(yuksekler, dusukler):
-    if not yuksekler or not dusukler: return {}
-    en_yuksek = max(yuksekler[-40:])
-    en_dusuk = min(dusukler[-40:])
-    fark = en_yuksek - en_dusuk
-    if fark <= 0: fark = 0.00000001  
-    return {
-        "fib_618": en_yuksek - (0.618 * fark),
-        "fib_786": en_yuksek - (0.786 * fark),
-        "fib_236": en_yuksek - (0.236 * fark),
-        "fib_382": en_yuksek - (0.382 * fark)
-    }
+def atr_hesapla(yuksekler, dusukler, kapanislar, periyod=14):
+    if len(kapanislar) < 2: return [0.0] * len(kapanislar)
+    tr = [yuksekler[0] - dusukler[0]]
+    for i in range(1, len(kapanislar)):
+        hl = yuksekler[i] - dusukler[i]
+        hc = abs(yuksekler[i] - kapanislar[i-1])
+        lc = abs(dusukler[i] - kapanislar[i-1])
+        tr.append(max(hl, hc, lc))
+    
+    # Pine Script RMA (Running Moving Average) mantığı ile ATR düzeltmesi
+    atr = [sum(tr[:periyod]) / periyod]
+    for i in range(periyod, len(tr)):
+        atr.append((atr[-1] * (periyod - 1) + tr[i]) / periyod)
+    return [0.0] * (periyod - 1) + atr
+
+def strateji_sinyal_uret(v, anlik_fiyat):
+    """ Pine Script Squeeze + N Bars Kırılım stratejisini çalıştırır """
+    kapanislar = v["kapanislar"] + [anlik_fiyat]
+    yuksekler = v["yuksekler"] + [v["yuksekler"][-1]] # Canlı bar için tahmini yüksek sabitlemesi
+    dusukler = v["dusukler"] + [v["dusukler"][-1]]
+
+    L = len(kapanislar)
+    # Gerekli minimum veri kontrolü
+    gerekli_uzunluk = max(config.BB_LEN, config.ATR_LEN, config.RSI_LEN) + config.BARS_CHECK + 3
+    if L < gerekli_uzunluk:
+        return "HOLD"
+
+    # Bollinger Bands
+    basis = sma(kapanislar, config.BB_LEN)
+    dev = stdev(kapanislar, config.BB_LEN)
+    upper_bb = [basis[i] + (config.BB_MULT * dev[i]) for i in range(L)]
+    lower_bb = [basis[i] - (config.BB_MULT * dev[i]) for i in range(L)]
+
+    # Keltner Channels (BB_LEN penceresi tabanlı ATR ile)
+    kc_atr = atr_hesapla(yuksekler, dusukler, kapanislar, config.BB_LEN)
+    upper_kc = [basis[i] + (kc_atr[i] * config.KC_MULT) for i in range(L)]
+    lower_kc = [basis[i] - (kc_atr[i] * config.KC_MULT) for i in range(L)]
+
+    # Squeeze Durum Listesi
+    squeeze_on = [(upper_bb[i] < upper_kc[i]) and (lower_bb[i] > lower_kc[i]) for i in range(L)]
+
+    # Sinyal tarama noktası: Pine Script'teki 'bar_index == squeezeBarIndex + barsCheck + 1'
+    # Yani geriye dönük tam olarak (BARS_CHECK + 2). barda squeeze aktif olmalı
+    target_idx = -(config.BARS_CHECK + 2)
+
+    if squeeze_on[target_idx]:
+        # Squeeze barından sonraki N adet barın en yükseklerinin ortalaması
+        # Pine Script: ta.sma(high, barsCheck)[1]
+        dilim_yuksekler = yuksekler[-(config.BARS_CHECK + 1):-1]
+        high_avg_prev_n = sum(dilim_yuksekler) / len(dilim_yuksekler)
+
+        current_close = kapanislar[-1]
+        rsi_val = rsi_hesapla(kapanislar, config.RSI_LEN)
+        atr_serisi = atr_hesapla(yuksekler, dusukler, kapanislar, config.ATR_LEN)
+        atr_val = atr_serisi[-1]
+
+        ext_up = max(0.0, current_close - high_avg_prev_n)
+        ext_down = max(0.0, high_avg_prev_n - current_close)
+
+        long_ok = current_close > high_avg_prev_n
+        short_ok = current_close < high_avg_prev_n
+
+        # ATR Filtresi
+        if config.USE_ATR_FILTER:
+            long_ok = long_ok and (ext_up <= config.MAX_EXT_LONG_ATR * atr_val)
+            short_ok = short_ok and (ext_down <= config.MAX_EXT_SHORT_ATR * atr_val)
+
+        # RSI Filtresi
+        if config.USE_RSI_FILTER:
+            long_ok = long_ok and (rsi_val > config.RSI_OS)
+            short_ok = short_ok and (rsi_val < config.RSI_OB)
+
+        if long_ok:
+            return "BUY"
+        elif short_ok:
+            return "SELL"
+
+    return "HOLD"
+
+# --- 🌐 TEMEL ALTYAPI FONKSİYONLARI ---
 
 def ilk_100_hacimli_coin_bul():
     try:
@@ -154,7 +255,7 @@ def tüm_gecmis_verileri_guncelle():
                     piyasa_verisi[s]["anlik_fiyat"] = float(k[-1][4])
         except Exception: pass
 
-# --- 🎛️ TELEGRAM KLAVYE MENÜSÜ VE MESAJ YÖNETİMİ ---
+# --- 🎛️ TELEGRAM YÖNETİMİ ---
 def telegram_bildir(mesaj, reply_markup=None):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     try:
@@ -173,11 +274,11 @@ def telegram_canli_rapor_uret():
     acik_pozisyonlari_binanceden_guncelle()
     with data_lock:
         acik_pozlar = sum(1 for s in SYMBOLS if aktif_pozisyonlar[s]["aktif"])
-        durum_str = "🟢 İzole Mod Aktif" if config.BOT_CALISIYOR else "🔴 Sistem Durduruldu"
+        durum_str = "🟢 Squeeze Mod Aktif" if config.BOT_CALISIYOR else "🔴 Sistem Durduruldu"
         poz_buyuklugu = config.ISLEM_MARJIN * config.KALDIRAC
 
         rapor = (
-            f"⚙️ <b>İzole 20x Avcı Botu</b>\n"
+            f"⚙️ <b>Squeeze + N Bars Avcı Botu</b>\n"
             f"• Sistem: {durum_str}\n"
             f"• Marjin: {config.ISLEM_MARJIN:.1f} USDT\n"
             f"• Kaldıraç: {config.KALDIRAC}x (İZOLE)\n"
@@ -211,7 +312,7 @@ def telegram_gelen_mesaj_dinleyici():
                     text = message.get("text", "")
                     
                     if text == "/start":
-                        telegram_bildir("🤖 <b>Bot Kontrol Paneleli Aktif!</b>", reply_markup=ana_menu_olustur())
+                        telegram_bildir("🤖 <b>Bot Kontrol Paneli Aktif!</b>", reply_markup=ana_menu_olustur())
                     elif text == "📊 Bot Durumu":
                         telegram_bildir(telegram_canli_rapor_uret(), reply_markup=ana_menu_olustur())
                     elif text == "▶️ Botu Başlat":
@@ -222,7 +323,7 @@ def telegram_gelen_mesaj_dinleyici():
                         telegram_bildir("⏸️ Bot tarama döngüsü <b>durduruldu.</b>", reply_markup=ana_menu_olustur())
         except Exception: time.sleep(5)
 
-# --- 🔐 HESAP WEBSOCKET'İ ---
+# --- 🔐 WEBSOCKET BAĞLANTILARI ---
 def on_user_message(ws, message):
     try:
         data = json.loads(message)
@@ -253,7 +354,6 @@ def start_user_data_ws():
         ws.run_forever(reconnect=5)
     except Exception: pass
 
-# --- 🌐 TÜM COINLERİN ANLIK FİYATLARINI ÇEKEN WEBSOCKET ---
 def on_market_data_message(ws, message):
     try:
         data = json.loads(message)
@@ -278,8 +378,7 @@ def canlı_radar_dongusu():
     while True:
         try:
             time.sleep(15.0)
-            if not config.BOT_CALISIYOR:
-                continue
+            if not config.BOT_CALISIYOR: continue
 
             radar_adaylari = []
             su_an_ts = time.time()
@@ -289,64 +388,32 @@ def canlı_radar_dongusu():
                     v = piyasa_verisi[symbol]
                     pos = aktif_pozisyonlar[symbol]
                     
-                    if len(v["kapanislar"]) < 40 or not v["anlik_fiyat"] or v["anlik_fiyat"] <= 0: 
-                        continue
-                    
-                    if su_an_ts - son_islem_zamanlari[symbol] < config.COOLDOWN_SURESI:
-                        continue
-                    
-                    if pos["aktif"]:
-                        continue 
+                    if len(v["kapanislar"]) < 40 or not v["anlik_fiyat"] or v["anlik_fiyat"] <= 0: continue
+                    if su_an_ts - son_islem_zamanlari[symbol] < config.COOLDOWN_SURESI: continue
+                    if pos["aktif"]: continue 
 
-                    anlik_fiyat = v["anlik_fiyat"]
-                    kapanislar_canli = v["kapanislar"] + [anlik_fiyat]
-                    
-                    current_rsi = rsi_hesapla(kapanislar_canli)
-                    fib = fibonacci_seviyelerini_hesapla(v["yuksekler"], v["dusukler"])
-                    
-                    if not fib or "fib_618" not in fib: 
-                        continue
-
-                    # Bollinger mesafeleri kalktı, sıralama tamamen Fib ve RSI yakınlığına endekslendi
-                    dist_fib_long = min(abs(anlik_fiyat - fib.get("fib_618", 0)), abs(anlik_fiyat - fib.get("fib_786", 0))) / anlik_fiyat
-                    rsi_score_long = max(0, current_rsi - config.RSI_ASTR_SATIM)
-                    long_yakınlık_skoru = dist_fib_long + (rsi_score_long / 100)
-
-                    dist_fib_short = min(abs(anlik_fiyat - fib.get("fib_236", 0)), abs(anlik_fiyat - fib.get("fib_382", 0))) / anlik_fiyat
-                    rsi_score_short = max(0, config.RSI_ASTR_ALIM - current_rsi)
-                    short_yakınlık_skoru = dist_fib_short + (rsi_score_short / 100)
-
-                    if long_yakınlık_skoru < short_yakınlık_skoru:
+                    # Canlı tarama durum analizi
+                    sinyal_durumu = strateji_sinyal_uret(v, v["anlik_fiyat"])
+                    if sinyal_durumu != "HOLD":
                         radar_adaylari.append({
                             "symbol": symbol.upper(),
-                            "yon": "LONG Yönü",
-                            "fiyat": anlik_fiyat,
-                            "rsi": current_rsi,
-                            "skor": long_yakınlık_skoru
-                        })
-                    else:
-                        radar_adaylari.append({
-                            "symbol": symbol.upper(),
-                            "yon": "SHORT Yönü",
-                            "fiyat": anlik_fiyat,
-                            "rsi": current_rsi,
-                            "skor": short_yakınlık_skoru
+                            "yon": "LONG Yönü" if sinyal_durumu == "BUY" else "SHORT Yönü",
+                            "fiyat": v["anlik_fiyat"],
+                            "sinyal": sinyal_durumu
                         })
 
-            en_yakin_uclü = sorted(radar_adaylari, key=lambda x: x["skor"])[:3]
-
-            if len(en_yakin_uclü) >= 3:
+            if radar_adaylari:
                 zaman_str = datetime.now().strftime("%H:%M:%S")
-                print(f"\n🎯 [CANLI RADAR - {zaman_str}] İşleme En Yakın 3 Coin (Sadece RSI + Fib):")
+                print(f"\n🎯 [CANLI RADAR - {zaman_str}] Squeeze + N Bars Kırılım Adayları:")
                 print("-----------------------------------------------------------------")
-                for i, coin in enumerate(en_yakin_uclü, 1):
-                    print(f"{i}. {coin['symbol']:<10} | {coin['yon']:<11} | {coin['fiyat']:<10} | Anlık RSI: {coin['rsi']:.1f}")
+                for i, coin in enumerate(radar_adaylari[:5], 1):
+                    print(f"{i}. {coin['symbol']:<10} | {coin['yon']:<11} | Sinyal Fiyatı: {coin['fiyat']:<10}")
                 print("-----------------------------------------------------------------")
 
         except Exception as e:
             print(f"❌ Radar hatası: {e}")
 
-# --- 🎯 1 SANİYELİK KOTA DOSTU HİBRİT MOTOR ---
+# --- 🎯 1 SANİYELİK KOTA DOSTU SQUEEZE MOTORU ---
 def hibrit_tarama_dongusu():
     last_kline_sync = 0
     threading.Thread(target=canlı_radar_dongusu, daemon=True).start()
@@ -372,50 +439,39 @@ def hibrit_tarama_dongusu():
                     if len(v["kapanislar"]) < 40 or not v["anlik_fiyat"] or v["anlik_fiyat"] <= 0: continue
                     anlik_fiyat = v["anlik_fiyat"]
                     
-                    if su_an_ts - son_islem_zamanlari[symbol] < config.COOLDOWN_SURESI:
-                        continue
+                    if su_an_ts - son_islem_zamanlari[symbol] < config.COOLDOWN_SURESI: continue
 
-                    kapanislar_canli = v["kapanislar"] + [anlik_fiyat]
-                    
-                    # 📈 GİRİŞ VE EKLEME MANTIĞI (Bollinger Koşulu Kaldırıldı)
-                    if guncel_acik_pozisyon_sayisi < config.MAX_ACIK_POZISYON:
-                        current_rsi = rsi_hesapla(kapanislar_canli)
+                    # 📈 SQUEEZE + N BARS GİRİŞ MANTIĞI
+                    if guncel_acik_pozisyon_sayisi < config.MAX_ACIK_POZISYON and not pos["aktif"]:
                         
-                        fib = fibonacci_seviyelerini_hesapla(v["yuksekler"], v["dusukler"])
-                        if not fib or "fib_618" not in fib: continue
+                        # Pine Script sinyal tetikleyicisini çalıştır
+                        sinyal = strateji_sinyal_uret(v, anlik_fiyat)
 
-                        precision = FUTURES_HASSASIYETLERI.get(symbol, 2)
-                        qty = (config.ISLEM_MARJIN * config.KALDIRAC) / anlik_fiyat
-                        qty = float(int(qty * (10 ** precision))) / (10 ** precision) if precision > 0 else int(qty)
-                        if qty <= 0: continue
+                        if sinyal != "HOLD":
+                            precision = FUTURES_HASSASIYETLERI.get(symbol, 2)
+                            qty = (config.ISLEM_MARJIN * config.KALDIRAC) / anlik_fiyat
+                            qty = float(int(qty * (10 ** precision))) / (10 ** precision) if precision > 0 else int(qty)
+                            if qty <= 0: continue
 
-                        # LONG EMİR (Sadece RSI ve Fib Kontrolü)
-                        if pos["yon"] != "SHORT":
-                            yakin_fib_long = (abs(anlik_fiyat - fib.get("fib_618", 0)) / anlik_fiyat <= config.FIB_TOLERANS or 
-                                              abs(anlik_fiyat - fib.get("fib_786", 0)) / anlik_fiyat <= config.FIB_TOLERANS)
-                            
-                            if current_rsi <= config.RSI_ASTR_SATIM and yakin_fib_long:
+                            # LONG EMİR (Squeeze Yukarı Kırılım + ATR + RSI Filtreleri Onaylı)
+                            if sinyal == "BUY" and pos["yon"] != "SHORT":
                                 try:
                                     client.futures_create_order(symbol=symbol.upper(), side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=qty)
                                     son_islem_zamanlari[symbol] = su_an_ts  
-                                    islem_tipi = "Ekleme Yapıldı" if pos["aktif"] else "Yeni Pozisyon"
-                                    telegram_bildir(f"🚀 <b>{symbol.upper()} LONG {islem_tipi}!</b>\nTetikleyici: RSI + Fib Stratejisi\nFiyat: {anlik_fiyat}\nMevcut RSI: {current_rsi:.1f}")
-                                except Exception: pass
-                                    
-                        # SHORT EMİR (Sadece RSI ve Fib Kontrolü)
-                        elif pos["yon"] != "LONG":
-                            yakin_fib_short = (abs(anlik_fiyat - fib.get("fib_236", 0)) / anlik_fiyat <= config.FIB_TOLERANS or 
-                                               abs(anlik_fiyat - fib.get("fib_382", 0)) / anlik_fiyat <= config.FIB_TOLERANS)
-                            
-                            if current_rsi >= config.RSI_ASTR_ALIM and yakin_fib_short:
+                                    telegram_bildir(f"🚀 <b>{symbol.upper()} LONG Pozisyonu Açıldı!</b>\nTetikleyici: Squeeze + N Bars Kırılımı\nFiyat: {anlik_fiyat}")
+                                except Exception as e:
+                                    print(f"❌ Long emir hatası ({symbol}): {e}")
+                                        
+                            # SHORT EMİR (Squeeze Aşağı Kırılım + ATR + RSI Filtreleri Onaylı)
+                            elif sinyal == "SELL" and pos["yon"] != "LONG":
                                 try:
                                     client.futures_create_order(symbol=symbol.upper(), side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=qty)
                                     son_islem_zamanlari[symbol] = su_an_ts  
-                                    islem_tipi = "Ekleme Yapıldı" if pos["aktif"] else "Yeni Pozisyon"
-                                    telegram_bildir(f"🚀 <b>{symbol.upper()} SHORT {islem_tipi}!</b>\nTetikleyici: RSI + Fib Stratejisi\nFiyat: {anlik_fiyat}\nMevcut RSI: {current_rsi:.1f}")
-                                except Exception: pass
+                                    telegram_bildir(f"🚀 <b>{symbol.upper()} SHORT Pozisyonu Açıldı!</b>\nTetikleyici: Squeeze + N Bars Kırılımı\nFiyat: {anlik_fiyat}")
+                                except Exception as e:
+                                    print(f"❌ Short emir hatası ({symbol}): {e}")
                     
-                    # 🎯 ÇIKIŞ MANTIĞI
+                    # 🎯 ÇIKIŞ MANTIĞI (% TP Kontrolü)
                     if pos["aktif"]:
                         maliyet = pos["giris_fiyati"]
                         if maliyet <= 0: continue
@@ -449,9 +505,9 @@ def hibrit_tarama_dongusu():
             print(f"❌ Ana döngü hatası: {e}")
             time.sleep(1.0)
 
-# --- 🚀 ANA ÇALIŞTIRICI SİSTEM (MAIN GENERATOR) ---
+# --- 🚀 ANA ÇALIŞTIRICI SİSTEM ---
 if __name__ == "__main__":
-    print("🎬 Bot başlatılıyor (Bollinger Devre Dışı)...")
+    print("🎬 Squeeze + N Bars Avcı Botu Başlatılıyor...")
     
     hacimli_coinler = ilk_100_hacimli_coin_bul()
     print(f"📋 İlk etapta {len(hacimli_coinler)} adet hacimli coin tespit edildi.")
@@ -468,10 +524,10 @@ if __name__ == "__main__":
     
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
         threading.Thread(target=telegram_gelen_mesaj_dinleyici, daemon=True).start()
-        telegram_bildir("🤖 <b>İzole Avcı Botu Bollinger Filtresi Olmadan Başlatıldı!</b>")
+        telegram_bildir("🤖 <b>Squeeze + N Bars Kırılımı Botu Başlatıldı!</b>")
     
     threading.Thread(target=start_user_data_ws, daemon=True).start()
     threading.Thread(target=start_market_data_ws, daemon=True).start()
     
-    print("⚡ Tüm sistemler aktif. Sadece RSI + Fib tarama motoru ve asenkron Canlı Radar başlatıldı.")
+    print("⚡ Tüm sistemler aktif. Squeeze tarama motoru ve asenkron Canlı Radar başlatıldı.")
     hibrit_tarama_dongusu()
