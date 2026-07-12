@@ -284,9 +284,91 @@ def start_market_data_ws():
         ws.run_forever(reconnect=5)
     except Exception: pass
 
+# --- 🛰️ ASENKRON CANLI RADAR EK MOTORU (15s DÖNGÜSÜ) ---
+def canlı_radar_dongusu():
+    while True:
+        try:
+            time.sleep(15.0)
+            if not config.BOT_CALISIYOR:
+                continue
+
+            radar_adaylari = []
+            su_an_ts = time.time()
+
+            with data_lock:
+                for symbol in SYMBOLS:
+                    v = piyasa_verisi[symbol]
+                    pos = aktif_pozisyonlar[symbol]
+                    
+                    if len(v["kapanislar"]) < 40 or not v["anlik_fiyat"] or v["anlik_fiyat"] <= 0: 
+                        continue
+                    
+                    if su_an_ts - son_islem_zamanlari[symbol] < config.COOLDOWN_SURESI:
+                        continue
+                    
+                    if pos["aktif"]:
+                        continue # Halihazırda açık pozisyonu olanı radara dahil etme
+
+                    anlik_fiyat = v["anlik_fiyat"]
+                    kapanislar_canli = v["kapanislar"] + [anlik_fiyat]
+                    
+                    ust_bant, _, alt_bant = bollinger_bands(kapanislar_canli)
+                    current_rsi = rsi_hesapla(kapanislar_canli)
+                    fib = fibonacci_seviyelerini_hesapla(v["yuksekler"], v["dusukler"])
+                    
+                    if not fib or "fib_618" not in fib: 
+                        continue
+
+                    # LONG skoru hesaplama (Fiyat alt banta ne kadar yakın, RSI dipte mi ve Fib'e mesafesi ne?)
+                    dist_bb_long = max(0, anlik_fiyat - alt_bant) / (anlik_fiyat if anlik_fiyat > 0 else 1)
+                    dist_fib_long = min(abs(anlik_fiyat - fib.get("fib_618", 0)), abs(anlik_fiyat - fib.get("fib_786", 0))) / anlik_fiyat
+                    rsi_score_long = max(0, current_rsi - config.RSI_ASTR_SATIM)
+                    long_yakınlık_skoru = dist_bb_long + dist_fib_long + (rsi_score_long / 100)
+
+                    # SHORT skoru hesaplama (Fiyat üst banta ne kadar yakın, RSI tepede mi ve Fib'e mesafesi ne?)
+                    dist_bb_short = max(0, ust_bant - anlik_fiyat) / (anlik_fiyat if anlik_fiyat > 0 else 1)
+                    dist_fib_short = min(abs(anlik_fiyat - fib.get("fib_236", 0)), abs(anlik_fiyat - fib.get("fib_382", 0))) / anlik_fiyat
+                    rsi_score_short = max(0, config.RSI_ASTR_ALIM - current_rsi)
+                    short_yakınlık_skoru = dist_bb_short + dist_fib_short + (rsi_score_short / 100)
+
+                    # Hangi yönün stratejisine daha yakınsa onu adaya ekle
+                    if long_yakınlık_skoru < short_yakınlık_skoru:
+                        radar_adaylari.append({
+                            "symbol": symbol.upper(),
+                            "yon": "LONG Yönü",
+                            "fiyat": anlik_fiyat,
+                            "rsi": current_rsi,
+                            "skor": long_yakınlık_skoru
+                        })
+                    else:
+                        radar_adaylari.append({
+                            "symbol": symbol.upper(),
+                            "yon": "SHORT Yönü",
+                            "fiyat": anlik_fiyat,
+                            "rsi": current_rsi,
+                            "skor": short_yakınlık_skoru
+                        })
+
+            # Skoru en düşük olan (yani strateji bariyerlerine en yakın olan) ilk 3 coini seç
+            en_yakin_uclü = sorted(radar_adaylari, key=lambda x: x["skor"])[:3]
+
+            if len(en_yakin_uclü) >= 3:
+                zaman_str = datetime.now().strftime("%H:%M:%S")
+                print(f"\n🎯 [CANLI RADAR - {zaman_str}] İşleme En Yakın 3 Coin:")
+                print("-----------------------------------------------------------------")
+                for i, coin in enumerate(en_yakin_uclü, 1):
+                    print(f"{i}. {coin['symbol']:<10} | {coin['yon']:<11} | {coin['fiyat']:<10} | Anlık RSI: {coin['rsi']:.1f}")
+                print("-----------------------------------------------------------------")
+
+        except Exception as e:
+            print(f"❌ Radar hatası: {e}")
+
 # --- 🎯 1 SANİYELİK KOTA DOSTU HİBRİT MOTOR ---
 def hibrit_tarama_dongusu():
     last_kline_sync = 0
+    # Canlı radar yapısını arka planda başlatıyoruz
+    threading.Thread(target=canlı_radar_dongusu, daemon=True).start()
+
     while True:
         try:
             if not config.BOT_CALISIYOR:
@@ -311,15 +393,12 @@ def hibrit_tarama_dongusu():
                     if su_an_ts - son_islem_zamanlari[symbol] < config.COOLDOWN_SURESI:
                         continue
 
-                    # Canlı fiyatın anlık gücünü RSI ve Bollinger'a katmak için geçici dizi oluşturuyoruz
-                    # Bu sayede geçmiş kapanışlara bakıp anlık gecikmeyi ortadan kaldırdık
                     kapanislar_canli = v["kapanislar"] + [anlik_fiyat]
                     
                     # 📈 GİRİŞ VE EKLEME MANTIĞI
                     if guncel_acik_pozisyon_sayisi < config.MAX_ACIK_POZISYON:
                         ust_bant, _, alt_bant = bollinger_bands(kapanislar_canli)
                         
-                        # RSI Dönüş Onayı için: Önceki periyodun RSI'ı ve Anlık Fiyatın dahil olduğu Current RSI hesaplanıyor
                         prev_rsi = rsi_hesapla(v["kapanislar"]) 
                         current_rsi = rsi_hesapla(kapanislar_canli)
                         
@@ -333,11 +412,10 @@ def hibrit_tarama_dongusu():
 
                         # LONG EMİR
                         if pos["yon"] != "SHORT":
-                            # Fib kuralı %0.6'dan %1.5'e (0.015) esnetildi
                             yakin_fib_long = (abs(anlik_fiyat - fib.get("fib_618", 0)) / anlik_fiyat <= 0.015 or abs(anlik_fiyat - fib.get("fib_786", 0)) / anlik_fiyat <= 0.015)
                             
                             standart_long = anlik_fiyat <= alt_bant and current_rsi <= config.RSI_ASTR_SATIM and yakin_fib_long
-                            rsi_donus_long = prev_rsi < 25 and current_rsi >= 25 and anlik_fiyat <= alt_bant # RSI Yapışma Koruması
+                            rsi_donus_long = prev_rsi < 25 and current_rsi >= 25 and anlik_fiyat <= alt_bant 
                             
                             if standart_long or rsi_donus_long:
                                 try:
@@ -350,11 +428,10 @@ def hibrit_tarama_dongusu():
                                     
                         # SHORT EMİR
                         elif pos["yon"] != "LONG":
-                            # Fib kuralı %0.6'dan %1.5'e (0.015) esnetildi
                             yakin_fib_short = (abs(anlik_fiyat - fib.get("fib_236", 0)) / anlik_fiyat <= 0.015 or abs(anlik_fiyat - fib.get("fib_382", 0)) / anlik_fiyat <= 0.015)
                             
                             standart_short = anlik_fiyat >= ust_bant and current_rsi >= config.RSI_ASTR_ALIM and yakin_fib_short
-                            rsi_donus_short = prev_rsi > 75 and current_rsi <= 75 and anlik_fiyat >= ust_bant # RSI Yapışma Koruması
+                            rsi_donus_short = prev_rsi > 75 and current_rsi <= 75 and anlik_fiyat >= ust_bant 
                             
                             if standart_short or rsi_donus_short:
                                 try:
@@ -371,10 +448,8 @@ def hibrit_tarama_dongusu():
                         if maliyet <= 0: continue
                         fark_yuzde = (anlik_fiyat - maliyet) / maliyet
                         
-                        # %1 hedefine milimetrik (0.0005) esneklik tanındı
                         if pos["yon"] == "LONG" and fark_yuzde >= (config.TAHMINI_TP_YUZDE - 0.0005):
                             try:
-                                # Komisyon hatası yememek için anlık borsa net adedi sorgulanır
                                 actual_pos = next((p for p in client.futures_position_information() if p["symbol"] == symbol.upper()), None)
                                 qty_to_close = abs(float(actual_pos.get("positionAmt", 0))) if actual_pos else pos["adet"]
                                 
@@ -387,32 +462,16 @@ def hibrit_tarama_dongusu():
                                     
                         elif pos["yon"] == "SHORT" and fark_yuzde <= -(config.TAHMINI_TP_YUZDE - 0.0005):
                             try:
-                                # Komisyon hatası yememek için anlık borsa net adedi sorgulanır
                                 actual_pos = next((p for p in client.futures_position_information() if p["symbol"] == symbol.upper()), None)
                                 qty_to_close = abs(float(actual_pos.get("positionAmt", 0))) if actual_pos else pos["adet"]
                                 
                                 if qty_to_close > 0:
                                     client.futures_create_order(symbol=symbol.upper(), side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=qty_to_close)
                                     son_islem_zamanlari[symbol] = 0.0  
-                                    telegram_bildir(f"💰 <b>{symbol.upper()} SHORT Kar Alındı!</b>\nNet Kar: %{abs(fark_yuzde) * 100:.2f}")
+                                    telegram_bildir(f"💰 <b>{symbol.upper()} SHORT Kar Alındı!</b>\nNet Kar: %{-fark_yuzde * 100:.2f}")
                             except Exception as e:
                                 print(f"❌ Short kapatma hatası ({symbol}): {e}")
-
-        except Exception: traceback.print_exc()
-        time.sleep(1.0) 
-
-if __name__ == "__main__":
-    aday_listesi = ilk_100_hacimli_coin_bul()
-    if not aday_listesi: exit()
-    for coin in aday_listesi: kontrollu_coin_ekle(coin)
-    
-    tüm_gecmis_verileri_guncelle()
-    acik_pozisyonlari_binanceden_guncelle()
-    
-    threading.Thread(target=start_user_data_ws, daemon=True).start()
-    threading.Thread(target=start_market_data_ws, daemon=True).start() 
-    threading.Thread(target=telegram_gelen_mesaj_dinleyici, daemon=True).start()
-    
-    time.sleep(2.0)
-    telegram_bildir(telegram_canli_rapor_uret(), reply_markup=ana_menu_olustur())
-    hibrit_tarama_dongusu()
+            time.sleep(1.0)
+        except Exception as e:
+            print(f"❌ Ana döngü hatası: {e}")
+            time.sleep(1.0)
