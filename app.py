@@ -36,11 +36,10 @@ class TrendBotConfig:
         self.RSI_PERIYOD = 14
         self.RSI_ASTR_SATIM = 32       
         self.RSI_ASTR_ALIM = 68        
-        self.BOLLINGER_PERIYOD = 20
-        self.BOLLINGER_STANDART_SAPMA = 2
         self.TAHMINI_TP_YUZDE = 0.010   
         self.BOT_CALISIYOR = True
         self.COOLDOWN_SURESI = 300     # ⏱️ 5 Dakika zaman kilidi
+        self.FIB_TOLERANS = 0.025      # 🎯 Fib seviyesine %2.5 yakınlık toleransı
 
 config = TrendBotConfig()
 
@@ -68,16 +67,6 @@ def rsi_hesapla(kapanislar, periyod=14):
         ort_kayip = (ort_kayip * (periyod - 1) + kayiplar[i]) / periyod
     if ort_kayip <= 0.00000001: return 100.0  
     return 100.0 - (100.0 / (1.0 + (ort_kazanc / ort_kayip)))
-
-def bollinger_bands(kapanislar, periyod=20, standart_sapma=2):
-    if len(kapanislar) < periyod: return 0.0, 0.0, 0.0
-    veri = kapanislar[-periyod:]
-    orta_bant = sum(veri) / periyod
-    varyans = sum((x - orta_bant) ** 2 for x in veri) / periyod
-    if varyans <= 0: varyans = 0.00000001  
-    ust_bant = orta_bant + (standart_sapma * math.sqrt(varyans))
-    alt_bant = orta_bant - (standart_sapma * math.sqrt(varyans))
-    return ust_bant, orta_bant, alt_bant
 
 def fibonacci_seviyelerini_hesapla(yuksekler, dusukler):
     if not yuksekler or not dusukler: return {}
@@ -222,7 +211,7 @@ def telegram_gelen_mesaj_dinleyici():
                     text = message.get("text", "")
                     
                     if text == "/start":
-                        telegram_bildir("🤖 <b>Bot Kontrol Paneli Aktif!</b>", reply_markup=ana_menu_olustur())
+                        telegram_bildir("🤖 <b>Bot Kontrol Paneleli Aktif!</b>", reply_markup=ana_menu_olustur())
                     elif text == "📊 Bot Durumu":
                         telegram_bildir(telegram_canli_rapor_uret(), reply_markup=ana_menu_olustur())
                     elif text == "▶️ Botu Başlat":
@@ -312,22 +301,20 @@ def canlı_radar_dongusu():
                     anlik_fiyat = v["anlik_fiyat"]
                     kapanislar_canli = v["kapanislar"] + [anlik_fiyat]
                     
-                    ust_bant, _, alt_bant = bollinger_bands(kapanislar_canli)
                     current_rsi = rsi_hesapla(kapanislar_canli)
                     fib = fibonacci_seviyelerini_hesapla(v["yuksekler"], v["dusukler"])
                     
                     if not fib or "fib_618" not in fib: 
                         continue
 
-                    dist_bb_long = max(0, anlik_fiyat - alt_bant) / (anlik_fiyat if anlik_fiyat > 0 else 1)
+                    # Bollinger mesafeleri kalktı, sıralama tamamen Fib ve RSI yakınlığına endekslendi
                     dist_fib_long = min(abs(anlik_fiyat - fib.get("fib_618", 0)), abs(anlik_fiyat - fib.get("fib_786", 0))) / anlik_fiyat
                     rsi_score_long = max(0, current_rsi - config.RSI_ASTR_SATIM)
-                    long_yakınlık_skoru = dist_bb_long + dist_fib_long + (rsi_score_long / 100)
+                    long_yakınlık_skoru = dist_fib_long + (rsi_score_long / 100)
 
-                    dist_bb_short = max(0, ust_bant - anlik_fiyat) / (anlik_fiyat if anlik_fiyat > 0 else 1)
                     dist_fib_short = min(abs(anlik_fiyat - fib.get("fib_236", 0)), abs(anlik_fiyat - fib.get("fib_382", 0))) / anlik_fiyat
                     rsi_score_short = max(0, config.RSI_ASTR_ALIM - current_rsi)
-                    short_yakınlık_skoru = dist_bb_short + dist_fib_short + (rsi_score_short / 100)
+                    short_yakınlık_skoru = dist_fib_short + (rsi_score_short / 100)
 
                     if long_yakınlık_skoru < short_yakınlık_skoru:
                         radar_adaylari.append({
@@ -350,7 +337,7 @@ def canlı_radar_dongusu():
 
             if len(en_yakin_uclü) >= 3:
                 zaman_str = datetime.now().strftime("%H:%M:%S")
-                print(f"\n🎯 [CANLI RADAR - {zaman_str}] İşleme En Yakın 3 Coin:")
+                print(f"\n🎯 [CANLI RADAR - {zaman_str}] İşleme En Yakın 3 Coin (Sadece RSI + Fib):")
                 print("-----------------------------------------------------------------")
                 for i, coin in enumerate(en_yakin_uclü, 1):
                     print(f"{i}. {coin['symbol']:<10} | {coin['yon']:<11} | {coin['fiyat']:<10} | Anlık RSI: {coin['rsi']:.1f}")
@@ -390,9 +377,8 @@ def hibrit_tarama_dongusu():
 
                     kapanislar_canli = v["kapanislar"] + [anlik_fiyat]
                     
-                    # 📈 GİRİŞ VE EKLEME MANTIĞI
+                    # 📈 GİRİŞ VE EKLEME MANTIĞI (Bollinger Koşulu Kaldırıldı)
                     if guncel_acik_pozisyon_sayisi < config.MAX_ACIK_POZISYON:
-                        ust_bant, _, alt_bant = bollinger_bands(kapanislar_canli)
                         current_rsi = rsi_hesapla(kapanislar_canli)
                         
                         fib = fibonacci_seviyelerini_hesapla(v["yuksekler"], v["dusukler"])
@@ -403,28 +389,30 @@ def hibrit_tarama_dongusu():
                         qty = float(int(qty * (10 ** precision))) / (10 ** precision) if precision > 0 else int(qty)
                         if qty <= 0: continue
 
-                        # LONG EMİR (Sadece limit içi kontrol)
+                        # LONG EMİR (Sadece RSI ve Fib Kontrolü)
                         if pos["yon"] != "SHORT":
-                            yakin_fib_long = (abs(anlik_fiyat - fib.get("fib_618", 0)) / anlik_fiyat <= 0.015 or abs(anlik_fiyat - fib.get("fib_786", 0)) / anlik_fiyat <= 0.015)
+                            yakin_fib_long = (abs(anlik_fiyat - fib.get("fib_618", 0)) / anlik_fiyat <= config.FIB_TOLERANS or 
+                                              abs(anlik_fiyat - fib.get("fib_786", 0)) / anlik_fiyat <= config.FIB_TOLERANS)
                             
-                            if anlik_fiyat <= alt_bant and current_rsi <= config.RSI_ASTR_SATIM and yakin_fib_long:
+                            if current_rsi <= config.RSI_ASTR_SATIM and yakin_fib_long:
                                 try:
                                     client.futures_create_order(symbol=symbol.upper(), side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=qty)
                                     son_islem_zamanlari[symbol] = su_an_ts  
                                     islem_tipi = "Ekleme Yapıldı" if pos["aktif"] else "Yeni Pozisyon"
-                                    telegram_bildir(f"🚀 <b>{symbol.upper()} LONG {islem_tipi}!</b>\nTetikleyici: Standart Strateji\nFiyat: {anlik_fiyat}\nMevcut RSI: {current_rsi:.1f}")
+                                    telegram_bildir(f"🚀 <b>{symbol.upper()} LONG {islem_tipi}!</b>\nTetikleyici: RSI + Fib Stratejisi\nFiyat: {anlik_fiyat}\nMevcut RSI: {current_rsi:.1f}")
                                 except Exception: pass
                                     
-                        # SHORT EMİR (Sadece limit içi kontrol)
+                        # SHORT EMİR (Sadece RSI ve Fib Kontrolü)
                         elif pos["yon"] != "LONG":
-                            yakin_fib_short = (abs(anlik_fiyat - fib.get("fib_236", 0)) / anlik_fiyat <= 0.015 or abs(anlik_fiyat - fib.get("fib_382", 0)) / anlik_fiyat <= 0.015)
+                            yakin_fib_short = (abs(anlik_fiyat - fib.get("fib_236", 0)) / anlik_fiyat <= config.FIB_TOLERANS or 
+                                               abs(anlik_fiyat - fib.get("fib_382", 0)) / anlik_fiyat <= config.FIB_TOLERANS)
                             
-                            if anlik_fiyat >= ust_bant and current_rsi >= config.RSI_ASTR_ALIM and yakin_fib_short:
+                            if current_rsi >= config.RSI_ASTR_ALIM and yakin_fib_short:
                                 try:
                                     client.futures_create_order(symbol=symbol.upper(), side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=qty)
                                     son_islem_zamanlari[symbol] = su_an_ts  
                                     islem_tipi = "Ekleme Yapıldı" if pos["aktif"] else "Yeni Pozisyon"
-                                    telegram_bildir(f"🚀 <b>{symbol.upper()} SHORT {islem_tipi}!</b>\nTetikleyici: Standart Strateji\nFiyat: {anlik_fiyat}\nMevcut RSI: {current_rsi:.1f}")
+                                    telegram_bildir(f"🚀 <b>{symbol.upper()} SHORT {islem_tipi}!</b>\nTetikleyici: RSI + Fib Stratejisi\nFiyat: {anlik_fiyat}\nMevcut RSI: {current_rsi:.1f}")
                                 except Exception: pass
                     
                     # 🎯 ÇIKIŞ MANTIĞI
@@ -463,7 +451,7 @@ def hibrit_tarama_dongusu():
 
 # --- 🚀 ANA ÇALIŞTIRICI SİSTEM (MAIN GENERATOR) ---
 if __name__ == "__main__":
-    print("🎬 Bot başlatılıyor...")
+    print("🎬 Bot başlatılıyor (Bollinger Devre Dışı)...")
     
     hacimli_coinler = ilk_100_hacimli_coin_bul()
     print(f"📋 İlk etapta {len(hacimli_coinler)} adet hacimli coin tespit edildi.")
@@ -480,10 +468,10 @@ if __name__ == "__main__":
     
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
         threading.Thread(target=telegram_gelen_mesaj_dinleyici, daemon=True).start()
-        telegram_bildir("🤖 <b>İzole Avcı Botu Railway Üzerinde Başarıyla Başlatıldı!</b>")
+        telegram_bildir("🤖 <b>İzole Avcı Botu Bollinger Filtresi Olmadan Başlatıldı!</b>")
     
     threading.Thread(target=start_user_data_ws, daemon=True).start()
     threading.Thread(target=start_market_data_ws, daemon=True).start()
     
-    print("⚡ Tüm sistemler aktif. Tarama motoru ve asenkron Canlı Radar başlatıldı.")
+    print("⚡ Tüm sistemler aktif. Sadece RSI + Fib tarama motoru ve asenkron Canlı Radar başlatıldı.")
     hibrit_tarama_dongusu()
