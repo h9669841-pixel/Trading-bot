@@ -132,18 +132,12 @@ def kontrollu_coin_ekle(coin_adi):
         return True
     except Exception: return False
 
-# 🔍 MEVCUT AÇIK POZİSYONLARI ZORUNLU SENKRONİZE EDEN YENİ SİHİRLİ FONKSİYON
 def acik_pozisyonlari_binanceden_guncelle():
-    """WebSocket gecikmelerine karşı API'den açık pozisyonları zorla çeker."""
     try:
-        # Proxy ayarları atanmış client üzerinden güvenli istek atıyoruz
         pozisyonlar = client.futures_position_information()
         with data_lock:
-            # Önce tüm listeyi temizle (kapandıysa sıfırlansın)
             for s in SYMBOLS:
                 aktif_pozisyonlar[s] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0}
-            
-            # Sadece adeti 0'dan farklı olan aktif pozları haritaya işle
             for p in pozisyonlar:
                 sym = p.get("symbol", "").lower()
                 if sym in aktif_pozisyonlar:
@@ -159,6 +153,7 @@ def acik_pozisyonlari_binanceden_guncelle():
         print(f"❌ Pozisyon senkronizasyon hatası: {e}")
 
 def tüm_gecmis_verileri_guncelle():
+    """Kota dostu olması için bu fonksiyonun tetiklenme aralığı hibrit döngüde optimize edildi."""
     for s in SYMBOLS:
         try:
             url = f"https://fapi.binance.com/fapi/v1/klines?symbol={s.upper()}&interval={config.TIMEFRAME}&limit=60"
@@ -167,7 +162,8 @@ def tüm_gecmis_verileri_guncelle():
                 piyasa_verisi[s]["kapanislar"] = [float(x[4]) for x in k]
                 piyasa_verisi[s]["yuksekler"] = [float(x[2]) for x in k]
                 piyasa_verisi[s]["dusukler"] = [float(x[3]) for x in k]
-                piyasa_verisi[s]["anlik_fiyat"] = float(k[-1][4])
+                if k and len(k) > 0 and piyasa_verisi[s]["anlik_fiyat"] is None:
+                    piyasa_verisi[s]["anlik_fiyat"] = float(k[-1][4])
         except Exception: pass
 
 # --- 🎛️ TELEGRAM KLAVYE MENÜSÜ VE MESAJ YÖNETİMİ ---
@@ -186,9 +182,7 @@ def ana_menu_olustur():
     }
 
 def telegram_canli_rapor_uret():
-    # Rapor üretilmeden hemen önce API'den bir kez daha zorunlu senkronizasyon yapalım ki veriler %100 doğru olsun
     acik_pozisyonlari_binanceden_guncelle()
-    
     with data_lock:
         acik_pozlar = sum(1 for s in SYMBOLS if aktif_pozisyonlar[s]["aktif"])
         durum_str = "🟢 İzole Mod Aktif" if config.BOT_CALISIYOR else "🔴 Sistem Durduruldu"
@@ -271,40 +265,58 @@ def start_user_data_ws():
         ws.run_forever(reconnect=5)
     except Exception: pass
 
-# --- 🎯 KOTA DOSTU HİBRİT MOTOR ---
+# --- 🌐 TÜM COINLERİN ANLIK FİYATLARINI ÇEKEN SIFIR KOTALI YENI WEBSOCKET ---
+def on_market_data_message(ws, message):
+    try:
+        data = json.loads(message)
+        # Binance tüm market verisini liste halinde fırlatır
+        if isinstance(data, list):
+            with data_lock:
+                for ticker in data:
+                    sym = ticker.get("s", "").lower()
+                    if sym in piyasa_verisi:
+                        piyasa_verisi[sym]["anlik_fiyat"] = float(ticker.get("c", 0))
+    except Exception: pass
+
+def start_market_data_ws():
+    """100 coin için tek hattan akış dinleyen toplu mini-ticker websocket bağlantısı."""
+    try:
+        ws = WebSocketApp("wss://fstream.binance.com/ws/!ticker@arr", 
+                          on_message=on_market_data_message, 
+                          on_close=lambda ws,c,m: time.sleep(2))
+        ws.run_forever(reconnect=5)
+    except Exception: pass
+
+# --- 🎯 1 SANİYELİK KOTA DOSTU HİBRİT MOTOR ---
 def hibrit_tarama_dongusu():
     last_kline_sync = 0
     while True:
         try:
             if not config.BOT_CALISIYOR:
-                time.sleep(2.0); continue
+                time.sleep(1.0); continue
                 
             su_an_ts = time.time()
+            # Klines ve pozisyon sync işlemlerini 5 dakikada (300 saniyede) bire çekerek API kotasını koruyoruz.
             if su_an_ts - last_kline_sync > 300:
                 tüm_gecmis_verileri_guncelle()
-                acik_pozisyonlari_binanceden_guncelle()  # 🔄 Her 5 dakikada bir pozisyonları API'den zorunlu check et
+                acik_pozisyonlari_binanceden_guncelle()  
                 last_kline_sync = su_an_ts
 
-            prices_raw = requests.get("https://fapi.binance.com/fapi/v1/ticker/price", timeout=10).json()
-            prices_dict = {x["symbol"].lower(): float(x["price"]) for x in prices_raw}
-
             with data_lock:
-                for s in SYMBOLS:
-                    if s in prices_dict: piyasa_verisi[s]["anlik_fiyat"] = prices_dict[s]
-
                 guncel_acik_pozisyon_sayisi = sum(1 for s in SYMBOLS if aktif_pozisyonlar[s]["aktif"])
 
                 for symbol in SYMBOLS:
                     v = piyasa_verisi[symbol]
                     pos = aktif_pozisyonlar[symbol]
                     
+                    # Fiyat artık WebSocket'ten (start_market_data_ws) saniyelik ve canlı akıyor!
                     if len(v["kapanislar"]) < 20 or not v["anlik_fiyat"] or v["anlik_fiyat"] <= 0: continue
                     anlik_fiyat = v["anlik_fiyat"]
                     
                     if su_an_ts - son_islem_zamanlari[symbol] < config.COOLDOWN_SURESI:
                         continue
 
-                    # 📈 GİRİŞ VE EKLEME MANTIĞI
+                    # 📈 GİRİŞ VE EKLEME MANTIĞI (1 Saniyede Bir Kontrol Edilir)
                     if guncel_acik_pozisyon_sayisi < config.MAX_ACIK_POZISYON:
                         ust_bant, _, alt_bant = bollinger_bands(v["kapanislar"])
                         rsi = rsi_hesapla(v["kapanislar"])
@@ -337,7 +349,7 @@ def hibrit_tarama_dongusu():
                                     telegram_bildir(f"🚀 <b>{symbol.upper()} SHORT {islem_tipi}!</b>\nFiyat: {anlik_fiyat}")
                                 except Exception: pass
                     
-                    # 🎯 ÇIKIŞ MANTIĞI
+                    # 🎯 ÇIKIŞ MANTIĞI (1 Saniyede Bir Kontrol Edilir)
                     if pos["aktif"]:
                         maliyet = pos["giris_fiyati"]
                         if maliyet <= 0: continue
@@ -358,18 +370,19 @@ def hibrit_tarama_dongusu():
                             except Exception: pass
 
         except Exception: traceback.print_exc()
-        time.sleep(1.0)
+        time.sleep(1.0) # ⚡ Artık güvenle 1 saniyede bir dönebilir!
 
 if __name__ == "__main__":
     aday_listesi = ilk_100_hacimli_coin_bul()
     if not aday_listesi: exit()
     for coin in aday_listesi: kontrollu_coin_ekle(coin)
     
-    # 🚀 İLK AÇILIŞTA MEVCUT POZİSYONLARI APIden ÇEKİP HAFIZAYI DOLDURUYORUZ
     tüm_gecmis_verileri_guncelle()
     acik_pozisyonlari_binanceden_guncelle()
     
+    # Arka plan iş parçacıklarını başlatıyoruz
     threading.Thread(target=start_user_data_ws, daemon=True).start()
+    threading.Thread(target=start_market_data_ws, daemon=True).start() # 🌐 Fiyat akış hattı açıldı
     threading.Thread(target=telegram_gelen_mesaj_dinleyici, daemon=True).start()
     
     time.sleep(2.0)
