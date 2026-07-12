@@ -33,7 +33,7 @@ class TrendBotConfig:
         self.ISLEM_MARJIN = 1.0        
         self.KALDIRAC = 20             
         self.MAX_ACIK_POZISYON = 10     
-        self.TAHMINI_TP_YUZDE = 0.010   
+        self.TAHMINI_TP_YUZDE = 0.005   
         self.BOT_CALISIYOR = True
         self.COOLDOWN_SURESI = 300     
         
@@ -290,7 +290,7 @@ def telegram_canli_rapor_uret():
             f"• Kaldıraç: {config.KALDIRAC}x (İZOLE)\n"
             f"• Poz Büyüklüğü: {poz_buyuklugu:.1f} USDT\n"
             f"• Risk Limiti: {acik_pozlar}/{config.MAX_ACIK_POZISYON} Pozisyon\n"
-            f"• TP Hedefi: %{config.TAHMINI_TP_YUZDE * 100:.1f}\n\n"
+            f"• TP Hedefi: %1.0 (Sabit)\n\n"
             f"⚡ <b>Açık İşlemler:</b>\n"
         )
 
@@ -491,28 +491,27 @@ def hibrit_tarama_dongusu():
                 anlik_fiyat = v["anlik_fiyat"]
 
                 # ==========================================
-                # 🎯 ÇIKIŞ MANTIĞI (% TP Kontrolü)
+                # 🎯 ÇIKIŞ MANTIĞI (Koşulsuz %1+ TP Kontrolü)
                 # ==========================================
                 if pos["aktif"]:
                     maliyet = pos["giris_fiyati"]
                     if maliyet <= 0: continue
-                    
-                    if item["acilis_zamani"] == 0 or (su_an_ts - item["acilis_zamani"] < 10):
-                        continue
 
                     fiyat_degisim_yuzde = (anlik_fiyat - maliyet) / maliyet
                     
+                    # 🟢 SABİTLENDİ: Pozu kimin, ne zaman açtığı fark etmeksizin %1 kâr barajı
+                    SABIT_TP_ORANI = 0.01
+
                     # LONG KAPATMA
-                    if pos["yon"] == "LONG" and fiyat_degisim_yuzde >= config.TAHMINI_TP_YUZDE:
-                        # 🟢 DÜZELTME: Emir gönderilmeden hemen önce kilit kontrolü (Mükerrerlik Koruması)
+                    if pos["yon"] == "LONG" and fiyat_degisim_yuzde >= SABIT_TP_ORANI:
                         with data_lock:
                             if emir_beklemede_durumu[symbol]: continue
                             emir_beklemede_durumu[symbol] = True
 
                         try:
                             precision = FUTURES_HASSASIYETLERI.get(symbol, 2)
-                            # 🟢 DÜZELTME: Küsurat yuvarlama hatası nedeniyle reduceOnly reddini önlemek için math.floor kullanıldı
-                            qty_to_close = float(int(pos["adet"] * (10 ** precision))) / (10 ** precision) if precision > 0 else int(pos["adet"])
+                            # 🟢 DÜZELTME: Toz bırakmamak ve emir reddi almamak için güvenli yuvarlama (round)
+                            qty_to_close = round(pos["adet"], precision)
                             
                             if qty_to_close > 0:
                                 client.futures_create_order(
@@ -522,21 +521,21 @@ def hibrit_tarama_dongusu():
                                 with data_lock:
                                     son_islem_zamanlari[symbol] = su_an_ts  
                                     aktif_pozisyonlar[symbol] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0}
-                                telegram_bildir(f"💰 <b>{symbol.upper()} LONG Kar Alındı!</b>\nFiyat: {anlik_fiyat}")
+                                telegram_bildir(f"💰 <b>{symbol.upper()} LONG %1+ Kar ile Kapatıldı!</b>\nFiyat: {anlik_fiyat}\nKar: %{round(fiyat_degisim_yuzde * 100, 2)}")
                         except Exception as e:
                             print(f"❌ Long kapatma hatası ({symbol}): {e}")
                         finally:
                             with data_lock: emir_beklemede_durumu[symbol] = False
                                 
                     # SHORT KAPATMA
-                    elif pos["yon"] == "SHORT" and fiyat_degisim_yuzde <= -config.TAHMINI_TP_YUZDE:
+                    elif pos["yon"] == "SHORT" and fiyat_degisim_yuzde <= -SABIT_TP_ORANI:
                         with data_lock:
                             if emir_beklemede_durumu[symbol]: continue
                             emir_beklemede_durumu[symbol] = True
 
                         try:
                             precision = FUTURES_HASSASIYETLERI.get(symbol, 2)
-                            qty_to_close = float(int(pos["adet"] * (10 ** precision))) / (10 ** precision) if precision > 0 else int(pos["adet"])
+                            qty_to_close = round(pos["adet"], precision)
                             
                             if qty_to_close > 0:
                                 client.futures_create_order(
@@ -546,7 +545,7 @@ def hibrit_tarama_dongusu():
                                 with data_lock:
                                     son_islem_zamanlari[symbol] = su_an_ts  
                                     aktif_pozisyonlar[symbol] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0}
-                                telegram_bildir(f"💰 <b>{symbol.upper()} SHORT Kar Alındı!</b>\nFiyat: {anlik_fiyat}")
+                                telegram_bildir(f"💰 <b>{symbol.upper()} SHORT %1+ Kar ile Kapatıldı!</b>\nFiyat: {anlik_fiyat}\nKar: %{round(abs(fiyat_degisim_yuzde) * 100, 2)}")
                         except Exception as e:
                             print(f"❌ Short kapatma hatası ({symbol}): {e}")
                         finally:
@@ -562,7 +561,6 @@ def hibrit_tarama_dongusu():
                     sinyal = strateji_sinyal_uret(v, anlik_fiyat)
 
                     if sinyal != "HOLD":
-                        # 🟢 DÜZELTME: Ağ isteği gecikmesi sırasında mükerrer emir tetiklenmesini önleyen state kilidi
                         with data_lock:
                             if emir_beklemede_durumu[symbol] or aktif_pozisyonlar[symbol]["aktif"]: continue
                             emir_beklemede_durumu[symbol] = True
