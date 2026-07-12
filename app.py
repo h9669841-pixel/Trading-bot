@@ -35,6 +35,7 @@ class TrendBotConfig:
         self.MAX_ACIK_POZISYON = 10     
         self.BOT_CALISIYOR = True
         self.COOLDOWN_SURESI = 0     
+        self.SABIT_DOLAR_TP = 0.15     # Net kâr hedefi (Dolar)
         
         # === Pine Script Strateji Parametreleri ===
         self.BB_LEN = 20
@@ -287,7 +288,7 @@ def telegram_canli_rapor_uret():
             f"• Kaldıraç: {config.KALDIRAC}x (İZOLE)\n"
             f"• Poz Büyüklüğü: {poz_buyuklugu:.1f} USDT\n"
             f"• Risk Limiti: {acik_pozlar}/{config.MAX_ACIK_POZISYON} Pozisyon\n"
-            f"• TP Hedefi: 0.15 USD (Sabit Dolar Kârı)\n\n"
+            f"• TP Hedefi: {config.SABIT_DOLAR_TP} USD (Sabit Dolar Kârı)\n\n"
             f"⚡ <b>Açık İşlemler:</b>\n"
         )
 
@@ -488,15 +489,12 @@ def hibrit_tarama_dongusu():
                 anlik_fiyat = v["anlik_fiyat"]
 
                 # ==========================================
-                # 🎯 ÇIKIŞ MANTIĞI (0.15 USDT Net Kâr Kontrolü) - GÜVENLİ & GÜNCEL
+                # 🎯 ÇIKIŞ MANTIĞI (0.15 USDT Net Kâr Kontrolü)
                 # ==========================================
                 if pos["aktif"]:
                     maliyet = pos["giris_fiyati"]
                     adet = pos["adet"]
                     if maliyet <= 0 or adet <= 0: continue
-
-                    # Sabit Hedef Kâr Limiti (Dolar cinsinden)
-                    SABIT_DOLAR_TP = 0.15
 
                     # Anlık Dolar bazlı kâr hesaplaması
                     if pos["yon"] == "LONG":
@@ -504,35 +502,8 @@ def hibrit_tarama_dongusu():
                     else:  # SHORT
                         anlik_kar_dolar = (maliyet - anlik_fiyat) * adet
 
-                    # LONG KAPATMA (Net Kâr >= 0.15$)
-                    if pos["yon"] == "LONG" and anlik_kar_dolar >= SABIT_DOLAR_TP:
-                        with data_lock:
-                            if emir_beklemede_durumu[symbol]: continue
-                            emir_beklemede_durumu[symbol] = True
-
-                        try:
-                            precision = FUTURES_HASSASIYETLERI.get(symbol, 2)
-                            # Binance LOT_SIZE hatasını önlemek için kesin aşağı yuvarlama mantığı
-                            faktor = 10 ** precision
-                            qty_to_close = math.floor(adet * faktor) / faktor if precision > 0 else int(adet)
-                            
-                            if qty_to_close > 0:
-                                client.futures_create_order(
-                                    symbol=symbol.upper(), side=SIDE_SELL, type=ORDER_TYPE_MARKET, 
-                                    quantity=qty_to_close, reduceOnly=True
-                                )
-                                with data_lock:
-                                    son_islem_zamanlari[symbol] = su_an_ts  
-                                    aktif_pozisyonlar[symbol] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0}
-                                telegram_bildir(f"💰 <b>{symbol.upper()} LONG {round(anlik_kar_dolar, 3)}$ Kar ile Kapatıldı!</b>\nFiyat: {anlik_fiyat}")
-                        except Exception as e:
-                            print(f"❌ Long kapatma hatası ({symbol}): {e}")
-                            telegram_bildir(f"⚠️ <b>{symbol.upper()} LONG Kapatılamadı!</b>\nHata: {str(e)}")
-                        finally:
-                            with data_lock: emir_beklemede_durumu[symbol] = False
-                                
-                    # SHORT KAPATMA (Net Kâr >= 0.15$)
-                    elif pos["yon"] == "SHORT" and anlik_kar_dolar >= SABIT_DOLAR_TP:
+                    # Kâr Hedef Kontrolü (Net Kâr >= 0.15$)
+                    if anlik_kar_dolar >= config.SABIT_DOLAR_TP:
                         with data_lock:
                             if emir_beklemede_durumu[symbol]: continue
                             emir_beklemede_durumu[symbol] = True
@@ -542,18 +513,20 @@ def hibrit_tarama_dongusu():
                             faktor = 10 ** precision
                             qty_to_close = math.floor(adet * faktor) / faktor if precision > 0 else int(adet)
                             
+                            side_to_close = SIDE_SELL if pos["yon"] == "LONG" else SIDE_BUY
+                            
                             if qty_to_close > 0:
                                 client.futures_create_order(
-                                    symbol=symbol.upper(), side=SIDE_BUY, type=ORDER_TYPE_MARKET, 
+                                    symbol=symbol.upper(), side=side_to_close, type=ORDER_TYPE_MARKET, 
                                     quantity=qty_to_close, reduceOnly=True
                                 )
                                 with data_lock:
                                     son_islem_zamanlari[symbol] = su_an_ts  
                                     aktif_pozisyonlar[symbol] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0}
-                                telegram_bildir(f"💰 <b>{symbol.upper()} SHORT {round(anlik_kar_dolar, 3)}$ Kar ile Kapatıldı!</b>\nFiyat: {anlik_fiyat}")
+                                telegram_bildir(f"💰 <b>{symbol.upper()} {pos['yon']} {round(anlik_kar_dolar, 3)}$ Kar ile Kapatıldı!</b>\nFiyat: {anlik_fiyat}")
                         except Exception as e:
-                            print(f"❌ Short kapatma hatası ({symbol}): {e}")
-                            telegram_bildir(f"⚠️ <b>{symbol.upper()} SHORT Kapatılamadı!</b>\nHata: {str(e)}")
+                            print(f"❌ Kapatma hatası ({symbol}): {e}")
+                            telegram_bildir(f"⚠️ <b>{symbol.upper()} {pos['yon']} Kapatılamadı!</b>\nHata: {str(e)}")
                         finally:
                             with data_lock: emir_beklemede_durumu[symbol] = False
                 
