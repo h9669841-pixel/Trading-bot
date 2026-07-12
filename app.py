@@ -153,7 +153,6 @@ def acik_pozisyonlari_binanceden_guncelle():
         print(f"❌ Pozisyon senkronizasyon hatası: {e}")
 
 def tüm_gecmis_verileri_guncelle():
-    """Kota dostu olması için bu fonksiyonun tetiklenme aralığı hibrit döngüde optimize edildi."""
     for s in SYMBOLS:
         try:
             url = f"https://fapi.binance.com/fapi/v1/klines?symbol={s.upper()}&interval={config.TIMEFRAME}&limit=60"
@@ -265,11 +264,10 @@ def start_user_data_ws():
         ws.run_forever(reconnect=5)
     except Exception: pass
 
-# --- 🌐 TÜM COINLERİN ANLIK FİYATLARINI ÇEKEN SIFIR KOTALI YENI WEBSOCKET ---
+# --- 🌐 TÜM COINLERİN ANLIK FİYATLARINI ÇEKEN WEBSOCKET ---
 def on_market_data_message(ws, message):
     try:
         data = json.loads(message)
-        # Binance tüm market verisini liste halinde fırlatır
         if isinstance(data, list):
             with data_lock:
                 for ticker in data:
@@ -279,7 +277,6 @@ def on_market_data_message(ws, message):
     except Exception: pass
 
 def start_market_data_ws():
-    """100 coin için tek hattan akış dinleyen toplu mini-ticker websocket bağlantısı."""
     try:
         ws = WebSocketApp("wss://fstream.binance.com/ws/!ticker@arr", 
                           on_message=on_market_data_message, 
@@ -296,7 +293,6 @@ def hibrit_tarama_dongusu():
                 time.sleep(1.0); continue
                 
             su_an_ts = time.time()
-            # Klines ve pozisyon sync işlemlerini 5 dakikada (300 saniyede) bire çekerek API kotasını koruyoruz.
             if su_an_ts - last_kline_sync > 300:
                 tüm_gecmis_verileri_guncelle()
                 acik_pozisyonlari_binanceden_guncelle()  
@@ -309,19 +305,25 @@ def hibrit_tarama_dongusu():
                     v = piyasa_verisi[symbol]
                     pos = aktif_pozisyonlar[symbol]
                     
-                    # Fiyat artık WebSocket'ten (start_market_data_ws) saniyelik ve canlı akıyor!
-                    if len(v["kapanislar"]) < 20 or not v["anlik_fiyat"] or v["anlik_fiyat"] <= 0: continue
+                    if len(v["kapanislar"]) < 40 or not v["anlik_fiyat"] or v["anlik_fiyat"] <= 0: continue
                     anlik_fiyat = v["anlik_fiyat"]
                     
                     if su_an_ts - son_islem_zamanlari[symbol] < config.COOLDOWN_SURESI:
                         continue
 
-                    # 📈 GİRİŞ VE EKLEME MANTIĞI (1 Saniyede Bir Kontrol Edilir)
+                    # Canlı fiyatın anlık gücünü RSI ve Bollinger'a katmak için geçici dizi oluşturuyoruz
+                    # Bu sayede geçmiş kapanışlara bakıp anlık gecikmeyi ortadan kaldırdık
+                    kapanislar_canli = v["kapanislar"] + [anlik_fiyat]
+                    
+                    # 📈 GİRİŞ VE EKLEME MANTIĞI
                     if guncel_acik_pozisyon_sayisi < config.MAX_ACIK_POZISYON:
-                        ust_bant, _, alt_bant = bollinger_bands(v["kapanislar"])
-                        rsi = rsi_hesapla(v["kapanislar"])
-                        fib = fibonacci_seviyelerini_hesapla(v["yuksekler"], v["dusukler"])
+                        ust_bant, _, alt_bant = bollinger_bands(kapanislar_canli)
                         
+                        # RSI Dönüş Onayı için: Önceki periyodun RSI'ı ve Anlık Fiyatın dahil olduğu Current RSI hesaplanıyor
+                        prev_rsi = rsi_hesapla(v["kapanislar"]) 
+                        current_rsi = rsi_hesapla(kapanislar_canli)
+                        
+                        fib = fibonacci_seviyelerini_hesapla(v["yuksekler"], v["dusukler"])
                         if not fib or "fib_618" not in fib: continue
 
                         precision = FUTURES_HASSASIYETLERI.get(symbol, 2)
@@ -330,47 +332,74 @@ def hibrit_tarama_dongusu():
                         if qty <= 0: continue
 
                         # LONG EMİR
-                        if anlik_fiyat <= alt_bant and rsi <= config.RSI_ASTR_SATIM and pos["yon"] != "SHORT":
-                            if abs(anlik_fiyat - fib["fib_618"]) / anlik_fiyat < 0.006 or abs(anlik_fiyat - fib["fib_786"]) / anlik_fiyat < 0.006:
+                        if pos["yon"] != "SHORT":
+                            # Fib kuralı %0.6'dan %1.5'e (0.015) esnetildi
+                            yakin_fib_long = (abs(anlik_fiyat - fib.get("fib_618", 0)) / anlik_fiyat <= 0.015 or abs(anlik_fiyat - fib.get("fib_786", 0)) / anlik_fiyat <= 0.015)
+                            
+                            standart_long = anlik_fiyat <= alt_bant and current_rsi <= config.RSI_ASTR_SATIM and yakin_fib_long
+                            rsi_donus_long = prev_rsi < 25 and current_rsi >= 25 and anlik_fiyat <= alt_bant # RSI Yapışma Koruması
+                            
+                            if standart_long or rsi_donus_long:
                                 try:
                                     client.futures_create_order(symbol=symbol.upper(), side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=qty)
                                     son_islem_zamanlari[symbol] = su_an_ts  
                                     islem_tipi = "Ekleme Yapıldı" if pos["aktif"] else "Yeni Pozisyon"
-                                    telegram_bildir(f"🚀 <b>{symbol.upper()} LONG {islem_tipi}!</b>\nFiyat: {anlik_fiyat}")
+                                    neden = "RSI Dipten Dönüş" if rsi_donus_long else "Standart Strateji"
+                                    telegram_bildir(f"🚀 <b>{symbol.upper()} LONG {islem_tipi}!</b>\nTetikleyici: {neden}\nFiyat: {anlik_fiyat}\nMevcut RSI: {current_rsi:.1f}")
                                 except Exception: pass
                                     
                         # SHORT EMİR
-                        elif anlik_fiyat >= ust_bant and rsi >= config.RSI_ASTR_ALIM and pos["yon"] != "LONG":
-                            if abs(anlik_fiyat - fib["fib_236"]) / anlik_fiyat < 0.006 or abs(anlik_fiyat - fib["fib_382"]) / anlik_fiyat < 0.006:
+                        elif pos["yon"] != "LONG":
+                            # Fib kuralı %0.6'dan %1.5'e (0.015) esnetildi
+                            yakin_fib_short = (abs(anlik_fiyat - fib.get("fib_236", 0)) / anlik_fiyat <= 0.015 or abs(anlik_fiyat - fib.get("fib_382", 0)) / anlik_fiyat <= 0.015)
+                            
+                            standart_short = anlik_fiyat >= ust_bant and current_rsi >= config.RSI_ASTR_ALIM and yakin_fib_short
+                            rsi_donus_short = prev_rsi > 75 and current_rsi <= 75 and anlik_fiyat >= ust_bant # RSI Yapışma Koruması
+                            
+                            if standart_short or rsi_donus_short:
                                 try:
                                     client.futures_create_order(symbol=symbol.upper(), side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=qty)
                                     son_islem_zamanlari[symbol] = su_an_ts  
                                     islem_tipi = "Ekleme Yapıldı" if pos["aktif"] else "Yeni Pozisyon"
-                                    telegram_bildir(f"🚀 <b>{symbol.upper()} SHORT {islem_tipi}!</b>\nFiyat: {anlik_fiyat}")
+                                    neden = "RSI Tepeden Dönüş" if rsi_donus_short else "Standart Strateji"
+                                    telegram_bildir(f"🚀 <b>{symbol.upper()} SHORT {islem_tipi}!</b>\nTetikleyici: {neden}\nFiyat: {anlik_fiyat}\nMevcut RSI: {current_rsi:.1f}")
                                 except Exception: pass
                     
-                    # 🎯 ÇIKIŞ MANTIĞI (1 Saniyede Bir Kontrol Edilir)
+                    # 🎯 ÇIKIŞ MANTIĞI (KOMİSYON KORUMALI)
                     if pos["aktif"]:
                         maliyet = pos["giris_fiyati"]
                         if maliyet <= 0: continue
                         fark_yuzde = (anlik_fiyat - maliyet) / maliyet
                         
-                        if pos["yon"] == "LONG" and fark_yuzde >= config.TAHMINI_TP_YUZDE:
+                        # %1 hedefine milimetrik (0.0005) esneklik tanındı
+                        if pos["yon"] == "LONG" and fark_yuzde >= (config.TAHMINI_TP_YUZDE - 0.0005):
                             try:
-                                client.futures_create_order(symbol=symbol.upper(), side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=pos["adet"])
-                                son_islem_zamanlari[symbol] = 0.0  
-                                telegram_bildir(f"💰 <b>{symbol.upper()} LONG Kar Alındı!</b>\nNet Kar: %{config.TAHMINI_TP_YUZDE * 100:.1f}")
-                            except Exception: pass
+                                # Komisyon hatası yememek için anlık borsa net adedi sorgulanır
+                                actual_pos = next((p for p in client.futures_position_information() if p["symbol"] == symbol.upper()), None)
+                                qty_to_close = abs(float(actual_pos.get("positionAmt", 0))) if actual_pos else pos["adet"]
+                                
+                                if qty_to_close > 0:
+                                    client.futures_create_order(symbol=symbol.upper(), side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=qty_to_close)
+                                    son_islem_zamanlari[symbol] = 0.0  
+                                    telegram_bildir(f"💰 <b>{symbol.upper()} LONG Kar Alındı!</b>\nNet Kar: %{fark_yuzde * 100:.2f}")
+                            except Exception as e:
+                                print(f"❌ Long kapatma hatası ({symbol}): {e}")
                                     
-                        elif pos["yon"] == "SHORT" and fark_yuzde <= -config.TAHMINI_TP_YUZDE:
+                        elif pos["yon"] == "SHORT" and fark_yuzde <= -(config.TAHMINI_TP_YUZDE - 0.0005):
                             try:
-                                client.futures_create_order(symbol=symbol.upper(), side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=pos["adet"])
-                                son_islem_zamanlari[symbol] = 0.0  
-                                telegram_bildir(f"💰 <b>{symbol.upper()} SHORT Kar Alındı!</b>\nNet Kar: %{config.TAHMINI_TP_YUZDE * 100:.1f}")
-                            except Exception: pass
+                                # Komisyon hatası yememek için anlık borsa net adedi sorgulanır
+                                actual_pos = next((p for p in client.futures_position_information() if p["symbol"] == symbol.upper()), None)
+                                qty_to_close = abs(float(actual_pos.get("positionAmt", 0))) if actual_pos else pos["adet"]
+                                
+                                if qty_to_close > 0:
+                                    client.futures_create_order(symbol=symbol.upper(), side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=qty_to_close)
+                                    son_islem_zamanlari[symbol] = 0.0  
+                                    telegram_bildir(f"💰 <b>{symbol.upper()} SHORT Kar Alındı!</b>\nNet Kar: %{abs(fark_yuzde) * 100:.2f}")
+                            except Exception as e:
+                                print(f"❌ Short kapatma hatası ({symbol}): {e}")
 
         except Exception: traceback.print_exc()
-        time.sleep(1.0) # ⚡ Artık güvenle 1 saniyede bir dönebilir!
+        time.sleep(1.0) 
 
 if __name__ == "__main__":
     aday_listesi = ilk_100_hacimli_coin_bul()
@@ -380,9 +409,8 @@ if __name__ == "__main__":
     tüm_gecmis_verileri_guncelle()
     acik_pozisyonlari_binanceden_guncelle()
     
-    # Arka plan iş parçacıklarını başlatıyoruz
     threading.Thread(target=start_user_data_ws, daemon=True).start()
-    threading.Thread(target=start_market_data_ws, daemon=True).start() # 🌐 Fiyat akış hattı açıldı
+    threading.Thread(target=start_market_data_ws, daemon=True).start() 
     threading.Thread(target=telegram_gelen_mesaj_dinleyici, daemon=True).start()
     
     time.sleep(2.0)
