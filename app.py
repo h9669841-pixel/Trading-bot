@@ -18,20 +18,12 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 PROXY_URL = os.environ.get("PROXY_URL")
 
-# 🌐 Proxy Sözlüğü Oluşturma (Sadece özel isteklerde kullanılacak)
 requests_proxies = None
 if PROXY_URL:
     print(f"🌐 Statik IP tüneli hazırlandı. Sadece alım/satım işlemlerinde tetiklenecek.")
-    requests_proxies = {
-        "http": PROXY_URL,
-        "https": PROXY_URL
-    }
+    requests_proxies = {"http": PROXY_URL, "https": PROXY_URL}
 
-# Binance istemcisini başlatıyoruz
 client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY)
-
-# 🛠️ KLASİK EMİR MOTORUNU PROXY İLE YANILTIYORUZ 
-# Bu sayede koddaki 'client' üzerinden giden her emir otomatik olarak proxy kullanır.
 if requests_proxies:
     client.session.proxies = requests_proxies
 
@@ -48,6 +40,7 @@ class TrendBotConfig:
         self.BOLLINGER_STANDART_SAPMA = 2
         self.TAHMINI_TP_YUZDE = 0.010   
         self.BOT_CALISIYOR = True
+        self.COOLDOWN_SURESI = 300     # ⏱️ Aynı coine tekrar ekleme yapmak için beklenecek süre (Saniye cinsinden - 5 Dakika)
 
 config = TrendBotConfig()
 
@@ -55,6 +48,7 @@ SYMBOLS = []
 piyasa_verisi = {}
 aktif_pozisyonlar = {}
 FUTURES_HASSASIYETLERI = {}
+son_islem_zamanlari = {}  # ⏱️ Cooldown takibi için yeni hafıza havuzu
 
 data_lock = threading.Lock()
 listen_key = None
@@ -98,11 +92,9 @@ def fibonacci_seviyelerini_hesapla(yuksekler, dusukler):
         "fib_382": en_yuksek - (0.382 * fark)
     }
 
-# 💸 PROXY KULLANMAZ (Kota Dostu)
 def ilk_100_hacimli_coin_bul():
     try:
         ticker_url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
-        # proxies parametresi eklemedik, Railway'in kendi ipsinden çeker
         response = requests.get(ticker_url, timeout=15).json()
         usdt_pairs = [x for x in response if x["symbol"].endswith("USDT")]
         sorted_by_volume = sorted(usdt_pairs, key=lambda k: float(k.get("quoteVolume", 0)), reverse=True)
@@ -116,13 +108,11 @@ def kontrollu_coin_ekle(coin_adi):
     coin_upper = coin_lower.upper()
     if coin_lower in SYMBOLS: return True
     try:
-        # Fiyat ve Market bilgisini kotalı proxy ile harcamamak için direkt çekiyoruz
         f_url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
         r = requests.get(f_url, timeout=10).json()
         market_info = next((m for m in r.get("symbols", []) if m["symbol"] == coin_upper), None)
         if not market_info or market_info.get('status') != 'TRADING': return False
         
-        # Kaldıraç ve Marjin ayarları API üzerinden yapıldığı için Statik IP ister (Proxy devrede)
         client.futures_change_leverage(symbol=coin_upper, leverage=config.KALDIRAC)
         try: client.futures_change_margin_type(symbol=coin_upper, marginType="ISOLATED")
         except BinanceAPIException as e:
@@ -138,15 +128,13 @@ def kontrollu_coin_ekle(coin_adi):
             SYMBOLS.append(coin_lower)
             piyasa_verisi[coin_lower] = {"anlik_fiyat": None, "kapanislar": [], "yuksekler": [], "dusukler": []}
             aktif_pozisyonlar[coin_lower] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0}
+            son_islem_zamanlari[coin_lower] = 0.0  # Başlangıçta zaman kilidi sıfır
         return True
     except Exception: return False
 
-# 💸 PROXY KULLANMAZ (Kota Dostu)
 def tüm_gecmis_verileri_guncelle():
     for s in SYMBOLS:
         try:
-            # Candlestick (Mum) geçmişini proxy kullanmadan çekmek için Binance kütüphanesinin proxy'siz bir kopyası yerine
-            # direkt url üzerinden çekebiliriz veya client'ın proxy ayarını anlık ezebiliriz. En temizi direkt çekmek:
             url = f"https://fapi.binance.com/fapi/v1/klines?symbol={s.upper()}&interval={config.TIMEFRAME}&limit=60"
             k = requests.get(url, timeout=10).json()
             with data_lock:
@@ -156,17 +144,78 @@ def tüm_gecmis_verileri_guncelle():
                 piyasa_verisi[s]["anlik_fiyat"] = float(k[-1][4])
         except Exception: pass
 
-def telegram_bildir(mesaj):
+# --- 🎛️ TELEGRAM KLAVYE MENÜSÜ VE MESAJ YÖNETİMİ ---
+def telegram_bildir(mesaj, reply_markup=None):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
-    try: requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id": TELEGRAM_CHAT_ID, "text": mesaj, "parse_mode": "HTML"}, timeout=5)
+    try:
+        data = {"chat_id": TELEGRAM_CHAT_ID, "text": mesaj, "parse_mode": "HTML"}
+        if reply_markup: data["reply_markup"] = reply_markup
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json=data, timeout=5)
     except Exception: pass
 
-# --- 🔐 HESAP VE EMİR TAKİP WEBSOCKET'İ (USER DATA STREAM) ---
+def ana_menu_olustur():
+    return {
+        "keyboard": [[{"text": "📊 Bot Durumu"}], [{"text": "▶️ Botu Başlat"}, {"text": "⏸️ Botu Durdur"}]],
+        "resize_keyboard": True, "one_time_keyboard": False
+    }
+
+def telegram_canli_rapor_uret():
+    with data_lock:
+        acik_pozlar = sum(1 for s in SYMBOLS if aktif_pozisyonlar[s]["aktif"])
+        durum_str = "🟢 İzole Mod Aktif" if config.BOT_CALISIYOR else "🔴 Sistem Durduruldu"
+        poz_buyuklugu = config.ISLEM_MARJIN * config.KALDIRAC
+
+        rapor = (
+            f"⚙️ <b>İzole 20x Avcı Botu</b>\n"
+            f"• Sistem: {durum_str}\n"
+            f"• Marjin: {config.ISLEM_MARJIN:.1f} USDT\n"
+            f"• Kaldıraç: {config.KALDIRAC}x (İZOLE)\n"
+            f"• Poz Büyüklüğü: {poz_buyuklugu:.1f} USDT\n"
+            f"• Risk Limiti: {acik_pozlar}/{config.MAX_ACIK_POZISYON} Pozisyon\n"
+            f"• TP Hedefi: %{config.TAHMINI_TP_YUZDE * 100:.1f}\n\n"
+            f"⚡ <b>Açık İşlemler:</b>\n"
+        )
+
+        if acik_pozlar == 0:
+            rapor += "Açık izole pozisyon bulunmuyor."
+        else:
+            for s in SYMBOLS:
+                if aktif_pozisyonlar[s]["aktif"]:
+                    p = aktif_pozisyonlar[s]
+                    rapor += f"• {s.upper()} | {p['yon']} | Giriş: {p['giris_fiyati']}\n"
+    return rapor
+
+def telegram_gelen_mesaj_dinleyici():
+    offset = None
+    while True:
+        try:
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
+            params = {"timeout": 10, "offset": offset}
+            response = requests.get(url, params=params, timeout=15).json()
+            if response.get("ok") and response.get("result"):
+                for update in response["result"]:
+                    offset = update["update_id"] + 1
+                    message = update.get("message")
+                    if not message or str(message.get("chat", {}).get("id")) != str(TELEGRAM_CHAT_ID): continue
+                    text = message.get("text", "")
+                    
+                    if text == "/start":
+                        telegram_bildir("🤖 <b>Bot Kontrol Paneli Aktif!</b>", reply_markup=ana_menu_olustur())
+                    elif text == "📊 Bot Durumu":
+                        telegram_bildir(telegram_canli_rapor_uret(), reply_markup=ana_menu_olustur())
+                    elif text == "▶️ Botu Başlat":
+                        config.BOT_CALISIYOR = True
+                        telegram_bildir("🚀 Bot tarama döngüsü <b>aktif.</b>", reply_markup=ana_menu_olustur())
+                    elif text == "⏸️ Botu Durdur":
+                        config.BOT_CALISIYOR = False
+                        telegram_bildir("⏸️ Bot tarama döngüsü <b>durduruldu.</b>", reply_markup=ana_menu_olustur())
+        except Exception: time.sleep(5)
+
+# --- 🔐 HESAP WEBSOCKET'İ ---
 def on_user_message(ws, message):
     try:
         data = json.loads(message)
-        event_type = data.get("e")
-        if event_type == "ACCOUNT_UPDATE":
+        if data.get("e") == "ACCOUNT_UPDATE":
             positions = data.get("a", {}).get("P", [])
             for p in positions:
                 sym = p.get("s", "").lower()
@@ -176,7 +225,6 @@ def on_user_message(ws, message):
                     with data_lock:
                         if pa == 0:
                             if aktif_pozisyonlar[sym]["aktif"]:
-                                print(f"ℹ️ [WS Raporu] {sym.upper()} Pozisyonu kapandı.")
                                 aktif_pozisyonlar[sym]["aktif"] = False
                         else:
                             aktif_pozisyonlar[sym]["aktif"] = True
@@ -185,33 +233,14 @@ def on_user_message(ws, message):
                             aktif_pozisyonlar[sym]["giris_fiyati"] = ep
     except Exception: pass
 
-def listen_key_keep_alive():
-    global listen_key
-    while True:
-        try:
-            time.sleep(1800)
-            if listen_key:
-                client.futures_stream_keepalive(listenKey=listen_key)
-        except Exception: pass
-
 def start_user_data_ws():
     global listen_key
     try:
-        # listenKey alma işlemi API üzerinden olduğu için Statik IP (Proxy) kullanır
         listen_key = client.futures_stream_get_listen_key()
-        threading.Thread(target=listen_key_keep_alive, daemon=True).start()
-        
-        # WebSocket bağlantısının kendisinde proxy kullanmıyoruz (Zaten sadece hesap değişince veri akar, kota yemez)
-        ws_url = f"wss://fstream.binance.com/ws/{listen_key}"
-        ws = WebSocketApp(
-            ws_url,
-            on_message=on_user_message,
-            on_error=lambda ws, err: print(f"⚠️ Hesap WS Hatası: {err}"),
-            on_close=lambda ws, c, m: time.sleep(5)
-        )
+        threading.Thread(target=lambda: (time.sleep(1800), client.futures_stream_keepalive(listenKey=listen_key)), daemon=True).start()
+        ws = WebSocketApp(f"wss://fstream.binance.com/ws/{listen_key}", on_message=on_user_message, on_close=lambda ws,c,m: time.sleep(5))
         ws.run_forever(reconnect=5)
-    except Exception as e:
-        print(f"❌ Hesap takip hattı başlatılamadı: {e}")
+    except Exception: pass
 
 # --- 🎯 KOTA DOSTU HİBRİT MOTOR ---
 def hibrit_tarama_dongusu():
@@ -222,20 +251,16 @@ def hibrit_tarama_dongusu():
                 time.sleep(2.0); continue
                 
             su_an_ts = time.time()
-            print(f"🔄 [{datetime.now().strftime('%H:%M:%S')}] Tarama yapılıyor... 15 saniyede bir proxy'siz fiyat çekiliyor.")
-
             if su_an_ts - last_kline_sync > 300:
                 tüm_gecmis_verileri_guncelle()
                 last_kline_sync = su_an_ts
 
-            # 💸 PROXY KULLANMAZ: Fiyatları genel internetten çeker, kotayı korur!
             prices_raw = requests.get("https://fapi.binance.com/fapi/v1/ticker/price", timeout=10).json()
             prices_dict = {x["symbol"].lower(): float(x["price"]) for x in prices_raw}
 
             with data_lock:
                 for s in SYMBOLS:
-                    if s in prices_dict:
-                        piyasa_verisi[s]["anlik_fiyat"] = prices_dict[s]
+                    if s in prices_dict: piyasa_verisi[s]["anlik_fiyat"] = prices_dict[s]
 
                 guncel_acik_pozisyon_sayisi = sum(1 for s in SYMBOLS if aktif_pozisyonlar[s]["aktif"])
 
@@ -243,15 +268,15 @@ def hibrit_tarama_dongusu():
                     v = piyasa_verisi[symbol]
                     pos = aktif_pozisyonlar[symbol]
                     
-                    if len(v["kapanislar"]) < 20 or not v["anlik_fiyat"] or v["anlik_fiyat"] <= 0: 
-                        continue
-                    
+                    if len(v["kapanislar"]) < 20 or not v["anlik_fiyat"] or v["anlik_fiyat"] <= 0: continue
                     anlik_fiyat = v["anlik_fiyat"]
                     
-                    # 📈 GİRİŞ MANTIĞI (🔒 Otomatik Proxy ile Gönderilir)
-                    if not pos["aktif"]:
-                        if guncel_acik_pozisyon_sayisi >= config.MAX_ACIK_POZISYON: continue
+                    # ⏱️ CRITICAL LOCK: Son emirden bu yana Cooldown süresi (5 dk) geçti mi kontrolü
+                    if su_an_ts - son_islem_zamanlari[symbol] < config.COOLDOWN_SURESI:
+                        continue
 
+                    # 📈 GİRİŞ VE EKLEME MANTIĞI
+                    if guncel_acik_pozisyon_sayisi < config.MAX_ACIK_POZISYON:
                         ust_bant, _, alt_bant = bollinger_bands(v["kapanislar"])
                         rsi = rsi_hesapla(v["kapanislar"])
                         fib = fibonacci_seviyelerini_hesapla(v["yuksekler"], v["dusukler"])
@@ -263,42 +288,44 @@ def hibrit_tarama_dongusu():
                         qty = float(int(qty * (10 ** precision))) / (10 ** precision) if precision > 0 else int(qty)
                         if qty <= 0: continue
 
-                        # LONG GİRİŞ
-                        if anlik_fiyat <= alt_bant and rsi <= config.RSI_ASTR_SATIM:
+                        # LONG EMİR (Poz yokken veya zaten LONG yönündeyken ekleme)
+                        if anlik_fiyat <= alt_bant and rsi <= config.RSI_ASTR_SATIM and pos["yon"] != "SHORT":
                             if abs(anlik_fiyat - fib["fib_618"]) / anlik_fiyat < 0.006 or abs(anlik_fiyat - fib["fib_786"]) / anlik_fiyat < 0.006:
                                 try:
                                     client.futures_create_order(symbol=symbol.upper(), side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=qty)
-                                    telegram_bildir(f"⚡ <b>{symbol.upper()} LONG Sinyali Gönderildi</b>")
+                                    son_islem_zamanlari[symbol] = su_an_ts  # 🔒 Zaman kilidini devreye sok
+                                    islem_tipi = "Ekleme Yapıldı" if pos["aktif"] else "Yeni Pozisyon"
+                                    telegram_bildir(f"🚀 <b>{symbol.upper()} LONG {islem_tipi}!</b>\nFiyat: {anlik_fiyat}")
                                 except Exception: pass
                                     
-                        # SHORT GİRİŞ
-                        elif anlik_fiyat >= ust_bant and rsi >= config.RSI_ASTR_ALIM:
+                        # SHORT EMİR (Poz yokken veya zaten SHORT yönündeyken ekleme)
+                        elif anlik_fiyat >= ust_bant and rsi >= config.RSI_ASTR_ALIM and pos["yon"] != "LONG":
                             if abs(anlik_fiyat - fib["fib_236"]) / anlik_fiyat < 0.006 or abs(anlik_fiyat - fib["fib_382"]) / anlik_fiyat < 0.006:
                                 try:
                                     client.futures_create_order(symbol=symbol.upper(), side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=qty)
-                                    telegram_bildir(f"⚡ <b>{symbol.upper()} SHORT Sinyali Gönderildi</b>")
+                                    son_islem_zamanlari[symbol] = su_an_ts  # 🔒 Zaman kilidini devreye sok
+                                    islem_tipi = "Ekleme Yapıldı" if pos["aktif"] else "Yeni Pozisyon"
+                                    telegram_bildir(f"🚀 <b>{symbol.upper()} SHORT {islem_tipi}!</b>\nFiyat: {anlik_fiyat}")
                                 except Exception: pass
                     
-                    # 🎯 ÇIKIŞ MANTIĞI (🔒 Otomatik Proxy ile Gönderilir)
-                    else:
+                    # 🎯 ÇIKIŞ MANTIĞI
+                    if pos["aktif"]:
                         maliyet = pos["giris_fiyati"]
                         if maliyet <= 0: continue
                         fark_yuzde = (anlik_fiyat - maliyet) / maliyet
                         
-                        # LONG ÇIKIŞ
                         if pos["yon"] == "LONG" and fark_yuzde >= config.TAHMINI_TP_YUZDE:
                             try:
                                 client.futures_create_order(symbol=symbol.upper(), side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=pos["adet"])
-                                telegram_bildir(f"🎯 <b>{symbol.upper()} LONG Kâr Alındı!</b>")
+                                son_islem_zamanlari[symbol] = 0.0  # Pozisyon tamamen kapandığı için kilidi sıfırla
+                                telegram_bildir(f"💰 <b>{symbol.upper()} LONG Kar Alındı!</b>\nNet Kar: %{config.TAHMINI_TP_YUZDE * 100:.1f}")
                             except Exception: pass
                                     
-                        # SHORT ÇIKIŞ
                         elif pos["yon"] == "SHORT" and fark_yuzde <= -config.TAHMINI_TP_YUZDE:
                             try:
-                                try:
-                                    client.futures_create_order(symbol=symbol.upper(), side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=pos["adet"])
-                                    telegram_bildir(f"🎯 <b>{symbol.upper()} SHORT Kâr Alındı!</b>")
-                                except Exception: pass
+                                client.futures_create_order(symbol=symbol.upper(), side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=pos["adet"])
+                                son_islem_zamanlari[symbol] = 0.0  # Pozisyon tamamen kapandığı için kilidi sıfırla
+                                telegram_bildir(f"💰 <b>{symbol.upper()} SHORT Kar Alındı!</b>\nNet Kar: %{config.TAHMINI_TP_YUZDE * 100:.1f}")
                             except Exception: pass
 
         except Exception: traceback.print_exc()
@@ -307,13 +334,12 @@ def hibrit_tarama_dongusu():
 if __name__ == "__main__":
     aday_listesi = ilk_100_hacimli_coin_bul()
     if not aday_listesi: exit()
-        
     for coin in aday_listesi: kontrollu_coin_ekle(coin)
     tüm_gecmis_verileri_guncelle()
     
-    # Arka planda hesap hareketlerini izleyen hafif hattı açıyoruz
     threading.Thread(target=start_user_data_ws, daemon=True).start()
+    threading.Thread(target=telegram_gelen_mesaj_dinleyici, daemon=True).start()
     
     time.sleep(2.0)
-    telegram_bildir(f"🤖 <b>Kota Korumalı Akıllı Bot Başladı!</b>")
+    telegram_bildir(telegram_canli_rapor_uret(), reply_markup=ana_menu_olustur())
     hibrit_tarama_dongusu()
