@@ -8,7 +8,6 @@ from datetime import datetime
 from binance.client import Client
 from binance.enums import *
 from binance.exceptions import BinanceAPIException
-from websocket import WebSocketApp
 
 # --- 🔑 GÜVENLİK VE API AYARLARI ---
 BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")
@@ -34,7 +33,7 @@ class TrendBotConfig:
         self.MAX_ACIK_POZISYON = 10     
         self.BOT_CALISIYOR = True
         self.COOLDOWN_SURESI = 0     
-        self.SABIT_DOLAR_TP = 0.13     # Net kâr hedefi (Dolar)
+        self.SABIT_DOLAR_TP = 0.15     # Net kâr hedefi (Dolar)
         
         # === Pine Script Strateji Parametreleri ===
         self.BB_LEN = 20
@@ -51,6 +50,9 @@ class TrendBotConfig:
         self.RSI_LEN = 14
         self.RSI_OB = 70
         self.RSI_OS = 30
+        
+        # API Tarama Gecikmesi (İstekler arası hafif esneme)
+        self.API_DELAY = 0.3
 
 config = TrendBotConfig()
 
@@ -59,11 +61,9 @@ piyasa_verisi = {}
 aktif_pozisyonlar = {}
 FUTURES_HASSASIYETLERI = {}
 son_islem_zamanlari = {}        
-pozisyon_acilis_zamanlari = {}  
 emir_beklemede_durumu = {} 
 
 data_lock = threading.Lock()
-listen_key = None
 
 # --- 🛠️ MATEMATİKSEL İNDİKATÖR MOTORU (PINE SCRIPT UYUMLU) ---
 
@@ -175,7 +175,7 @@ def strateji_sinyal_uret(v, anlik_fiyat):
 
     return "HOLD"
 
-# --- 🌐 TEMEL ALTYAPI FONKSİYONLARI ---
+# --- 🌐 REST API ALTYAPI FONKSİYONLARI ---
 
 def ilk_100_hacimli_coin_bul():
     try:
@@ -212,21 +212,44 @@ def kontrollu_coin_ekle(coin_adi):
 
         with data_lock:
             SYMBOLS.append(coin_lower)
-            piyasa_verisi[coin_lower] = {"anlik_fiyat": None, "kapanislar": [], "yuksekler": [], "dusukler": []}
+            piyasa_verisi[coin_lower] = {"anlik_fiyat": 0.0, "kapanislar": [], "yuksekler": [], "dusukler": []}
             aktif_pozisyonlar[coin_lower] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0}
             son_islem_zamanlari[coin_lower] = 0.0  
-            pozisyon_acilis_zamanlari[coin_lower] = 0.0
             emir_beklemede_durumu[coin_lower] = False
         return True
     except Exception: return False
 
+def tek_coin_api_verisi_guncelle(s):
+    """Belirli bir coin için klines ve anlık fiyatı REST API üzerinden çeker ve senkronize eder."""
+    try:
+        url = f"https://fapi.binance.com/fapi/v1/klines?symbol={s.upper()}&interval={config.TIMEFRAME}&limit=60"
+        k = requests.get(url, timeout=5).json()
+        if not k or len(k) == 0: return False
+        
+        kapanislar_yeni = [float(x[4]) for x in k]
+        yuksekler_yeni = [float(x[2]) for x in k]
+        dusukler_yeni = [float(x[3]) for x in k]
+        anlik_fiyat_yeni = kapanislar_yeni[-1]  # Son mumun kapanışı anlık fiyattır
+        
+        with data_lock:
+            piyasa_verisi[s]["kapanislar"] = kapanislar_yeni[:-1] # Son canlı mumu ayırıyoruz strateji dinamik eklesin diye
+            piyasa_verisi[s]["yuksekler"] = yuksekler_yeni[:-1]
+            piyasa_verisi[s]["dusukler"] = dusukler_yeni[:-1]
+            piyasa_verisi[s]["anlik_fiyat"] = anlik_fiyat_yeni
+        return True
+    except Exception:
+        return False
+
 def acik_pozisyonlari_binanceden_guncelle():
+    """Tüm açık pozisyonları doğrudan REST API üzerinden çekip lokal dictionary'i eşitler."""
     try:
         pozisyonlar = client.futures_position_information()
         with data_lock:
+            # Emir bekleme durumunda olmayan tüm coinleri sıfırla, API'den taze veri yazılacak
             for s in SYMBOLS:
                 if not emir_beklemede_durumu.get(s, False):
                     aktif_pozisyonlar[s] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0}
+            
             for p in pozisyonlar:
                 sym = p.get("symbol", "").lower()
                 if sym in aktif_pozisyonlar:
@@ -238,28 +261,8 @@ def acik_pozisyonlari_binanceden_guncelle():
                         aktif_pozisyonlar[sym]["yon"] = "LONG" if amt > 0 else "SHORT"
                         aktif_pozisyonlar[sym]["adet"] = abs(amt)
                         aktif_pozisyonlar[sym]["giris_fiyati"] = entry_price
-        print("🔄 [API Senkronizasyonu] Mevcut açık pozisyonlar başarıyla güncellendi.")
     except Exception as e:
         print(f"❌ Pozisyon senkronizasyon hatası: {e}")
-
-def tüm_gecmis_verileri_guncelle():
-    for s in SYMBOLS:
-        try:
-            url = f"https://fapi.binance.com/fapi/v1/klines?symbol={s.upper()}&interval={config.TIMEFRAME}&limit=60"
-            k = requests.get(url, timeout=10).json()
-            if not k or len(k) == 0: continue
-            
-            kapanislar_yeni = [float(x[4]) for x in k]
-            yuksekler_yeni = [float(x[2]) for x in k]
-            dusukler_yeni = [float(x[3]) for x in k]
-            
-            with data_lock:
-                piyasa_verisi[s]["kapanislar"] = kapanislar_yeni
-                piyasa_verisi[s]["yuksekler"] = yuksekler_yeni
-                piyasa_verisi[s]["dusukler"] = dusukler_yeni
-                if piyasa_verisi[s]["anlik_fiyat"] is None:
-                    piyasa_verisi[s]["anlik_fiyat"] = kapanislar_yeni[-1]
-        except Exception: pass
 
 # --- 🎛️ TELEGRAM YÖNETİMİ ---
 def telegram_bildir(mesaj, reply_markup=None):
@@ -280,17 +283,17 @@ def telegram_canli_rapor_uret():
     acik_pozisyonlari_binanceden_guncelle()
     with data_lock:
         acik_pozlar = sum(1 for s in SYMBOLS if aktif_pozisyonlar[s]["aktif"])
-        durum_str = "🟢 Squeeze Mod Active" if config.BOT_CALISIYOR else "🔴 Sistem Durduruldu"
+        durum_str = "🟢 Pure API Tarama Aktif" if config.BOT_CALISIYOR else "🔴 Sistem Durduruldu"
         poz_buyuklugu = config.ISLEM_MARJIN * config.KALDIRAC
 
         rapor = (
-            f"⚙️ <b>Squeeze + N Bars Avcı Botu</b>\n"
+            f"⚙️ <b>Squeeze REST API Botu</b>\n"
             f"• Sistem: {durum_str}\n"
             f"• Marjin: {config.ISLEM_MARJIN:.1f} USDT\n"
             f"• Kaldıraç: {config.KALDIRAC}x (İZOLE)\n"
             f"• Poz Büyüklüğü: {poz_buyuklugu:.1f} USDT\n"
             f"• Risk Limiti: {acik_pozlar}/{config.MAX_ACIK_POZISYON} Pozisyon\n"
-            f"• TP Hedefi: {config.SABIT_DOLAR_TP} USD (Sabit Dolar Kârı)\n\n"
+            f"• TP Hedefi: {config.SABIT_DOLAR_TP} USD\n\n"
             f"⚡ <b>Açık İşlemler:</b>\n"
         )
 
@@ -318,7 +321,7 @@ def telegram_gelen_mesaj_dinleyici():
                     text = message.get("text", "")
                     
                     if text == "/start":
-                        telegram_bildir("🤖 <b>Bot Kontrol Paneleli Aktif!</b>", reply_markup=ana_menu_olustur())
+                        telegram_bildir("🤖 <b>Bot Kontrol Paneli Aktif!</b>", reply_markup=ana_menu_olustur())
                     elif text == "📊 Bot Durumu":
                         telegram_bildir(telegram_canli_rapor_uret(), reply_markup=ana_menu_olustur())
                     elif text == "▶️ Botu Başlat":
@@ -329,170 +332,45 @@ def telegram_gelen_mesaj_dinleyici():
                         telegram_bildir("⏸️ Bot tarama döngüsü <b>durduruldu.</b>", reply_markup=ana_menu_olustur())
         except Exception: time.sleep(5)
 
-# --- 🔐 WEBSOCKET BAĞLANTILARI ---
-def on_user_message(ws, message):
-    try:
-        data = json.loads(message)
-        if data.get("e") == "ACCOUNT_UPDATE":
-            positions = data.get("a", {}).get("P", [])
-            for p in positions:
-                sym = p.get("s", "").lower()
-                if sym in aktif_pozisyonlar:
-                    with data_lock:
-                        if emir_beklemede_durumu.get(sym, False): continue 
-                        pa = float(p.get("pa", 0))
-                        ep = float(p.get("ep", 0))
-                        if pa == 0:
-                            aktif_pozisyonlar[sym]["aktif"] = False
-                            aktif_pozisyonlar[sym]["adet"] = 0.0
-                            aktif_pozisyonlar[sym]["giris_fiyati"] = 0.0
-                            pozisyon_acilis_zamanlari[sym] = 0.0
-                        else:
-                            if not aktif_pozisyonlar[sym]["aktif"]:
-                                pozisyon_acilis_zamanlari[sym] = time.time()
-                            aktif_pozisyonlar[sym]["aktif"] = True
-                            aktif_pozisyonlar[sym]["yon"] = "LONG" if pa > 0 else "SHORT"
-                            aktif_pozisyonlar[sym]["adet"] = abs(pa)
-                            aktif_pozisyonlar[sym]["giris_fiyati"] = ep
-    except Exception: pass
-
-def _listen_key_keepalive_loop():
-    global listen_key
-    while True:
-        try:
-            time.sleep(1200) 
-            if listen_key:
-                client.futures_stream_keepalive(listenKey=listen_key)
-        except Exception as e:
-            print(f"❌ Listen Key yenileme hatası: {e}")
-
-def start_user_data_ws():
-    global listen_key
-    while True:
-        try:
-            listen_key = client.futures_stream_get_listen_key()
-            threading.Thread(target=_listen_key_keepalive_loop, daemon=True).start()
-            
-            ws = WebSocketApp(
-                f"wss://fstream.binance.com/ws/{listen_key}", 
-                on_message=on_user_message, 
-                on_close=lambda ws,c,m: print("⚠️ User Data Stream kapandı, yeniden bağlanılıyor...")
-            )
-            ws.run_forever()
-        except Exception as e:
-            print(f"❌ User Data WS Hatası, 10sn içinde yeniden denenecek: {e}")
-            time.sleep(10)
-
-def on_market_data_message(ws, message):
-    try:
-        data = json.loads(message)
-        if isinstance(data, list):
-            for ticker in data:
-                sym = ticker.get("s", "").lower()
-                if sym in piyasa_verisi:
-                    with data_lock:
-                        piyasa_verisi[sym]["anlik_fiyat"] = float(ticker.get("c", 0))
-    except Exception: pass
-
-def start_market_data_ws():
-    while True:
-        try:
-            ws = WebSocketApp(
-                "wss://fstream.binance.com/ws/!ticker@arr", 
-                on_message=on_market_data_message, 
-                on_close=lambda ws,c,m: print("⚠️ Piyasa veri akışı koptu, yeniden bağlanılıyor...")
-            )
-            ws.run_forever()
-        except Exception as e:
-            print(f"❌ Market WS Hatası, 5sn içinde yeniden denenecek: {e}")
-            time.sleep(5)
-
-# --- 🛰️ ASENKRON CANLI RADAR EK MOTORU (15s DÖNGÜSÜ) ---
-def canlı_radar_dongusu():
-    while True:
-        try:
-            time.sleep(15.0)
-            if not config.BOT_CALISIYOR: continue
-
-            radar_adaylari = []
-            su_an_ts = time.time()
-
-            yerel_piyasa_kopya = {}
-            with data_lock:
-                for symbol in SYMBOLS:
-                    if su_an_ts - son_islem_zamanlari[symbol] < config.COOLDOWN_SURESI and not aktif_pozisyonlar[symbol]["aktif"]:
-                        continue
-                    yerel_piyasa_kopya[symbol] = {
-                        "v": dict(piyasa_verisi[symbol]),
-                        "pos": dict(aktif_pozisyonlar[symbol])
-                    }
-
-            for symbol, data in yerel_piyasa_kopya.items():
-                v = data["v"]
-                pos = data["pos"]
-                
-                if len(v["kapanislar"]) < 40 or not v["anlik_fiyat"] or v["anlik_fiyat"] <= 0: continue
-                if pos["aktif"]: continue 
-
-                sinyal_durumu = strateji_sinyal_uret(v, v["anlik_fiyat"])
-                if sinyal_durumu != "HOLD":
-                    radar_adaylari.append({
-                        "symbol": symbol.upper(),
-                        "yon": "LONG Yönü" if sinyal_durumu == "BUY" else "SHORT Yönü",
-                        "fiyat": v["anlik_fiyat"],
-                        "sinyal": sinyal_durumu
-                    })
-
-            if radar_adaylari:
-                zaman_str = datetime.now().strftime("%H:%M:%S")
-                print(f"\n🎯 [CANLI RADAR - {zaman_str}] Squeeze + N Bars Kırılım Adayları:")
-                print("-----------------------------------------------------------------")
-                for i, coin in enumerate(radar_adaylari[:5], 1):
-                    print(f"{i}. {coin['symbol']:<10} | {coin['yon']:<11} | Sinyal Fiyatı: {coin['fiyat']:<10}")
-                print("-----------------------------------------------------------------")
-
-        except Exception as e:
-            print(f"❌ Radar hatası: {e}")
-
-# --- 🎯 1 SANİYELİK KOTA DOSTU SQUEEZE MOTORU ---
-def hibrit_tarama_dongusu():
-    last_kline_sync = 0
-    threading.Thread(target=canlı_radar_dongusu, daemon=True).start()
-
+# --- 🎯 %100 PURE API TARAMA MOTORU ---
+def pure_api_tarama_dongusu():
     while True:
         try:
             if not config.BOT_CALISIYOR:
-                time.sleep(1.0); continue
+                time.sleep(1.0)
+                continue
                 
             su_an_ts = time.time()
             
-            # 30 saniyede bir API üzerinden genel kontrol ve senkronizasyon
-            if su_an_ts - last_kline_sync > 30:
-                tüm_gecmis_verileri_guncelle()
-                acik_pozisyonlari_binanceden_guncelle()  
-                last_kline_sync = su_an_ts
+            # Her döngü başında Binance üzerindeki güncel açık pozisyonları netleştir
+            acik_pozisyonlari_binanceden_guncelle()  
 
-            yerel_liste = []
+            # Coin listesini kopyala ve sırayla API sorgusu yap
             with data_lock:
-                for symbol in SYMBOLS:
-                    yerel_liste.append({
-                        "symbol": symbol,
-                        "v": dict(piyasa_verisi[symbol]),
-                        "pos": dict(aktif_pozisyonlar[symbol]),
-                        "son_islem": son_islem_zamanlari[symbol],
-                        "acilis_zamani": pozisyon_acilis_zamanlari.get(symbol, 0)
-                    })
+                yerel_semboller = list(SYMBOLS)
 
-            for item in yerel_liste:
-                symbol = item["symbol"]
-                v = item["v"]
-                pos = item["pos"]
+            for symbol in yerel_semboller:
+                if not config.BOT_CALISIYOR: break
+
+                # 1. Coin'in güncel mum ve anlık fiyat verisini API'den çek
+                if not tek_coin_api_verisi_guncelle(symbol):
+                    time.sleep(config.API_DELAY)
+                    continue
+
+                # 2. Güncel veriyi lokal değişkenlere al
+                with data_lock:
+                    v = dict(piyasa_verisi[symbol])
+                    pos = dict(aktif_pozisyonlar[symbol])
+                    son_islem = son_islem_zamanlari[symbol]
+
+                if len(v["kapanislar"]) < 40 or not v["anlik_fiyat"] or v["anlik_fiyat"] <= 0:
+                    time.sleep(config.API_DELAY)
+                    continue
                 
-                if len(v["kapanislar"]) < 40 or not v["anlik_fiyat"] or v["anlik_fiyat"] <= 0: continue
                 anlik_fiyat = v["anlik_fiyat"]
 
                 # ==========================================
-                # 🎯 ÇIKIŞ MANTIĞI (0.15$ Kâr Kontrolü)
+                # 🎯 ÇIKIŞ MANTIĞI (0.15$ Sabit Kâr Kontrolü)
                 # ==========================================
                 if pos["aktif"]:
                     maliyet = pos["giris_fiyati"]
@@ -526,20 +404,21 @@ def hibrit_tarama_dongusu():
                                 telegram_bildir(f"💰 <b>{symbol.upper()} {pos['yon']} {round(anlik_kar_dolar, 3)}$ Kar ile Kapatıldı!</b>\nFiyat: {anlik_fiyat}")
                         except Exception as e:
                             print(f"❌ Kapatma hatası ({symbol}): {e}")
-                            telegram_bildir(f"⚠️ <b>{symbol.upper()} {pos['yon']} Kapatılamadı!</b>\nHata: {str(e)}")
                         finally:
                             with data_lock: emir_beklemede_durumu[symbol] = False
-                
+
                 # ==========================================
                 # 📈 GİRİŞ MANTIĞI (SQUEEZE + N BARS)
                 # ==========================================
-                if not pos["aktif"]:
-                    if su_an_ts - item["son_islem"] < config.COOLDOWN_SURESI: continue
+                else:
+                    if su_an_ts - son_islem < config.COOLDOWN_SURESI: 
+                        time.sleep(config.API_DELAY)
+                        continue
                     
-                    # Lock altında anlık limit kontrolü (Saniyede birden fazla coin emrini engellemek için)
                     with data_lock:
                         guncel_acik_pozisyon_sayisi = sum(1 for s in SYMBOLS if aktif_pozisyonlar[s]["aktif"])
                     if guncel_acik_pozisyon_sayisi >= config.MAX_ACIK_POZISYON: 
+                        time.sleep(config.API_DELAY)
                         continue 
 
                     sinyal = strateji_sinyal_uret(v, anlik_fiyat)
@@ -548,6 +427,7 @@ def hibrit_tarama_dongusu():
                         with data_lock:
                             guncel_acik_pozisyon_sayisi = sum(1 for s in SYMBOLS if aktif_pozisyonlar[s]["aktif"])
                             if guncel_acik_pozisyon_sayisi >= config.MAX_ACIK_POZISYON or emir_beklemede_durumu[symbol] or aktif_pozisyonlar[symbol]["aktif"]: 
+                                time.sleep(config.API_DELAY)
                                 continue
                             emir_beklemede_durumu[symbol] = True
 
@@ -560,29 +440,29 @@ def hibrit_tarama_dongusu():
                                 if sinyal == "BUY":
                                     client.futures_create_order(symbol=symbol.upper(), side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=qty)
                                     with data_lock:
-                                        # WebSocket'i beklemeden lokal durumu hemen kilitleyerek güncelliyoruz
                                         aktif_pozisyonlar[symbol] = {"aktif": True, "yon": "LONG", "adet": qty, "giris_fiyati": anlik_fiyat}
-                                        pozisyon_acilis_zamanlari[symbol] = su_an_ts
                                     telegram_bildir(f"🚀 <b>{symbol.upper()} LONG Pozisyonu Açıldı!</b>\nFiyat: {anlik_fiyat}")
                                         
                                 elif sinyal == "SELL":
                                     client.futures_create_order(symbol=symbol.upper(), side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=qty)
                                     with data_lock:
                                         aktif_pozisyonlar[symbol] = {"aktif": True, "yon": "SHORT", "adet": qty, "giris_fiyati": anlik_fiyat}
-                                        pozisyon_acilis_zamanlari[symbol] = su_an_ts
                                     telegram_bildir(f"🚀 <b>{symbol.upper()} SHORT Pozisyonu Açıldı!</b>\nFiyat: {anlik_fiyat}")
                         except Exception as e:
                             print(f"❌ Emir gönderme hatası ({symbol}): {e}")
                         finally:
                             with data_lock: emir_beklemede_durumu[symbol] = False
-            time.sleep(1.0)
+                
+                # Her coin kontrolünden sonra Binance API limitlerini şişirmemek için minik bir bekleme
+                time.sleep(config.API_DELAY)
+
         except Exception as e:
             print(f"❌ Ana döngü hatası: {e}")
-            time.sleep(1.0)
+            time.sleep(2.0)
 
 # --- 🚀 ANA ÇALIŞTIRICI SİSTEM ---
 if __name__ == "__main__":
-    print("🎬 Squeeze + N Bars Avcı Botu Başlatılıyor...")
+    print("🎬 %100 Pure API Squeeze Botu Başlatılıyor...")
     
     hacimli_coinler = ilk_100_hacimli_coin_bul()
     print(f"📋 İlk etapta {len(hacimli_coinler)} adet hacimli coin tespit edildi.")
@@ -594,16 +474,9 @@ if __name__ == "__main__":
             
     print(f"✅ Filtreleri geçen {eklenen_sayac} coin tarama listesine eklendi.")
     
-    tüm_gecmis_verileri_guncelle()
-    acik_pozisyonlari_binanceden_guncelle()
-    
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
         threading.Thread(target=telegram_gelen_mesaj_dinleyici, daemon=True).start()
-        telegram_bildir("🤖 <b>Squeeze + N Bars Kırılımı Botu Başlatıldı!</b>")
+        telegram_bildir("🤖 <b>Squeeze Botu Saf API Modunda Başlatıldı!</b>")
     
-    # Canlı Akış Soketlerinin Başlatılması
-    threading.Thread(target=start_user_data_ws, daemon=True).start()
-    threading.Thread(target=start_market_data_ws, daemon=True).start()
-    
-    print("⚡ Tüm sistemler aktif. Squeeze tarama motoru ve asenkron Canlı Radar başlatıldı.")
-    hibrit_tarama_dongusu()
+    print("⚡ Tüm sistemler aktif. Senkronize döngü başlıyor...")
+    pure_api_tarama_dongusu()
