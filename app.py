@@ -33,7 +33,7 @@ class TrendBotConfig:
         self.MAX_ACIK_POZISYON = 20     
         self.BOT_CALISIYOR = True
         self.COOLDOWN_SURESI = 0     
-        self.SABIT_DOLAR_TP = 0.15     # Net kâr hedefi (Dolar)
+        self.SABIT_DOLAR_TP = 0.10     # Net kâr hedefi (Dolar)
         
         # === Pine Script Strateji Parametreleri ===
         self.BB_LEN = 20
