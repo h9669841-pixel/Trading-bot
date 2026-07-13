@@ -30,7 +30,7 @@ class TrendBotConfig:
         self.TIMEFRAME = Client.KLINE_INTERVAL_15MINUTE  
         self.ISLEM_MARJIN = 1.0        
         self.KALDIRAC = 20             
-        self.MAX_ACIK_POZISYON = 10     
+        self.MAX_ACIK_POZISYON = 20     
         self.BOT_CALISIYOR = True
         self.COOLDOWN_SURESI = 0     
         self.SABIT_DOLAR_TP = 0.15     # Net kâr hedefi (Dolar)
