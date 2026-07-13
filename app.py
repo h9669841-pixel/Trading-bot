@@ -3,7 +3,6 @@ import json
 import time
 import requests
 import threading
-import traceback
 import math
 from datetime import datetime
 from binance.client import Client
@@ -149,16 +148,19 @@ def strateji_sinyal_uret(v, anlik_fiyat):
         dilim_yuksekler = yuksekler[-(config.BARS_CHECK + 2):-2]
         high_avg_prev_n = sum(dilim_yuksekler) / len(dilim_yuksekler)
 
+        dilim_dusukler = dusukler[-(config.BARS_CHECK + 2):-2]
+        low_avg_prev_n = sum(dilim_dusukler) / len(dilim_dusukler)
+
         current_close = kapanislar[-1]
         rsi_val = rsi_hesapla(kapanislar, config.RSI_LEN)
         atr_serisi = atr_hesapla(yuksekler, dusukler, kapanislar, config.ATR_LEN)
         atr_val = atr_serisi[-1]
 
         ext_up = max(0.0, current_close - high_avg_prev_n)
-        ext_down = max(0.0, high_avg_prev_n - current_close)
+        ext_down = max(0.0, low_avg_prev_n - current_close)
 
         long_ok = current_close > high_avg_prev_n
-        short_ok = current_close < high_avg_prev_n
+        short_ok = current_close < low_avg_prev_n
 
         if config.USE_ATR_FILTER:
             long_ok = long_ok and (ext_up <= config.MAX_EXT_LONG_ATR * atr_val)
@@ -316,7 +318,7 @@ def telegram_gelen_mesaj_dinleyici():
                     text = message.get("text", "")
                     
                     if text == "/start":
-                        telegram_bildir("🤖 <b>Bot Kontrol Paneli Aktif!</b>", reply_markup=ana_menu_olustur())
+                        telegram_bildir("🤖 <b>Bot Kontrol Paneleli Aktif!</b>", reply_markup=ana_menu_olustur())
                     elif text == "📊 Bot Durumu":
                         telegram_bildir(telegram_canli_rapor_uret(), reply_markup=ana_menu_olustur())
                     elif text == "▶️ Botu Başlat":
@@ -464,7 +466,7 @@ def hibrit_tarama_dongusu():
                 
             su_an_ts = time.time()
             
-            # 30 saniyede bir API üzerinden genel kontrol ve senkronizasyon (Güvenlik Önlemi)
+            # 30 saniyede bir API üzerinden genel kontrol ve senkronizasyon
             if su_an_ts - last_kline_sync > 30:
                 tüm_gecmis_verileri_guncelle()
                 acik_pozisyonlari_binanceden_guncelle()  
@@ -472,16 +474,13 @@ def hibrit_tarama_dongusu():
 
             yerel_liste = []
             with data_lock:
-                guncel_acik_pozisyon_sayisi = sum(1 for s in SYMBOLS if aktif_pozisyonlar[s]["aktif"])
                 for symbol in SYMBOLS:
                     yerel_liste.append({
                         "symbol": symbol,
                         "v": dict(piyasa_verisi[symbol]),
-                        # Pozisyon verileri anlık olarak User Data WebSocket'ten güncellenir
                         "pos": dict(aktif_pozisyonlar[symbol]),
                         "son_islem": son_islem_zamanlari[symbol],
-                        "acilis_zamani": pozisyon_acilis_zamanlari.get(symbol, 0),
-                        "acik_poz_sayisi": guncel_acik_pozisyon_sayisi
+                        "acilis_zamani": pozisyon_acilis_zamanlari.get(symbol, 0)
                     })
 
             for item in yerel_liste:
@@ -493,20 +492,18 @@ def hibrit_tarama_dongusu():
                 anlik_fiyat = v["anlik_fiyat"]
 
                 # ==========================================
-                # 🎯 ÇIKIŞ MANTIĞI (WebSocket Canlı Pozisyon Verileri ile 0.15$ Kâr Kontrolü)
+                # 🎯 ÇIKIŞ MANTIĞI (0.15$ Kâr Kontrolü)
                 # ==========================================
                 if pos["aktif"]:
                     maliyet = pos["giris_fiyati"]
                     adet = pos["adet"]
                     if maliyet <= 0 or adet <= 0: continue
 
-                    # Anlık Dolar bazlı net kâr hesaplaması
                     if pos["yon"] == "LONG":
                         anlik_kar_dolar = (anlik_fiyat - maliyet) * adet
                     else:  # SHORT
                         anlik_kar_dolar = (maliyet - anlik_fiyat) * adet
 
-                    # Kâr Hedef Kontrolü (Net Kâr >= 0.15$)
                     if anlik_kar_dolar >= config.SABIT_DOLAR_TP:
                         with data_lock:
                             if emir_beklemede_durumu[symbol]: continue
@@ -516,7 +513,6 @@ def hibrit_tarama_dongusu():
                             precision = FUTURES_HASSASIYETLERI.get(symbol, 2)
                             faktor = 10 ** precision
                             qty_to_close = math.floor(adet * faktor) / faktor if precision > 0 else int(adet)
-                            
                             side_to_close = SIDE_SELL if pos["yon"] == "LONG" else SIDE_BUY
                             
                             if qty_to_close > 0:
@@ -539,13 +535,20 @@ def hibrit_tarama_dongusu():
                 # ==========================================
                 if not pos["aktif"]:
                     if su_an_ts - item["son_islem"] < config.COOLDOWN_SURESI: continue
-                    if item["acik_poz_sayisi"] >= config.MAX_ACIK_POZISYON: continue 
+                    
+                    # Lock altında anlık limit kontrolü (Saniyede birden fazla coin emrini engellemek için)
+                    with data_lock:
+                        guncel_acik_pozisyon_sayisi = sum(1 for s in SYMBOLS if aktif_pozisyonlar[s]["aktif"])
+                    if guncel_acik_pozisyon_sayisi >= config.MAX_ACIK_POZISYON: 
+                        continue 
 
                     sinyal = strateji_sinyal_uret(v, anlik_fiyat)
 
                     if sinyal != "HOLD":
                         with data_lock:
-                            if emir_beklemede_durumu[symbol] or aktif_pozisyonlar[symbol]["aktif"]: continue
+                            guncel_acik_pozisyon_sayisi = sum(1 for s in SYMBOLS if aktif_pozisyonlar[s]["aktif"])
+                            if guncel_acik_pozisyon_sayisi >= config.MAX_ACIK_POZISYON or emir_beklemede_durumu[symbol] or aktif_pozisyonlar[symbol]["aktif"]: 
+                                continue
                             emir_beklemede_durumu[symbol] = True
 
                         try:
@@ -554,15 +557,14 @@ def hibrit_tarama_dongusu():
                             qty = float(int(qty * (10 ** precision))) / (10 ** precision) if precision > 0 else int(qty)
                             
                             if qty > 0:
-                                # LONG EMİR
                                 if sinyal == "BUY":
                                     client.futures_create_order(symbol=symbol.upper(), side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=qty)
                                     with data_lock:
+                                        # WebSocket'i beklemeden lokal durumu hemen kilitleyerek güncelliyoruz
                                         aktif_pozisyonlar[symbol] = {"aktif": True, "yon": "LONG", "adet": qty, "giris_fiyati": anlik_fiyat}
                                         pozisyon_acilis_zamanlari[symbol] = su_an_ts
                                     telegram_bildir(f"🚀 <b>{symbol.upper()} LONG Pozisyonu Açıldı!</b>\nFiyat: {anlik_fiyat}")
                                         
-                                # SHORT EMİR
                                 elif sinyal == "SELL":
                                     client.futures_create_order(symbol=symbol.upper(), side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=qty)
                                     with data_lock:
@@ -599,6 +601,7 @@ if __name__ == "__main__":
         threading.Thread(target=telegram_gelen_mesaj_dinleyici, daemon=True).start()
         telegram_bildir("🤖 <b>Squeeze + N Bars Kırılımı Botu Başlatıldı!</b>")
     
+    # Canlı Akış Soketlerinin Başlatılması
     threading.Thread(target=start_user_data_ws, daemon=True).start()
     threading.Thread(target=start_market_data_ws, daemon=True).start()
     
