@@ -28,28 +28,21 @@ if requests_proxies:
 class TrendBotConfig:
     def __init__(self):
         self.TIMEFRAME = Client.KLINE_INTERVAL_15MINUTE  
-        self.ISLEM_MARJIN = 1.0        
-        self.KALDIRAC = 20             
-        self.MAX_ACIK_POZISYON = 20     
+        self.ISLEM_MARJIN = 1.0        # İşlem başına marjin (USDT)
+        self.KALDIRAC = 20             # Kaldıraç oranı
+        self.MAX_ACIK_POZISYON = 10     # Aynı anda açık kalabilecek maksimum pozisyon sayısı
         self.BOT_CALISIYOR = True
-        self.COOLDOWN_SURESI = 0     
+        self.COOLDOWN_SURESI = 300     # İşlem sonrası aynı coinde bekleme süresi (Saniye)
         self.SABIT_DOLAR_TP = 0.10     # Net kâr hedefi (Dolar)
         
-        # === Pine Script Strateji Parametreleri ===
-        self.BB_LEN = 20
-        self.BB_MULT = 2.0
-        self.KC_MULT = 1.5
-        self.BARS_CHECK = 2            
+        # === İndikatör Parametreleri ===
+        self.BB_LEN = 20               # Bollinger Bandı Periyodu
+        self.BB_MULT = 2.0             # Bollinger Bandı Standart Sapma Çarpanı
         
-        self.USE_ATR_FILTER = True
-        self.ATR_LEN = 14
-        self.MAX_EXT_LONG_ATR = 0.8
-        self.MAX_EXT_SHORT_ATR = 1.6
-        
-        self.USE_RSI_FILTER = True
+        self.USE_RSI_FILTER = True     # Giriş için RSI filtresi kullanılsın mı?
         self.RSI_LEN = 14
-        self.RSI_OB = 70
-        self.RSI_OS = 30
+        self.RSI_OB = 70               # Aşırı Alım (Overbought) Sınırı
+        self.RSI_OS = 30               # Aşırı Satım (Oversold) Sınırı
         
         # API Tarama Gecikmesi (İstekler arası hafif esneme)
         self.API_DELAY = 0.3
@@ -60,12 +53,13 @@ SYMBOLS = []
 piyasa_verisi = {}
 aktif_pozisyonlar = {}
 FUTURES_HASSASIYETLERI = {}
+FUTURES_FIYAT_HASSASIYETLERI = {} # Fiyat yuvarlama hassasiyetleri
 son_islem_zamanlari = {}        
 emir_beklemede_durumu = {} 
 
 data_lock = threading.Lock()
 
-# --- 🛠️ MATEMATİKSEL İNDİKATÖR MOTORU (PINE SCRIPT UYUMLU) ---
+# --- 🛠️ MATEMATİKSEL İNDİKATÖR MOTORU ---
 
 def sma(seri, periyod):
     if len(seri) < periyod: return [0.0] * len(seri)
@@ -102,19 +96,17 @@ def rsi_hesapla(kapanislar, periyod=14):
     if ort_kayip <= 0.00000001: return 100.0  
     return 100.0 - (100.0 / (1.0 + (ort_kazanc / ort_kayip)))
 
-def atr_hesapla(yuksekler, dusukler, kapanislar, periyod=14):
-    if len(kapanislar) < 2: return [0.0] * len(kapanislar)
-    tr = [yuksekler[0] - dusukler[0]]
-    for i in range(1, len(kapanislar)):
-        hl = yuksekler[i] - dusukler[i]
-        hc = abs(yuksekler[i] - kapanislar[i-1])
-        lc = abs(dusukler[i] - kapanislar[i-1])
-        tr.append(max(hl, hc, lc))
+def bollinger_bands(kapanislar, periyod=20, carpan=2.0):
+    """Bollinger Bandı (Üst, Orta, Alt) değerlerini hesaplar."""
+    if len(kapanislar) < periyod:
+        return [0.0], [0.0], [0.0]
+    orta_bant = sma(kapanislar, periyod)
+    sapmalar = stdev(kapanislar, periyod)
     
-    atr = [sum(tr[:periyod]) / periyod]
-    for i in range(periyod, len(tr)):
-        atr.append((atr[-1] * (periyod - 1) + tr[i]) / periyod)
-    return [0.0] * (periyod - 1) + atr
+    ust_bant = [orta_bant[i] + (sapmalar[i] * carpan) for i in range(len(kapanislar))]
+    alt_bant = [orta_bant[i] - (sapmalar[i] * carpan) for i in range(len(kapanislar))]
+    
+    return ust_bant, orta_bant, alt_bant
 
 # --- 🌐 REST API ALTYAPI FONKSİYONLARI ---
 
@@ -145,11 +137,17 @@ def kontrollu_coin_ekle(coin_adi):
         except BinanceAPIException as e:
             if "No need to change" not in e.message: pass
 
+        # Adet hassasiyeti (LOT_SIZE)
         for f in market_info['filters']:
             if f['filterType'] == 'LOT_SIZE':
                 step_size_str = str(f['stepSize']).rstrip('0')
                 precision = 0 if '.' not in step_size_str else len(step_size_str.split('.')[1])
                 FUTURES_HASSASIYETLERI[coin_lower] = precision
+            # Fiyat hassasiyeti (PRICE_FILTER)
+            if f['filterType'] == 'PRICE_FILTER':
+                tick_size_str = str(f['tickSize']).rstrip('0')
+                price_precision = 0 if '.' not in tick_size_str else len(tick_size_str.split('.')[1])
+                FUTURES_FIYAT_HASSASIYETLERI[coin_lower] = price_precision
 
         with data_lock:
             SYMBOLS.append(coin_lower)
@@ -161,19 +159,18 @@ def kontrollu_coin_ekle(coin_adi):
     except Exception: return False
 
 def tek_coin_api_verisi_guncelle(s):
-    """Belirli bir coin için klines ve anlık fiyatı REST API üzerinden çeker ve senkronize eder."""
     try:
-        url = f"https://fapi.binance.com/fapi/v1/klines?symbol={s.upper()}&interval={config.TIMEFRAME}&limit=60"
+        url = f"https://fapi.binance.com/fapi/v1/klines?symbol={s.upper()}&interval={config.TIMEFRAME}&limit=100"
         k = requests.get(url, timeout=5).json()
         if not k or len(k) == 0: return False
         
         kapanislar_yeni = [float(x[4]) for x in k]
         yuksekler_yeni = [float(x[2]) for x in k]
         dusukler_yeni = [float(x[3]) for x in k]
-        anlik_fiyat_yeni = kapanislar_yeni[-1]  # Son mumun kapanışı anlık fiyattır
+        anlik_fiyat_yeni = kapanislar_yeni[-1]  
         
         with data_lock:
-            piyasa_verisi[s]["kapanislar"] = kapanislar_yeni[:-1] # Son canlı mumu ayırıyoruz
+            piyasa_verisi[s]["kapanislar"] = kapanislar_yeni[:-1] 
             piyasa_verisi[s]["yuksekler"] = yuksekler_yeni[:-1]
             piyasa_verisi[s]["dusukler"] = dusukler_yeni[:-1]
             piyasa_verisi[s]["anlik_fiyat"] = anlik_fiyat_yeni
@@ -182,11 +179,9 @@ def tek_coin_api_verisi_guncelle(s):
         return False
 
 def acik_pozisyonlari_binanceden_guncelle():
-    """Tüm açık pozisyonları doğrudan REST API üzerinden çekip lokal dictionary'i eşitler."""
     try:
         pozisyonlar = client.futures_position_information()
         with data_lock:
-            # Emir bekleme durumunda olmayan tüm coinleri sıfırla, API'den taze veri yazılacak
             for s in SYMBOLS:
                 if not emir_beklemede_durumu.get(s, False):
                     aktif_pozisyonlar[s] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0}
@@ -224,11 +219,11 @@ def telegram_canli_rapor_uret():
     acik_pozisyonlari_binanceden_guncelle()
     with data_lock:
         acik_pozlar = sum(1 for s in SYMBOLS if aktif_pozisyonlar[s]["aktif"])
-        durum_str = "🟢 Pure API Tarama Aktif (Sadece Kapatma Modu)" if config.BOT_CALISIYOR else "🔴 Sistem Durduruldu"
+        durum_str = "🟢 Aktif (BB & RSI Modu - Sadece Sabit TP Çıkışlı)" if config.BOT_CALISIYOR else "🔴 Sistem Durduruldu"
         poz_buyuklugu = config.ISLEM_MARJIN * config.KALDIRAC
 
         rapor = (
-            f"⚙️ <b>Squeeze REST API Botu (Sadece Pozisyon Kapatma)</b>\n"
+            f"⚙️ <b>Squeeze Bollinger & RSI Botu</b>\n"
             f"• Sistem: {durum_str}\n"
             f"• Marjin: {config.ISLEM_MARJIN:.1f} USDT\n"
             f"• Kaldıraç: {config.KALDIRAC}x (İZOLE)\n"
@@ -262,18 +257,18 @@ def telegram_gelen_mesaj_dinleyici():
                     text = message.get("text", "")
                     
                     if text == "/start":
-                        telegram_bildir("🤖 <b>Bot Kontrol Paneli Aktif! (Sadece Pozisyon Kapatma)</b>", reply_markup=ana_menu_olustur())
+                        telegram_bildir("🤖 <b>Bot Kontrol Paneli Aktif! (Bollinger & RSI)</b>", reply_markup=ana_menu_olustur())
                     elif text == "📊 Bot Durumu":
                         telegram_bildir(telegram_canli_rapor_uret(), reply_markup=ana_menu_olustur())
                     elif text == "▶️ Botu Başlat":
                         config.BOT_CALISIYOR = True
-                        telegram_bildir("🚀 Bot tarama döngüsü <b>aktif.</b> (Yalnızca kapatma çalışır)", reply_markup=ana_menu_olustur())
+                        telegram_bildir("🚀 Bot tarama döngüsü ve işlem girişi <b>aktif.</b>", reply_markup=ana_menu_olustur())
                     elif text == "⏸️ Botu Durdur":
                         config.BOT_CALISIYOR = False
                         telegram_bildir("⏸️ Bot tarama döngüsü <b>durduruldu.</b>", reply_markup=ana_menu_olustur())
         except Exception: time.sleep(5)
 
-# --- 🎯 %100 PURE API TARAMA MOTORU (SADECE KAPATMA AKTİF) ---
+# --- 🎯 AKTİF AL/SAT MOTORU (BOLLINGER & RSI STRATEJİSİ) ---
 def pure_api_tarama_dongusu():
     while True:
         try:
@@ -282,35 +277,39 @@ def pure_api_tarama_dongusu():
                 continue
                 
             su_an_ts = time.time()
-            
-            # Her döngü başında Binance üzerindeki güncel açık pozisyonları netleştir
             acik_pozisyonlari_binanceden_guncelle()  
 
-            # Coin listesini kopyala ve sırayla API sorgusu yap
             with data_lock:
                 yerel_semboller = list(SYMBOLS)
+                toplam_acik_pozisyon_sayisi = sum(1 for s in SYMBOLS if aktif_pozisyonlar[s]["aktif"])
 
             for symbol in yerel_semboller:
                 if not config.BOT_CALISIYOR: break
 
-                # 1. Coin'in güncel mum ve anlık fiyat verisini API'den çek
+                # 1. Coin'in güncel mum verisini API'den çek
                 if not tek_coin_api_verisi_guncelle(symbol):
                     time.sleep(config.API_DELAY)
                     continue
 
-                # 2. Güncel veriyi lokal değişkenlere al
                 with data_lock:
                     v = dict(piyasa_verisi[symbol])
                     pos = dict(aktif_pozisyonlar[symbol])
+                    cooldown_bitti_mi = (su_an_ts - son_islem_zamanlari.get(symbol, 0.0)) > config.COOLDOWN_SURESI
 
-                if not v["anlik_fiyat"] or v["anlik_fiyat"] <= 0:
+                if not v["anlik_fiyat"] or v["anlik_fiyat"] <= 0 or len(v["kapanislar"]) < config.BB_LEN:
                     time.sleep(config.API_DELAY)
                     continue
                 
                 anlik_fiyat = v["anlik_fiyat"]
+                kapanislar_listesi = v["kapanislar"]
+
+                # İndikatör Hesaplamaları
+                ust_bantlar, orta_bantlar, alt_bantlar = bollinger_bands(kapanislar_listesi, config.BB_LEN, config.BB_MULT)
+                ust_bant, orta_bant, alt_bant = ust_bantlar[-1], orta_bantlar[-1], alt_bantlar[-1]
+                son_rsi = rsi_hesapla(kapanislar_listesi, config.RSI_LEN)
 
                 # ==========================================
-                # 🎯 ÇIKIŞ MANTIĞI (0.10$ Sabit Kâr Kontrolü)
+                # 🎯 ÇIKIŞ MANTIĞI (Yalnızca Sabit TP Kontrolü)
                 # ==========================================
                 if pos["aktif"]:
                     maliyet = pos["giris_fiyati"]
@@ -322,6 +321,7 @@ def pure_api_tarama_dongusu():
                     else:  # SHORT
                         anlik_kar_dolar = (maliyet - anlik_fiyat) * adet
 
+                    # Çıkış Koşulu: Sadece Sabit Dolar TP Hedefine ulaşıldığında kapatılır
                     if anlik_kar_dolar >= config.SABIT_DOLAR_TP:
                         with data_lock:
                             if emir_beklemede_durumu[symbol]: continue
@@ -341,18 +341,68 @@ def pure_api_tarama_dongusu():
                                 with data_lock:
                                     son_islem_zamanlari[symbol] = su_an_ts  
                                     aktif_pozisyonlar[symbol] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0}
-                                telegram_bildir(f"💰 <b>{symbol.upper()} {pos['yon']} {round(anlik_kar_dolar, 3)}$ Kar ile Kapatıldı!</b>\nFiyat: {anlik_fiyat}")
+                                telegram_bildir(f"💰 <b>{symbol.upper()} {pos['yon']} Kapatıldı!</b>\nKar: {round(anlik_kar_dolar, 3)}$\nFiyat: {anlik_fiyat}")
                         except Exception as e:
                             print(f"❌ Kapatma hatası ({symbol}): {e}")
                         finally:
                             with data_lock: emir_beklemede_durumu[symbol] = False
 
                 # ==========================================
-                # ❌ GİRİŞ MANTIĞI TAMAMEN KALDIRILDI ❌
-                # (Sadece içerideki pozisyonlar kapanana kadar beklenir)
+                # 📥 GİRİŞ MANTIĞI (BOLLINGER & RSI STRATEJİSİ)
                 # ==========================================
+                else:
+                    # Risk ve Cooldown Kontrolü
+                    if toplam_acik_pozisyon_sayisi < config.MAX_ACIK_POZISYON and cooldown_bitti_mi:
+                        
+                        long_girebilir_mi = anlik_fiyat <= alt_bant
+                        short_girebilir_mi = anlik_fiyat >= ust_bant
+
+                        # Opsiyonel RSI Filtresi Ekleme
+                        if config.USE_RSI_FILTER:
+                            long_girebilir_mi = long_girebilir_mi and (son_rsi <= config.RSI_OS)
+                            short_girebilir_mi = short_girebilir_mi and (son_rsi >= config.RSI_OB)
+
+                        gonderilecek_yon = None
+                        if long_girebilir_mi:
+                            gonderilecek_yon = "LONG"
+                        elif short_girebilir_mi:
+                            gonderilecek_yon = "SHORT"
+
+                        if gonderilecek_yon:
+                            with data_lock:
+                                if emir_beklemede_durumu[symbol]: continue
+                                emir_beklemede_durumu[symbol] = True
+
+                            try:
+                                # Lot Miktarı Hesaplama
+                                marjin = config.ISLEM_MARJIN
+                                kaldirac = config.KALDIRAC
+                                toplam_islem_boyutu = marjin * kaldirac
+                                nominal_qty = toplam_islem_boyutu / anlik_fiyat
+
+                                # Lot Yuvarlama (Adet Hassasiyeti)
+                                precision = FUTURES_HASSASIYETLERI.get(symbol, 2)
+                                faktor = 10 ** precision
+                                final_qty = math.floor(nominal_qty * faktor) / faktor if precision > 0 else int(nominal_qty)
+
+                                if final_qty > 0:
+                                    side = SIDE_BUY if gonderilecek_yon == "LONG" else SIDE_SELL
+                                    client.futures_create_order(
+                                        symbol=symbol.upper(), side=side, type=ORDER_TYPE_MARKET, quantity=final_qty
+                                    )
+                                    with data_lock:
+                                        son_islem_zamanlari[symbol] = su_an_ts
+                                        aktif_pozisyonlar[symbol] = {"aktif": True, "yon": gonderilecek_yon, "adet": final_qty, "giris_fiyati": anlik_fiyat}
+                                        toplam_acik_pozisyon_sayisi += 1
+                                    
+                                    telegram_bildir(
+                                        f"🚀 <b>{symbol.upper()} Pozisyon Açıldı!</b>\nYön: {gonderilecek_yon}\nMiktar: {final_qty}\nFiyat: {anlik_fiyat}\nRSI: {round(son_rsi, 2)}"
+                                    )
+                            except Exception as e:
+                                print(f"❌ Pozisyon Açma Hatası ({symbol}): {e}")
+                            finally:
+                                with data_lock: emir_beklemede_durumu[symbol] = False
                 
-                # Her coin kontrolünden sonra Binance API limitlerini şişirmemek için minik bir bekleme
                 time.sleep(config.API_DELAY)
 
         except Exception as e:
@@ -361,7 +411,7 @@ def pure_api_tarama_dongusu():
 
 # --- 🚀 ANA ÇALIŞTIRICI SİSTEM ---
 if __name__ == "__main__":
-    print("🎬 %100 Pure API Squeeze Botu (Sadece Kapatma Modunda) Başlatılıyor...")
+    print("🎬 Squeeze Bollinger & RSI Botu Başlatılıyor...")
     
     hacimli_coinler = ilk_100_hacimli_coin_bul()
     print(f"📋 İlk etapta {len(hacimli_coinler)} adet hacimli coin tespit edildi.")
@@ -375,7 +425,7 @@ if __name__ == "__main__":
     
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
         threading.Thread(target=telegram_gelen_mesaj_dinleyici, daemon=True).start()
-        telegram_bildir("🤖 <b>Squeeze Botu Yalnızca Pozisyon Kapatma Modunda Başlatıldı!</b>")
+        telegram_bildir("🤖 <b>Bollinger & RSI Al/Sat Botu Başlatıldı! (Sadece Sabit TP ile Çıkış)</b>")
     
-    print("⚡ Tüm sistemler aktif. Sadece kapatma takibi yapan döngü başlıyor...")
+    print("⚡ Tüm sistemler aktif. Tarama ve işlem döngüsü başlıyor...")
     pure_api_tarama_dongusu()
