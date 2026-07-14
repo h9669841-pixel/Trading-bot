@@ -116,65 +116,6 @@ def atr_hesapla(yuksekler, dusukler, kapanislar, periyod=14):
         atr.append((atr[-1] * (periyod - 1) + tr[i]) / periyod)
     return [0.0] * (periyod - 1) + atr
 
-def strateji_sinyal_uret(v, anlik_fiyat):
-    kapanislar = list(v["kapanislar"])
-    yuksekler = list(v["yuksekler"])
-    dusukler = list(v["dusukler"])
-    
-    if not kapanislar or anlik_fiyat <= 0: return "HOLD"
-    
-    kapanislar.append(anlik_fiyat)
-    yuksekler.append(max(anlik_fiyat, yuksekler[-1] if yuksekler else anlik_fiyat))
-    dusukler.append(min(anlik_fiyat, dusukler[-1] if dusukler else anlik_fiyat))
-
-    L = len(kapanislar)
-    gerekli_uzunluk = max(config.BB_LEN, config.ATR_LEN, config.RSI_LEN) + config.BARS_CHECK + 3
-    if L < gerekli_uzunluk: return "HOLD"
-
-    basis = sma(kapanislar, config.BB_LEN)
-    dev = stdev(kapanislar, config.BB_LEN)
-    upper_bb = [basis[i] + (config.BB_MULT * dev[i]) for i in range(L)]
-    lower_bb = [basis[i] - (config.BB_MULT * dev[i]) for i in range(L)]
-
-    kc_atr = atr_hesapla(yuksekler, dusukler, kapanislar, config.BB_LEN)
-    upper_kc = [basis[i] + (kc_atr[i] * config.KC_MULT) for i in range(L)]
-    lower_kc = [basis[i] - (kc_atr[i] * config.KC_MULT) for i in range(L)]
-
-    squeeze_on = [(upper_bb[i] < upper_kc[i]) and (lower_bb[i] > lower_kc[i]) for i in range(L)]
-    
-    target_idx = -(config.BARS_CHECK + 3)
-
-    if squeeze_on[target_idx]:
-        dilim_yuksekler = yuksekler[-(config.BARS_CHECK + 2):-2]
-        high_avg_prev_n = sum(dilim_yuksekler) / len(dilim_yuksekler)
-
-        dilim_dusukler = dusukler[-(config.BARS_CHECK + 2):-2]
-        low_avg_prev_n = sum(dilim_dusukler) / len(dilim_dusukler)
-
-        current_close = kapanislar[-1]
-        rsi_val = rsi_hesapla(kapanislar, config.RSI_LEN)
-        atr_serisi = atr_hesapla(yuksekler, dusukler, kapanislar, config.ATR_LEN)
-        atr_val = atr_serisi[-1]
-
-        ext_up = max(0.0, current_close - high_avg_prev_n)
-        ext_down = max(0.0, low_avg_prev_n - current_close)
-
-        long_ok = current_close > high_avg_prev_n
-        short_ok = current_close < low_avg_prev_n
-
-        if config.USE_ATR_FILTER:
-            long_ok = long_ok and (ext_up <= config.MAX_EXT_LONG_ATR * atr_val)
-            short_ok = short_ok and (ext_down <= config.MAX_EXT_SHORT_ATR * atr_val)
-
-        if config.USE_RSI_FILTER:
-            long_ok = long_ok and (rsi_val > config.RSI_OS)
-            short_ok = short_ok and (rsi_val < config.RSI_OB)
-
-        if long_ok: return "BUY"
-        elif short_ok: return "SELL"
-
-    return "HOLD"
-
 # --- 🌐 REST API ALTYAPI FONKSİYONLARI ---
 
 def ilk_100_hacimli_coin_bul():
@@ -232,7 +173,7 @@ def tek_coin_api_verisi_guncelle(s):
         anlik_fiyat_yeni = kapanislar_yeni[-1]  # Son mumun kapanışı anlık fiyattır
         
         with data_lock:
-            piyasa_verisi[s]["kapanislar"] = kapanislar_yeni[:-1] # Son canlı mumu ayırıyoruz strateji dinamik eklesin diye
+            piyasa_verisi[s]["kapanislar"] = kapanislar_yeni[:-1] # Son canlı mumu ayırıyoruz
             piyasa_verisi[s]["yuksekler"] = yuksekler_yeni[:-1]
             piyasa_verisi[s]["dusukler"] = dusukler_yeni[:-1]
             piyasa_verisi[s]["anlik_fiyat"] = anlik_fiyat_yeni
@@ -283,11 +224,11 @@ def telegram_canli_rapor_uret():
     acik_pozisyonlari_binanceden_guncelle()
     with data_lock:
         acik_pozlar = sum(1 for s in SYMBOLS if aktif_pozisyonlar[s]["aktif"])
-        durum_str = "🟢 Pure API Tarama Aktif" if config.BOT_CALISIYOR else "🔴 Sistem Durduruldu"
+        durum_str = "🟢 Pure API Tarama Aktif (Sadece Kapatma Modu)" if config.BOT_CALISIYOR else "🔴 Sistem Durduruldu"
         poz_buyuklugu = config.ISLEM_MARJIN * config.KALDIRAC
 
         rapor = (
-            f"⚙️ <b>Squeeze REST API Botu</b>\n"
+            f"⚙️ <b>Squeeze REST API Botu (Sadece Pozisyon Kapatma)</b>\n"
             f"• Sistem: {durum_str}\n"
             f"• Marjin: {config.ISLEM_MARJIN:.1f} USDT\n"
             f"• Kaldıraç: {config.KALDIRAC}x (İZOLE)\n"
@@ -321,18 +262,18 @@ def telegram_gelen_mesaj_dinleyici():
                     text = message.get("text", "")
                     
                     if text == "/start":
-                        telegram_bildir("🤖 <b>Bot Kontrol Paneli Aktif!</b>", reply_markup=ana_menu_olustur())
+                        telegram_bildir("🤖 <b>Bot Kontrol Paneli Aktif! (Sadece Pozisyon Kapatma)</b>", reply_markup=ana_menu_olustur())
                     elif text == "📊 Bot Durumu":
                         telegram_bildir(telegram_canli_rapor_uret(), reply_markup=ana_menu_olustur())
                     elif text == "▶️ Botu Başlat":
                         config.BOT_CALISIYOR = True
-                        telegram_bildir("🚀 Bot tarama döngüsü <b>aktif.</b>", reply_markup=ana_menu_olustur())
+                        telegram_bildir("🚀 Bot tarama döngüsü <b>aktif.</b> (Yalnızca kapatma çalışır)", reply_markup=ana_menu_olustur())
                     elif text == "⏸️ Botu Durdur":
                         config.BOT_CALISIYOR = False
                         telegram_bildir("⏸️ Bot tarama döngüsü <b>durduruldu.</b>", reply_markup=ana_menu_olustur())
         except Exception: time.sleep(5)
 
-# --- 🎯 %100 PURE API TARAMA MOTORU ---
+# --- 🎯 %100 PURE API TARAMA MOTORU (SADECE KAPATMA AKTİF) ---
 def pure_api_tarama_dongusu():
     while True:
         try:
@@ -361,16 +302,15 @@ def pure_api_tarama_dongusu():
                 with data_lock:
                     v = dict(piyasa_verisi[symbol])
                     pos = dict(aktif_pozisyonlar[symbol])
-                    son_islem = son_islem_zamanlari[symbol]
 
-                if len(v["kapanislar"]) < 40 or not v["anlik_fiyat"] or v["anlik_fiyat"] <= 0:
+                if not v["anlik_fiyat"] or v["anlik_fiyat"] <= 0:
                     time.sleep(config.API_DELAY)
                     continue
                 
                 anlik_fiyat = v["anlik_fiyat"]
 
                 # ==========================================
-                # 🎯 ÇIKIŞ MANTIĞI (0.15$ Sabit Kâr Kontrolü)
+                # 🎯 ÇIKIŞ MANTIĞI (0.10$ Sabit Kâr Kontrolü)
                 # ==========================================
                 if pos["aktif"]:
                     maliyet = pos["giris_fiyati"]
@@ -408,50 +348,9 @@ def pure_api_tarama_dongusu():
                             with data_lock: emir_beklemede_durumu[symbol] = False
 
                 # ==========================================
-                # 📈 GİRİŞ MANTIĞI (SQUEEZE + N BARS)
+                # ❌ GİRİŞ MANTIĞI TAMAMEN KALDIRILDI ❌
+                # (Sadece içerideki pozisyonlar kapanana kadar beklenir)
                 # ==========================================
-                else:
-                    if su_an_ts - son_islem < config.COOLDOWN_SURESI: 
-                        time.sleep(config.API_DELAY)
-                        continue
-                    
-                    with data_lock:
-                        guncel_acik_pozisyon_sayisi = sum(1 for s in SYMBOLS if aktif_pozisyonlar[s]["aktif"])
-                    if guncel_acik_pozisyon_sayisi >= config.MAX_ACIK_POZISYON: 
-                        time.sleep(config.API_DELAY)
-                        continue 
-
-                    sinyal = strateji_sinyal_uret(v, anlik_fiyat)
-
-                    if sinyal != "HOLD":
-                        with data_lock:
-                            guncel_acik_pozisyon_sayisi = sum(1 for s in SYMBOLS if aktif_pozisyonlar[s]["aktif"])
-                            if guncel_acik_pozisyon_sayisi >= config.MAX_ACIK_POZISYON or emir_beklemede_durumu[symbol] or aktif_pozisyonlar[symbol]["aktif"]: 
-                                time.sleep(config.API_DELAY)
-                                continue
-                            emir_beklemede_durumu[symbol] = True
-
-                        try:
-                            precision = FUTURES_HASSASIYETLERI.get(symbol, 2)
-                            qty = (config.ISLEM_MARJIN * config.KALDIRAC) / anlik_fiyat
-                            qty = float(int(qty * (10 ** precision))) / (10 ** precision) if precision > 0 else int(qty)
-                            
-                            if qty > 0:
-                                if sinyal == "BUY":
-                                    client.futures_create_order(symbol=symbol.upper(), side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=qty)
-                                    with data_lock:
-                                        aktif_pozisyonlar[symbol] = {"aktif": True, "yon": "LONG", "adet": qty, "giris_fiyati": anlik_fiyat}
-                                    telegram_bildir(f"🚀 <b>{symbol.upper()} LONG Pozisyonu Açıldı!</b>\nFiyat: {anlik_fiyat}")
-                                        
-                                elif sinyal == "SELL":
-                                    client.futures_create_order(symbol=symbol.upper(), side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=qty)
-                                    with data_lock:
-                                        aktif_pozisyonlar[symbol] = {"aktif": True, "yon": "SHORT", "adet": qty, "giris_fiyati": anlik_fiyat}
-                                    telegram_bildir(f"🚀 <b>{symbol.upper()} SHORT Pozisyonu Açıldı!</b>\nFiyat: {anlik_fiyat}")
-                        except Exception as e:
-                            print(f"❌ Emir gönderme hatası ({symbol}): {e}")
-                        finally:
-                            with data_lock: emir_beklemede_durumu[symbol] = False
                 
                 # Her coin kontrolünden sonra Binance API limitlerini şişirmemek için minik bir bekleme
                 time.sleep(config.API_DELAY)
@@ -462,7 +361,7 @@ def pure_api_tarama_dongusu():
 
 # --- 🚀 ANA ÇALIŞTIRICI SİSTEM ---
 if __name__ == "__main__":
-    print("🎬 %100 Pure API Squeeze Botu Başlatılıyor...")
+    print("🎬 %100 Pure API Squeeze Botu (Sadece Kapatma Modunda) Başlatılıyor...")
     
     hacimli_coinler = ilk_100_hacimli_coin_bul()
     print(f"📋 İlk etapta {len(hacimli_coinler)} adet hacimli coin tespit edildi.")
@@ -476,7 +375,7 @@ if __name__ == "__main__":
     
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
         threading.Thread(target=telegram_gelen_mesaj_dinleyici, daemon=True).start()
-        telegram_bildir("🤖 <b>Squeeze Botu Saf API Modunda Başlatıldı!</b>")
+        telegram_bildir("🤖 <b>Squeeze Botu Yalnızca Pozisyon Kapatma Modunda Başlatıldı!</b>")
     
-    print("⚡ Tüm sistemler aktif. Senkronize döngü başlıyor...")
+    print("⚡ Tüm sistemler aktif. Sadece kapatma takibi yapan döngü başlıyor...")
     pure_api_tarama_dongusu()
