@@ -44,7 +44,7 @@ class TrendBotConfig:
         self.RSI_OS = 30               # Aşırı Satım (Oversold) Sınırı
         
         # API Tarama Gecikmesi
-        self.API_DELAY = 0.3
+        self.API_DELAY = 1
 
 config = TrendBotConfig()
 
