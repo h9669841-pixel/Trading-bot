@@ -132,8 +132,22 @@ def strateji_sinyal_uret(v, anlik_fiyat):
 def ilk_100_hacimli_coin_bul():
     try:
         ticker_url = "https://fapi.binance.com/v1/ticker/24hr"
-        response = requests.get(ticker_url, timeout=15).json()
-        usdt_pairs = [x for x in response if x["symbol"].endswith("USDT")]
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        response = requests.get(ticker_url, headers=headers, proxies=requests_proxies, timeout=15)
+        
+        if response.status_code != 200:
+            print(f"❌ Binance API Hata Kodu Döndürdü: {response.status_code}")
+            return []
+            
+        try:
+            data = response.json()
+        except ValueError:
+            print("❌ Binance'den dönen veri JSON formatında değil! (HTML veya Boş Yanıt)")
+            return []
+
+        usdt_pairs = [x for x in data if isinstance(x, dict) and x.get("symbol", "").endswith("USDT")]
         sorted_by_volume = sorted(usdt_pairs, key=lambda k: float(k.get("quoteVolume", 0)), reverse=True)
         return [x["symbol"].lower() for x in sorted_by_volume[:100]]
     except Exception as e:
@@ -146,13 +160,26 @@ def kontrollu_coin_ekle(coin_adi):
     if coin_lower in SYMBOLS: return True
     try:
         f_url = "https://fapi.binance.com/v1/exchangeInfo"
-        r = requests.get(f_url, timeout=10).json()
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        response = requests.get(f_url, headers=headers, proxies=requests_proxies, timeout=10)
+        
+        if response.status_code != 200:
+            return False
+            
+        try:
+            r = response.json()
+        except ValueError:
+            return False
+
         market_info = next((m for m in r.get("symbols", []) if m["symbol"] == coin_upper), None)
         if not market_info or market_info.get('status') != 'TRADING': return False
         
         time.sleep(0.20) 
         client.futures_change_leverage(symbol=coin_upper, leverage=config.KALDIRAC)
-        try: client.futures_change_margin_type(symbol=coin_upper, marginType="ISOLATED")
+        try: 
+            client.futures_change_margin_type(symbol=coin_upper, marginType="ISOLATED")
         except BinanceAPIException as e:
             if "No need to change" not in e.message: pass
 
@@ -174,7 +201,19 @@ def kontrollu_coin_ekle(coin_adi):
 def tek_coin_api_verisi_guncelle(s):
     try:
         url = f"https://fapi.binance.com/fapi/v1/klines?symbol={s.upper()}&interval={config.TIMEFRAME}&limit=60"
-        k = requests.get(url, timeout=5).json()
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        response = requests.get(url, headers=headers, proxies=requests_proxies, timeout=5)
+        
+        if response.status_code != 200:
+            return False
+            
+        try:
+            k = response.json()
+        except ValueError:
+            return False
+
         if not k or len(k) == 0: return False
         
         kapanislar_yeni = [float(x[4]) for x in k]
