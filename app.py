@@ -46,7 +46,7 @@ class TrendBotConfig:
         self.MAX_ACIK_POZISYON = 10     
         self.BOT_CALISIYOR = True
         self.COOLDOWN_SURESI = 0     
-        self.SABIT_DOLAR_TP = 0.20     # Net kâr hedefi (Dolar)
+        self.SABIT_DOLAR_TP = 0.15     # Net kâr hedefi (Dolar)
         
         # === 🛡️ GÜNCELLENEN ÇİFT KADEMELİ GÜVENLİK AYARLARI ===
         # 1. Kademe: Klasik DCA (Maliyet Azaltma Alımı)
