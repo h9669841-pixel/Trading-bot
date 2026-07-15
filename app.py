@@ -43,7 +43,7 @@ class TrendBotConfig:
         self.TIMEFRAME = Client.KLINE_INTERVAL_15MINUTE  
         self.ISLEM_MARJIN = 1.0        
         self.KALDIRAC = 20             
-        self.MAX_ACIK_POZISYON = 10     
+        self.MAX_ACIK_POZISYON = 1     
         self.BOT_CALISIYOR = True
         self.COOLDOWN_SURESI = 0     
         self.SABIT_DOLAR_TP = 0.2     # Net kâr hedefi (Dolar)
@@ -53,8 +53,8 @@ class TrendBotConfig:
         self.BB_MULT = 2.0
         
         self.RSI_LEN = 14
-        self.RSI_OB = 80               # Aşırı Alım (Overbought) Sınırı
-        self.RSI_OS = 20               # Aşırı Satım (Oversold) Sınırı
+        self.RSI_OB = 80               # Aşırı Alım (Overbought) Sınırı (Short için bu değerin ÜZERİ aranacak)
+        self.RSI_OS = 20               # Aşırı Satım (Oversold) Sınırı (Long için bu değerin ALTINA bakılacak)
         
         # API Tarama Gecikmesi
         self.API_DELAY = 0.5
@@ -125,8 +125,13 @@ def strateji_sinyal_uret(v, anlik_fiyat):
 
     rsi_val = rsi_hesapla(kapanislar, config.RSI_LEN)
 
-    long_ok = (anlik_fiyat < lower_bb) and (rsi_val > config.RSI_OS)
-    short_ok = (anlik_fiyat > upper_bb) and (rsi_val < config.RSI_OB)
+    # =========================================================================
+    # 🎯 YENİ SİNYAL MANTIĞI:
+    # LONG için: Fiyat Alt Bollinger'ın altında VE RSI 20'nin ALTINDA (<) olmalı.
+    # SHORT için: Fiyat Üst Bollinger'ın üzerinde VE RSI 80'in ÜZERİNDE (>) olmalı.
+    # =========================================================================
+    long_ok = (anlik_fiyat < lower_bb) and (rsi_val < config.RSI_OS)
+    short_ok = (anlik_fiyat > upper_bb) and (rsi_val > config.RSI_OB)
 
     if long_ok: return "BUY", rsi_val
     elif short_ok: return "SELL", rsi_val
