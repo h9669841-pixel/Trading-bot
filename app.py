@@ -30,7 +30,7 @@ class TrendBotConfig:
         self.TIMEFRAME = Client.KLINE_INTERVAL_15MINUTE  
         self.ISLEM_MARJIN = 1.0        
         self.KALDIRAC = 20             
-        self.MAX_ACIK_POZISYON = 10     
+        self.MAX_ACIK_POZISYON = 1     
         self.BOT_CALISIYOR = True
         self.COOLDOWN_SURESI = 0     
         self.SABIT_DOLAR_TP = 0.10     # Net kâr hedefi (Dolar)
@@ -40,8 +40,8 @@ class TrendBotConfig:
         self.BB_MULT = 2.0
         
         self.RSI_LEN = 14
-        self.RSI_OB = 80               # Aşırı Alım (Overbought) Sınırı
-        self.RSI_OS = 20               # Aşırı Satım (Oversold) Sınırı
+        self.RSI_OB = 70               # Aşırı Alım (Overbought) Sınırı
+        self.RSI_OS = 30               # Aşırı Satım (Oversold) Sınırı
         
         # API Tarama Gecikmesi
         self.API_DELAY = 0.3
@@ -97,14 +97,14 @@ def rsi_hesapla(kapanislar, periyod=14):
 def strateji_sinyal_uret(v, anlik_fiyat):
     kapanislar = list(v["kapanislar"])
     
-    if not kapanislar or anlik_fiyat <= 0: return "HOLD"
+    if not kapanislar or anlik_fiyat <= 0: return "HOLD", 50.0
     
     # Anlık fiyatı listenin sonuna ekleyip hesaplamayı taze tutuyoruz
     kapanislar.append(anlik_fiyat)
 
     L = len(kapanislar)
     gerekli_uzunluk = max(config.BB_LEN, config.RSI_LEN) + 3
-    if L < gerekli_uzunluk: return "HOLD"
+    if L < gerekli_uzunluk: return "HOLD", 50.0
 
     # Bollinger Hesabı
     basis = sma(kapanislar, config.BB_LEN)
@@ -122,10 +122,10 @@ def strateji_sinyal_uret(v, anlik_fiyat):
     # SHORT: Fiyat Üst Bollinger'ın üzerinde VE RSI aşırı alım çizgisinin altında (Aşağı dönme eğilimi)
     short_ok = (anlik_fiyat > upper_bb) and (rsi_val < config.RSI_OB)
 
-    if long_ok: return "BUY"
-    elif short_ok: return "SELL"
+    if long_ok: return "BUY", rsi_val
+    elif short_ok: return "SELL", rsi_val
 
-    return "HOLD"
+    return "HOLD", rsi_val
 
 # --- 🌐 REST API ALTYAPI FONKSİYONLARI ---
 
@@ -400,7 +400,8 @@ def pure_api_tarama_dongusu():
                         time.sleep(config.API_DELAY)
                         continue 
 
-                    sinyal = strateji_sinyal_uret(v, anlik_fiyat)
+                    # Strateji sinyaliyle birlikte güncel hesaplanan RSI değerini de alıyoruz
+                    sinyal, guncel_rsi = strateji_sinyal_uret(v, anlik_fiyat)
 
                     if sinyal != "HOLD":
                         with data_lock:
@@ -425,13 +426,15 @@ def pure_api_tarama_dongusu():
                                     client.futures_create_order(symbol=symbol.upper(), side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=qty)
                                     with data_lock:
                                         aktif_pozisyonlar[symbol] = {"aktif": True, "yon": "LONG", "adet": qty, "giris_fiyati": anlik_fiyat}
-                                    telegram_bildir(f"🚀 <b>{symbol.upper()} LONG Pozisyonu Açıldı!</b>\nFiyat: {anlik_fiyat}\nMiktar: {qty}")
+                                    # Telegram bildirimine RSI değeri eklendi
+                                    telegram_bildir(f"🚀 <b>{symbol.upper()} LONG Pozisyonu Açıldı!</b>\nFiyat: {anlik_fiyat}\nMiktar: {qty}\nRSI: {round(guncel_rsi, 2)}")
                                         
                                 elif sinyal == "SELL":
                                     client.futures_create_order(symbol=symbol.upper(), side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=qty)
                                     with data_lock:
                                         aktif_pozisyonlar[symbol] = {"aktif": True, "yon": "SHORT", "adet": qty, "giris_fiyati": anlik_fiyat}
-                                    telegram_bildir(f"🚀 <b>{symbol.upper()} SHORT Pozisyonu Açıldı!</b>\nFiyat: {anlik_fiyat}\nMiktar: {qty}")
+                                    # Telegram bildirimine RSI değeri eklendi
+                                    telegram_bildir(f"🚀 <b>{symbol.upper()} SHORT Pozisyonu Açıldı!</b>\nFiyat: {anlik_fiyat}\nMiktar: {qty}\nRSI: {round(guncel_rsi, 2)}")
                         except Exception as e:
                             print(f"❌ Emir gönderme hatası ({symbol}): {e}")
                         finally:
