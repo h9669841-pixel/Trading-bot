@@ -48,9 +48,14 @@ class TrendBotConfig:
         self.COOLDOWN_SURESI = 0     
         self.SABIT_DOLAR_TP = 0.20     # Net kâr hedefi (Dolar)
         
-        # === DCA (Otomatik Ekleme) Ayarları ===
-        self.DCA_TETIK_YUZDE = 3.5     # %3.5 terte kalınca ekleme yap (Liq öncesi can simidi)
-        self.DCA_MARJIN = 1.0          # Eklenecek ekstra marjin miktarı (1 USDT)
+        # === 🛡️ İKİ KADEMELİ GÜVENLİK AYARLARI ===
+        # 1. Kademe: Klasik DCA (Maliyet Azaltma Alımı)
+        self.DCA1_TETIK_YUZDE = 3.5    # %3.5 terte kalınca ek alım yap
+        self.DCA1_MARJIN = 1.0         # 1 USDT marjin x 20 Kaldıraç = 20$'lık yeni alım yapıp ortalamayı çeker
+        
+        # 2. Kademe: Sadece Teminat Ekleme (Margin Add)
+        self.DCA2_TETIK_YUZDE = 3.9    # %3.9 terte kalınca çalışır
+        self.DCA2_EK_MARJIN = 1.0      # Pozisyon büyüklüğünü değiştirmeden doğrudan İZOLE TEMİNATA 1 USDT nakit ekler
         
         # === Sadece Bollinger & RSI Parametreleri ===
         self.BB_LEN = 20
@@ -67,7 +72,7 @@ config = TrendBotConfig()
 
 SYMBOLS = [] 
 piyasa_verisi = {}
-# 'dca_yapildi' anahtarı her sembol için DCA durumunu takip edecek
+# 'dca_kademe' her sembol için durumu izler (0: Yapılmadı, 1: 1. DCA Yapıldı (Alım), 2: 2. Kademe Yapıldı (Marjin Eklendi))
 aktif_pozisyonlar = {}
 FUTURES_HASSASIYETLERI = {}
 son_islem_zamanlari = {}        
@@ -187,7 +192,7 @@ def kontrollu_coin_ekle(coin_adi):
         with data_lock:
             SYMBOLS.append(coin_lower)
             piyasa_verisi[coin_lower] = {"anlik_fiyat": 0.0, "kapanislar": []}
-            aktif_pozisyonlar[coin_lower] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0, "dca_yapildi": False}
+            aktif_pozisyonlar[coin_lower] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0, "dca_kademe": 0}
             son_islem_zamanlari[coin_lower] = 0.0  
             emir_beklemede_durumu[coin_lower] = False
         return True
@@ -221,9 +226,9 @@ def acik_pozisyonlari_binanceden_guncelle():
             # Önce durumu sıfırla (eğer emir beklemede değilse)
             for s in SYMBOLS:
                 if not emir_beklemede_durumu.get(s, False):
-                    # DCA durumunun kaybolmaması için eski durumu yedekleyelim
-                    eski_dca = aktif_pozisyonlar[s].get("dca_yapildi", False)
-                    aktif_pozisyonlar[s] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0, "dca_yapildi": eski_dca}
+                    # Kademeleri korumak için eski durumu yedekleyelim
+                    eski_kademe = aktif_pozisyonlar[s].get("dca_kademe", 0)
+                    aktif_pozisyonlar[s] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0, "dca_kademe": eski_kademe}
             
             for p in pozisyonlar:
                 sym = p.get("symbol", "").lower()
@@ -237,8 +242,8 @@ def acik_pozisyonlari_binanceden_guncelle():
                         aktif_pozisyonlar[sym]["adet"] = abs(amt)
                         aktif_pozisyonlar[sym]["giris_fiyati"] = entry_price
                     else:
-                        # Eğer pozisyon sıfırlanmışsa dca kilidini de sıfırlayalım
-                        aktif_pozisyonlar[sym]["dca_yapildi"] = False
+                        # Eğer pozisyon tamamen kapanmışsa dca kademesini tamamen sıfırla
+                        aktif_pozisyonlar[sym]["dca_kademe"] = 0
     except Exception as e:
         print(f"❌ Pozisyon senkronizasyon hatası: {e}")
 
@@ -265,14 +270,15 @@ def telegram_canli_rapor_uret():
         poz_buyuklugu = config.ISLEM_MARJIN * config.KALDIRAC
 
         rapor = (
-            f"⚙️ <b>Bollinger & RSI + DCA Botu</b>\n"
+            f"⚙️ <b>Bollinger & RSI + Çift Koruma Botu</b>\n"
             f"• Sistem: {durum_str}\n"
             f"• Marjin: {config.ISLEM_MARJIN:.1f} USDT\n"
             f"• Kaldıraç: {config.KALDIRAC}x (İZOLE)\n"
             f"• Poz Büyüklüğü: {poz_buyuklugu:.1f} USDT\n"
             f"• Risk Limiti: {acik_pozlar}/{config.MAX_ACIK_POZISYON} Pozisyon\n"
             f"• TP Hedefi: {config.SABIT_DOLAR_TP} USD\n"
-            f"• DCA Tetik Sınırı: %{config.DCA_TETIK_YUZDE} Terse\n\n"
+            f"• DCA-1 Alım Tetik: %{config.DCA1_TETIK_YUZDE} Terse\n"
+            f"• DCA-2 Teminat Tetik: %{config.DCA2_TETIK_YUZDE} Terse\n\n"
             f"⚡ <b>Açık İşlemler:</b>\n"
         )
 
@@ -282,8 +288,7 @@ def telegram_canli_rapor_uret():
             for s in SYMBOLS:
                 if aktif_pozisyonlar[s]["aktif"]:
                     p = aktif_pozisyonlar[s]
-                    dca_durum = "YAPILDI" if p.get('dca_yapildi', False) else "YAPILMADI"
-                    rapor += f"• {s.upper()} | {p['yon']} | Giriş: {p['giris_fiyati']} | DCA: {dca_durum}\n"
+                    rapor += f"• {s.upper()} | {p['yon']} | Giriş: {p['giris_fiyati']} | Koruma Kademesi: {p.get('dca_kademe', 0)}/2\n"
     return rapor
 
 def telegram_gelen_mesaj_dinleyici():
@@ -324,7 +329,6 @@ def pure_api_tarama_dongusu():
             acik_pozisyonlari_binanceden_guncelle()  
 
             # === 🎯 1. ÖNCELİKLİ TARAMA (PRIORITY SCANNING) OPTİMİZASYONU ===
-            # Açık pozisyonları listenin en önüne alarak, 100 coinin arkasında sıra beklemelerini engelliyoruz.
             with data_lock:
                 acik_olanlar = [s for s in SYMBOLS if aktif_pozisyonlar[s]["aktif"]]
                 kapali_olanlar = [s for s in SYMBOLS if not aktif_pozisyonlar[s]["aktif"]]
@@ -349,7 +353,7 @@ def pure_api_tarama_dongusu():
                 anlik_fiyat = v["anlik_fiyat"]
 
                 # =====================================================================
-                # 🎯 ÇIKIŞ MANTIĞI & DCA (MALIYET ORTALAMA GÜVENLIK KİLİDİ)
+                # 🎯 ÇIKIŞ MANTIĞI & ÇİFT KADEMELİ KORUMA SİSTEMİ
                 # =====================================================================
                 if pos["aktif"]:
                     maliyet = pos["giris_fiyati"]
@@ -383,55 +387,82 @@ def pure_api_tarama_dongusu():
                                 )
                                 with data_lock:
                                     son_islem_zamanlari[symbol] = su_an_ts  
-                                    aktif_pozisyonlar[symbol] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0, "dca_yapildi": False}
+                                    aktif_pozisyonlar[symbol] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0, "dca_kademe": 0}
                                 telegram_bildir(f"💰 <b>{symbol.upper()} {pos['yon']} {round(anlik_kar_dolar, 3)}$ Kar ile Kapatıldı!</b>\nFiyat: {anlik_fiyat}")
                         except Exception as e:
                             print(f"❌ Kapatma hatası ({symbol}): {e}")
                         finally:
                             with data_lock: emir_beklemede_durumu[symbol] = False
 
-                    # 🛡️ B: OTOMATİK DCA (MALIYET DÜŞÜRME EKLEMESİ)
-                    # Öncelikli tarama sayesinde burası da gecikmeden hızlıca tetiklenecek.
-                    elif fiyat_sapma_yuzde >= config.DCA_TETIK_YUZDE and not pos.get("dca_yapildi", False):
-                        with data_lock:
-                            if emir_beklemede_durumu[symbol]: continue
-                            emir_beklemede_durumu[symbol] = True
+                    # 🛡️ B: ÇİFT KADEMELİ KORUMA SİSTEMİ (1. ALIM DCA, 2. MARJİN EKLEME)
+                    else:
+                        # --- KADEME 1: %3.5 Sapma (Geleneksel DCA - Adet Arttırma Alımı) ---
+                        if fiyat_sapma_yuzde >= config.DCA1_TETIK_YUZDE and pos.get("dca_kademe", 0) == 0:
+                            with data_lock:
+                                if emir_beklemede_durumu[symbol]: continue
+                                emir_beklemede_durumu[symbol] = True
 
-                        try:
-                            # 1$ marjin x Kaldıraç oranında eklenecek miktarı hesapla (Örn: 20$)
-                            precision = FUTURES_HASSASIYETLERI.get(symbol, 2)
-                            dca_qty = (config.DCA_MARJIN * config.KALDIRAC) / anlik_fiyat
-                            dca_qty = float(int(dca_qty * (10 ** precision))) / (10 ** precision) if precision > 0 else int(dca_qty)
+                            try:
+                                precision = FUTURES_HASSASIYETLERI.get(symbol, 2)
+                                dca_qty = (config.DCA1_MARJIN * config.KALDIRAC) / anlik_fiyat
+                                dca_qty = float(int(dca_qty * (10 ** precision))) / (10 ** precision) if precision > 0 else int(dca_qty)
 
-                            if dca_qty > 0:
-                                dca_side = SIDE_BUY if pos["yon"] == "LONG" else SIDE_SELL
+                                if dca_qty > 0:
+                                    dca_side = SIDE_BUY if pos["yon"] == "LONG" else SIDE_SELL
+                                    
+                                    telegram_bildir(f"⚠️ <b>{symbol.upper()} %{round(fiyat_sapma_yuzde, 2)} Terste kaldı!</b>\nKademe 1 DCA Eklemesi Yapılıyor ({config.DCA1_MARJIN * config.KALDIRAC}$ Alım)...")
+                                    
+                                    order_client.futures_create_order(
+                                        symbol=symbol.upper(), side=dca_side, type=ORDER_TYPE_MARKET, quantity=dca_qty
+                                    )
+                                    
+                                    with data_lock:
+                                        aktif_pozisyonlar[symbol]["dca_kademe"] = 1
+                                    
+                                    time.sleep(1.0)
+                                    acik_pozisyonlari_binanceden_guncelle()
+                                    
+                                    with data_lock:
+                                        yeni_pos = aktif_pozisyonlar[symbol]
+                                    telegram_bildir(f"✅ <b>DCA 1 Başarılı! {symbol.upper()} Güncel Durum:</b>\n• Yeni Giriş Ort: {yeni_pos['giris_fiyati']}\n• Yeni Adet: {yeni_pos['adet']}\n• Yeni TP Seviyesi Yakınlaştırıldı.")
+                            except Exception as e:
+                                print(f"❌ DCA Kademe 1 Hatası ({symbol}): {e}")
+                                telegram_bildir(f"❌ <b>DCA 1 Hatası!</b> {symbol.upper()} eklemesi başarısız: {e}")
+                            finally:
+                                with data_lock: emir_beklemede_durumu[symbol] = False
+
+                        # --- KADEME 2: %3.9 Sapma (Sadece İzole Marjin Teminat Ekleme) ---
+                        # Bu aşamada asla yeni coin satın alınmaz. Sadece izole pozisyonun içine nakit para sürülür.
+                        elif fiyat_sapma_yuzde >= config.DCA2_TETIK_YUZDE and pos.get("dca_kademe", 0) == 1:
+                            with data_lock:
+                                if emir_beklemede_durumu[symbol]: continue
+                                emir_beklemede_durumu[symbol] = True
+
+                            try:
+                                telegram_bildir(f"🛡️ <b>{symbol.upper()} %{round(fiyat_sapma_yuzde, 2)} Terste!</b>\nRisk azaltmak için pozisyon büyüklüğü değiştirilmeden doğrudan <b>izole marjine {config.DCA2_EK_MARJIN} USDT ekleniyor...</b>")
                                 
-                                telegram_bildir(f"⚠️ <b>{symbol.upper()} %{round(fiyat_sapma_yuzde, 2)} Terste kaldı!</b>\nLikidasyonu engellemek için 20$'lık DCA eklemesi yapılıyor...")
-                                
-                                # DCA emrini gönder
-                                order_client.futures_create_order(
-                                    symbol=symbol.upper(), side=dca_side, type=ORDER_TYPE_MARKET, quantity=dca_qty
+                                # Pozisyona izole teminat (margin) ekleme API sorgusu
+                                order_client.futures_position_margin_change(
+                                    symbol=symbol.upper(),
+                                    amount=config.DCA2_EK_MARJIN,
+                                    type=1  # 1: Teminat Ekle (Add), 2: Teminat Çek (Reduce)
                                 )
                                 
-                                # Belleği güncelle ve tek seferlik DCA kilidini aktifleştir
                                 with data_lock:
-                                    aktif_pozisyonlar[symbol]["dca_yapildi"] = True
+                                    aktif_pozisyonlar[symbol]["dca_kademe"] = 2
                                 
-                                # Binance'ten yeni ortalama ve adet verisini anında senkronize et
                                 time.sleep(1.0)
                                 acik_pozisyonlari_binanceden_guncelle()
                                 
-                                with data_lock:
-                                    yeni_pos = aktif_pozisyonlar[symbol]
-                                telegram_bildir(f"✅ <b>DCA Başarılı! {symbol.upper()} Güncel Durum:</b>\n• Yeni Giriş Ort: {yeni_pos['giris_fiyati']}\n• Yeni Adet: {yeni_pos['adet']}\n• Yeni TP Seviyesi Yakınlaştırıldı.")
-                        except Exception as e:
-                            print(f"❌ DCA Ekleme Hatası ({symbol}): {e}")
-                            telegram_bildir(f"❌ <b>DCA Hatası!</b> {symbol.upper()} ekleme başarısız: {e}")
-                        finally:
-                            with data_lock: emir_beklemede_durumu[symbol] = False
+                                telegram_bildir(f"✅ <b>Güvenlik Marjini Eklendi! {symbol.upper()}:</b>\n• Pozisyon Büyüklüğü: Değişmedi ({adet} adet)\n• Likidasyon Riski: Başarıyla Uzaklaştırıldı 🛡️")
+                            except Exception as e:
+                                print(f"❌ Marjin Ekleme Hatası ({symbol}): {e}")
+                                telegram_bildir(f"❌ <b>Marjin Ekleme Hatası!</b> {symbol.upper()}: {e}")
+                            finally:
+                                with data_lock: emir_beklemede_durumu[symbol] = False
 
                 # ==========================================
-                # 📈 GİRİŞ MANTIĞI (BOLLINGER & RSI - PROXY İLE)
+                # 📈 GİRİŞ MANTIĞI (BOLLINGER & RSI)
                 # ==========================================
                 else:
                     if su_an_ts - son_islem < config.COOLDOWN_SURESI: 
@@ -468,13 +499,13 @@ def pure_api_tarama_dongusu():
                                 if sinyal == "BUY":
                                     order_client.futures_create_order(symbol=symbol.upper(), side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=qty)
                                     with data_lock:
-                                        aktif_pozisyonlar[symbol] = {"aktif": True, "yon": "LONG", "adet": qty, "giris_fiyati": anlik_fiyat, "dca_yapildi": False}
+                                        aktif_pozisyonlar[symbol] = {"aktif": True, "yon": "LONG", "adet": qty, "giris_fiyati": anlik_fiyat, "dca_kademe": 0}
                                     telegram_bildir(f"🚀 <b>{symbol.upper()} LONG Pozisyonu Açıldı!</b>\nFiyat: {anlik_fiyat}\nMiktar: {qty}\nRSI: {round(guncel_rsi, 2)}")
                                         
                                 elif sinyal == "SELL":
                                     order_client.futures_create_order(symbol=symbol.upper(), side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=qty)
                                     with data_lock:
-                                        aktif_pozisyonlar[symbol] = {"aktif": True, "yon": "SHORT", "adet": qty, "giris_fiyati": anlik_fiyat, "dca_yapildi": False}
+                                        aktif_pozisyonlar[symbol] = {"aktif": True, "yon": "SHORT", "adet": qty, "giris_fiyati": anlik_fiyat, "dca_kademe": 0}
                                     telegram_bildir(f"🚀 <b>{symbol.upper()} SHORT Pozisyonu Açıldı!</b>\nFiyat: {anlik_fiyat}\nMiktar: {qty}\nRSI: {round(guncel_rsi, 2)}")
                         except Exception as e:
                             print(f"❌ Emir gönderme hatası ({symbol}): {e}")
@@ -489,7 +520,7 @@ def pure_api_tarama_dongusu():
 
 # --- 🚀 ANA ÇALIŞTIRICI SİSTEM ---
 if __name__ == "__main__":
-    print("🎬 Saf Bollinger & RSI + DCA Botu Başlatılıyor...")
+    print("🎬 Saf Bollinger & RSI + Çift Koruma Botu Başlatılıyor...")
     
     hacimli_coinler = ilk_100_hacimli_coin_bul()
     print(f"📋 İlk etapta {len(hacimli_coinler)} adet hacimli coin tespit edildi.")
@@ -503,7 +534,7 @@ if __name__ == "__main__":
     
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
         threading.Thread(target=telegram_gelen_mesaj_dinleyici, daemon=True).start()
-        telegram_bildir("🤖 <b>Bot Saf Bollinger & RSI + DCA Güvenlik Modunda Başlatıldı!</b>")
+        telegram_bildir("🤖 <b>Bot Saf Bollinger & RSI + Çift Koruma Modunda Başlatıldı!</b>")
     
     print("⚡ Tüm sistemler aktif. Senkronize döngü başlıyor...")
     pure_api_tarama_dongusu()
