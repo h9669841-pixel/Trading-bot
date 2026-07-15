@@ -53,8 +53,8 @@ class TrendBotConfig:
         self.BB_MULT = 2.0
         
         self.RSI_LEN = 14
-        self.RSI_OB = 80               # Aşırı Alım (Overbought) Sınırı (Short için bu değerin ÜZERİ aranacak)
-        self.RSI_OS = 20               # Aşırı Satım (Oversold) Sınırı (Long için bu değerin ALTINA bakılacak)
+        self.RSI_OB = 77               # Aşırı Alım (Overbought) Sınırı (Short için bu değerin ÜZERİ aranacak)
+        self.RSI_OS = 23               # Aşırı Satım (Oversold) Sınırı (Long için bu değerin ALTINA bakılacak)
         
         # API Tarama Gecikmesi
         self.API_DELAY = 0.5
