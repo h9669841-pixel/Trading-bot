@@ -323,8 +323,12 @@ def pure_api_tarama_dongusu():
             su_an_ts = time.time()
             acik_pozisyonlari_binanceden_guncelle()  
 
+            # === 🎯 1. ÖNCELİKLİ TARAMA (PRIORITY SCANNING) OPTİMİZASYONU ===
+            # Açık pozisyonları listenin en önüne alarak, 100 coinin arkasında sıra beklemelerini engelliyoruz.
             with data_lock:
-                yerel_semboller = list(SYMBOLS)
+                acik_olanlar = [s for s in SYMBOLS if aktif_pozisyonlar[s]["aktif"]]
+                kapali_olanlar = [s for s in SYMBOLS if not aktif_pozisyonlar[s]["aktif"]]
+                yerel_semboller = acik_olanlar + kapali_olanlar
 
             for symbol in yerel_semboller:
                 if not config.BOT_CALISIYOR: break
@@ -387,6 +391,7 @@ def pure_api_tarama_dongusu():
                             with data_lock: emir_beklemede_durumu[symbol] = False
 
                     # 🛡️ B: OTOMATİK DCA (MALIYET DÜŞÜRME EKLEMESİ)
+                    # Öncelikli tarama sayesinde burası da gecikmeden hızlıca tetiklenecek.
                     elif fiyat_sapma_yuzde >= config.DCA_TETIK_YUZDE and not pos.get("dca_yapildi", False):
                         with data_lock:
                             if emir_beklemede_durumu[symbol]: continue
