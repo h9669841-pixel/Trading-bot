@@ -48,14 +48,14 @@ class TrendBotConfig:
         self.COOLDOWN_SURESI = 0     
         self.SABIT_DOLAR_TP = 0.20     # Net kâr hedefi (Dolar)
         
-        # === 🛡️ İKİ KADEMELİ GÜVENLİK AYARLARI ===
+        # === 🛡️ GÜNCELLENEN ÇİFT KADEMELİ GÜVENLİK AYARLARI ===
         # 1. Kademe: Klasik DCA (Maliyet Azaltma Alımı)
-        self.DCA1_TETIK_YUZDE = 3.5    # %3.5 terte kalınca ek alım yap
+        self.DCA1_TETIK_YUZDE = 3.0    # 🚨 %3.0 terte kalınca ek alım yap
         self.DCA1_MARJIN = 1.0         # 1 USDT marjin x 20 Kaldıraç = 20$'lık yeni alım yapıp ortalamayı çeker
         
         # 2. Kademe: Sadece Teminat Ekleme (Margin Add)
-        self.DCA2_TETIK_YUZDE = 3.9    # %3.9 terte kalınca çalışır
-        self.DCA2_EK_MARJIN = 1.0      # Pozisyon büyüklüğünü değiştirmeden doğrudan İZOLE TEMİNATA 1 USDT nakit ekler
+        self.DCA2_TETIK_YUZDE = 3.5    # 🚨 %3.5 terte kalınca çalışır
+        self.DCA2_EK_MARJIN = 2.0      # 🚨 Pozisyon büyüklüğünü değiştirmeden doğrudan İZOLE TEMİNATA 2 USDT nakit ekler
         
         # === Sadece Bollinger & RSI Parametreleri ===
         self.BB_LEN = 20
@@ -223,10 +223,8 @@ def acik_pozisyonlari_binanceden_guncelle():
     try:
         pozisyonlar = order_client.futures_position_information()
         with data_lock:
-            # Önce durumu sıfırla (eğer emir beklemede değilse)
             for s in SYMBOLS:
                 if not emir_beklemede_durumu.get(s, False):
-                    # Kademeleri korumak için eski durumu yedekleyelim
                     eski_kademe = aktif_pozisyonlar[s].get("dca_kademe", 0)
                     aktif_pozisyonlar[s] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0, "dca_kademe": eski_kademe}
             
@@ -242,7 +240,6 @@ def acik_pozisyonlari_binanceden_guncelle():
                         aktif_pozisyonlar[sym]["adet"] = abs(amt)
                         aktif_pozisyonlar[sym]["giris_fiyati"] = entry_price
                     else:
-                        # Eğer pozisyon tamamen kapanmışsa dca kademesini tamamen sıfırla
                         aktif_pozisyonlar[sym]["dca_kademe"] = 0
     except Exception as e:
         print(f"❌ Pozisyon senkronizasyon hatası: {e}")
@@ -328,7 +325,6 @@ def pure_api_tarama_dongusu():
             su_an_ts = time.time()
             acik_pozisyonlari_binanceden_guncelle()  
 
-            # === 🎯 1. ÖNCELİKLİ TARAMA (PRIORITY SCANNING) OPTİMİZASYONU ===
             with data_lock:
                 acik_olanlar = [s for s in SYMBOLS if aktif_pozisyonlar[s]["aktif"]]
                 kapali_olanlar = [s for s in SYMBOLS if not aktif_pozisyonlar[s]["aktif"]]
@@ -360,13 +356,13 @@ def pure_api_tarama_dongusu():
                     adet = pos["adet"]
                     if maliyet <= 0 or adet <= 0: continue
 
-                    # 1. KÂR / ZARAR DURUM HESABI
+                    # KÂR / ZARAR DURUM HESABI
                     if pos["yon"] == "LONG":
                         anlik_kar_dolar = (anlik_fiyat - maliyet) * adet
-                        fiyat_sapma_yuzde = ((maliyet - anlik_fiyat) / maliyet) * 100  # Pozitifse terte (düşüyor)
+                        fiyat_sapma_yuzde = ((maliyet - anlik_fiyat) / maliyet) * 100
                     else:  # SHORT
                         anlik_kar_dolar = (maliyet - anlik_fiyat) * adet
-                        fiyat_sapma_yuzde = ((anlik_fiyat - maliyet) / maliyet) * 100  # Pozitifse terte (yükseliyor)
+                        fiyat_sapma_yuzde = ((anlik_fiyat - maliyet) / maliyet) * 100
 
                     # 💰 A: KÂR ALMA (TAKE PROFIT) TETİKLEYİCİSİ
                     if anlik_kar_dolar >= config.SABIT_DOLAR_TP:
@@ -396,7 +392,7 @@ def pure_api_tarama_dongusu():
 
                     # 🛡️ B: ÇİFT KADEMELİ KORUMA SİSTEMİ (1. ALIM DCA, 2. MARJİN EKLEME)
                     else:
-                        # --- KADEME 1: %3.5 Sapma (Geleneksel DCA - Adet Arttırma Alımı) ---
+                        # --- KADEME 1: %3.0 Sapma (Geleneksel DCA - Adet Arttırma Alımı) ---
                         if fiyat_sapma_yuzde >= config.DCA1_TETIK_YUZDE and pos.get("dca_kademe", 0) == 0:
                             with data_lock:
                                 if emir_beklemede_durumu[symbol]: continue
@@ -431,8 +427,7 @@ def pure_api_tarama_dongusu():
                             finally:
                                 with data_lock: emir_beklemede_durumu[symbol] = False
 
-                        # --- KADEME 2: %3.9 Sapma (Sadece İzole Marjin Teminat Ekleme) ---
-                        # Bu aşamada asla yeni coin satın alınmaz. Sadece izole pozisyonun içine nakit para sürülür.
+                        # --- KADEME 2: %3.5 Sapma (Sadece İzole Marjin Teminat Ekleme - 2 USDT) ---
                         elif fiyat_sapma_yuzde >= config.DCA2_TETIK_YUZDE and pos.get("dca_kademe", 0) == 1:
                             with data_lock:
                                 if emir_beklemede_durumu[symbol]: continue
@@ -445,7 +440,7 @@ def pure_api_tarama_dongusu():
                                 order_client.futures_position_margin_change(
                                     symbol=symbol.upper(),
                                     amount=config.DCA2_EK_MARJIN,
-                                    type=1  # 1: Teminat Ekle (Add), 2: Teminat Çek (Reduce)
+                                    type=1  # 1: Teminat Ekle (Add)
                                 )
                                 
                                 with data_lock:
@@ -454,7 +449,7 @@ def pure_api_tarama_dongusu():
                                 time.sleep(1.0)
                                 acik_pozisyonlari_binanceden_guncelle()
                                 
-                                telegram_bildir(f"✅ <b>Güvenlik Marjini Eklendi! {symbol.upper()}:</b>\n• Pozisyon Büyüklüğü: Değişmedi ({adet} adet)\n• Likidasyon Riski: Başarıyla Uzaklaştırıldı 🛡️")
+                                telegram_bildir(f"✅ <b>Güvenlik Marjini Eklendi! {symbol.upper()}:</b>\n• Pozisyon Büyüklüğü: Değişmedi ({adet} adet)\n• Eklenen Marjin: {config.DCA2_EK_MARJIN} USDT\n• Likidasyon Riski: Başarıyla Uzaklaştırıldı 🛡️")
                             except Exception as e:
                                 print(f"❌ Marjin Ekleme Hatası ({symbol}): {e}")
                                 telegram_bildir(f"❌ <b>Marjin Ekleme Hatası!</b> {symbol.upper()}: {e}")
