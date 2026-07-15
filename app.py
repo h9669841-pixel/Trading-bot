@@ -53,11 +53,11 @@ class TrendBotConfig:
         self.BB_MULT = 2.0
         
         self.RSI_LEN = 14
-        self.RSI_OB = 70               # Aşırı Alım (Overbought) Sınırı
-        self.RSI_OS = 30               # Aşırı Satım (Oversold) Sınırı
+        self.RSI_OB = 80               # Aşırı Alım (Overbought) Sınırı
+        self.RSI_OS = 20               # Aşırı Satım (Oversold) Sınırı
         
         # API Tarama Gecikmesi
-        self.API_DELAY = 1
+        self.API_DELAY = 0.5
 
 config = TrendBotConfig()
 
