@@ -50,12 +50,12 @@ class TrendBotConfig:
         
         # === 🛡️ GÜNCELLENEN ÇİFT KADEMELİ GÜVENLİK AYARLARI ===
         # 1. Kademe: Klasik DCA (Maliyet Azaltma Alımı)
-        self.DCA1_TETIK_YUZDE = 3.0    # 🚨 %3.0 terte kalınca ek alım yap
+        self.DCA1_TETIK_YUZDE = 3.0    # %3.0 terte kalınca ek alım yap
         self.DCA1_MARJIN = 1.0         # 1 USDT marjin x 20 Kaldıraç = 20$'lık yeni alım yapıp ortalamayı çeker
         
         # 2. Kademe: Sadece Teminat Ekleme (Margin Add)
-        self.DCA2_TETIK_YUZDE = 3.5    # 🚨 %3.5 terte kalınca çalışır
-        self.DCA2_EK_MARJIN = 2.0      # 🚨 Pozisyon büyüklüğünü değiştirmeden doğrudan İZOLE TEMİNATA 2 USDT nakit ekler
+        self.DCA2_TETIK_YUZDE = 3.5    # %3.5 terte kalınca çalışır
+        self.DCA2_EK_MARJIN = 2.0      # Pozisyon büyüklüğünü değiştirmeden doğrudan İZOLE TEMİNATA 2 USDT nakit ekler
         
         # === Sadece Bollinger & RSI Parametreleri ===
         self.BB_LEN = 20
@@ -436,8 +436,8 @@ def pure_api_tarama_dongusu():
                             try:
                                 telegram_bildir(f"🛡️ <b>{symbol.upper()} %{round(fiyat_sapma_yuzde, 2)} Terste!</b>\nRisk azaltmak için pozisyon büyüklüğü değiştirilmeden doğrudan <b>izole marjine {config.DCA2_EK_MARJIN} USDT ekleniyor...</b>")
                                 
-                                # Pozisyona izole teminat (margin) ekleme API sorgusu
-                                order_client.futures_position_margin_change(
+                                # Pozisyona izole teminat (margin) ekleme için kütüphanenin doğru fonksiyonu kullanıldı.
+                                order_client.futures_change_position_margin(
                                     symbol=symbol.upper(),
                                     amount=config.DCA2_EK_MARJIN,
                                     type=1  # 1: Teminat Ekle (Add)
