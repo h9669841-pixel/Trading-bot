@@ -41,7 +41,7 @@ else:
 class TrendBotConfig:
     def __init__(self):
         self.TIMEFRAME = Client.KLINE_INTERVAL_15MINUTE  
-        self.ISLEM_MARJIN = 1.2        
+        self.ISLEM_MARJIN = 1.0        
         self.KALDIRAC = 20             
         self.MAX_ACIK_POZISYON = 10     
         self.BOT_CALISIYOR = True
