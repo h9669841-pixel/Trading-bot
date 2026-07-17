@@ -41,16 +41,16 @@ else:
 class TrendBotConfig:
     def __init__(self):
         self.TIMEFRAME = Client.KLINE_INTERVAL_15MINUTE  
-        self.ISLEM_MARJIN = 5.0        # 🔴 Güncellendi: 5 USDT Marjin
-        self.KALDIRAC = 10             # 🔴 Güncellendi: 10x Kaldıraç
+        self.ISLEM_MARJIN = 5.0        # 🔴 5 USDT Marjin
+        self.KALDIRAC = 10             # 🔴 10x Kaldıraç
         self.MAX_ACIK_POZISYON = 10     
         self.BOT_CALISIYOR = True
         self.COOLDOWN_SURESI = 0     
-        self.SABIT_DOLAR_TP = 0.15     # Net kâr hedefi (Dolar)
+        self.SABIT_DOLAR_TP = 0.30     # Net kâr hedefi (Dolar)
         
         # === 🛡️ ÇİFT KADEMELİ GÜVENLİK AYARLARI ===
         self.DCA1_TETIK_YUZDE = 3.0    # %3.0 terte kalınca ek alım yap
-        self.DCA1_MARJIN = 5.0         # 🔴 Güncellendi: Ana marjinle orantılı 5.0 USDT ek alım
+        self.DCA1_MARJIN = 5.0         # 🔴 Ana marjinle orantılı 5.0 USDT ek alım
         
         self.DCA2_TETIK_YUZDE = 3.5    # %3.5 terte kalınca çalışır
         self.DCA2_EK_MARJIN = 2.0      # Doğrudan İZOLE TEMİNATA 2 USDT nakit ekler
@@ -158,7 +158,8 @@ def ilk_100_hacimli_coin_bul():
         print(f"❌ Hacim listesi alınamadı: {e}")
         return []
 
-def kontrollu_coin_ekle(coin_adi):
+# 🌟 Güncellenen Bölüm: eski_pozisyon_mu parametresi eklendi
+def kontrollu_coin_ekle(coin_adi, eski_pozisyon_mu=False):
     coin_lower = coin_adi.lower().strip()
     coin_upper = coin_lower.upper()
     if coin_lower in SYMBOLS: return True
@@ -176,11 +177,13 @@ def kontrollu_coin_ekle(coin_adi):
         
         time.sleep(0.20) 
         
-        order_client.futures_change_leverage(symbol=coin_upper, leverage=config.KALDIRAC)
-        try: 
-            order_client.futures_change_margin_type(symbol=coin_upper, marginType="ISOLATED")
-        except BinanceAPIException as e:
-            if "No need to change" not in e.message: pass
+        # 🌟 Eğer eski açık pozisyonsa kaldıraç ve marjin tipini kodla değiştirmiyoruz (API hatasını önler)
+        if not eski_pozisyon_mu:
+            try:
+                order_client.futures_change_leverage(symbol=coin_upper, leverage=config.KALDIRAC)
+                order_client.futures_change_margin_type(symbol=coin_upper, marginType="ISOLATED")
+            except BinanceAPIException as e:
+                if "No need to change" not in e.message: pass
 
         for f in market_info['filters']:
             if f['filterType'] == 'LOT_SIZE':
@@ -218,7 +221,7 @@ def tek_coin_api_verisi_guncelle(s):
         return True
     except Exception: return False
 
-# --- 🎯 POZİSYONLARI KORUMALI PROXY İLE GÜNCELLEME ---
+# --- 🎯 POZİSYONLARI KORUMALI PROXY SİSTEMİYLE GÜNCELLEME ---
 def acik_pozisyonlari_binanceden_guncelle():
     try:
         pozisyonlar = order_client.futures_position_information()
@@ -569,8 +572,8 @@ if __name__ == "__main__":
             sym = p.get("symbol", "").lower()
             if amt != 0:
                 print(f"📦 İçeride açık pozisyon bulundu: {sym.upper()} (Miktar: {amt}). Takip listesine kaydediliyor...")
-                # Eski coini kaldıraç, izole marjin filtrelerinden geçirip listeye ekler
-                kontrollu_coin_ekle(sym)
+                # 🌟 eski_pozisyon_mu=True vererek kaldıraç/marjin tipi değiştirme hatasını bypass ediyoruz
+                kontrollu_coin_ekle(sym, eski_pozisyon_mu=True)
     except Exception as e:
         print(f"❌ İlk pozisyon taramasında kritik hata: {e}")
     
@@ -580,7 +583,7 @@ if __name__ == "__main__":
     
     eklenen_sayac = 0
     for c in hacimli_coinler:
-        if kontrollu_coin_ekle(c):
+        if kontrollu_coin_ekle(c, eski_pozisyon_mu=False):
             eklenen_sayac += 1
             
     print(f"✅ Filtreleri geçen {eklenen_sayac} coin tarama listesine eklendi.")
