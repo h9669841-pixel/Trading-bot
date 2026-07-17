@@ -46,7 +46,7 @@ class TrendBotConfig:
         self.MAX_ACIK_POZISYON = 10     
         self.BOT_CALISIYOR = True
         self.COOLDOWN_SURESI = 0     
-        self.SABIT_DOLAR_TP = 0.30     # Net kâr hedefi (Dolar)
+        self.SABIT_DOLAR_TP = 0.15     # Net kâr hedefi (Dolar)
         
         # === 🛡️ ÇİFT KADEMELİ GÜVENLİK AYARLARI ===
         self.DCA1_TETIK_YUZDE = 3.0    # %3.0 terte kalınca ek alım yap
