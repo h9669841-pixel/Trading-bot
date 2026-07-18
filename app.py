@@ -42,22 +42,19 @@ class TrendBotConfig:
         self.SABIT_DOLAR_TP = 0.15     
         
         # === 🛡️ ÇİFT KADEMELİ KORUMA AYARLARI ===
-        self.DCA1_TETIK_YUZDE = 3.0    # %3 terte kalınca ek alım yap (Pozisyon büyüklüğü artar)
+        self.DCA1_TETIK_YUZDE = 3.0    # %3 terte kalınca ek alım yap
         self.DCA1_MARJIN = 5.0         
         
-        self.DCA2_TETIK_YUZDE = 3.5    # %3.5 terte kalınca cüzdandan izole teminata nakit ekle (Pozisyon büyümez, liq uzaklaşır)
+        self.DCA2_TETIK_YUZDE = 3.5    # %3.5 terte kalınca izole teminata nakit ekle
         self.DCA2_EK_MARJIN = 2.0      
         
         # 🚨 VOLATİLİTE FİLTRESİ (Süper Pump/Dump Önleyici)
-        # Mum boyu %4'ü aştıysa, RSI kesişimi gelse bile "düşen bıçağı tutmamak" için işleme girmez.
         self.VOLATILITE_SINIRI = 4.0
 
-        # === Bollinger & RSI Parametreleri ===
-        self.BB_LEN = 20
-        self.BB_MULT = 2.0
+        # === RSI Parametreleri (25/75 Altın Orta Ayarı) ===
         self.RSI_LEN = 14
-        self.RSI_OB = 75               # Aşırı Alım Sınırı (Giriş için yukarı kırıp aşağı inmeli)
-        self.RSI_OS = 25               # Aşırı Satım Sınırı (Giriş için aşağı kırıp yukarı çıkmalı)
+        self.RSI_OB = 75               # Aşırı Alım Sınırı (75'ten aşağı kırmalı)
+        self.RSI_OS = 25               # Aşırı Satım Sınırı (25'ten yukarı kırmalı)
         
         self.API_DELAY = 0.5
         self.HIZLI_TAKIP_PERIYODU = 1.0 
@@ -75,26 +72,6 @@ data_lock = threading.Lock()
 
 # --- 🛠️ MATEMATİKSEL İNDİKATÖR MOTORU ---
 
-def sma(seri, periyod):
-    if len(seri) < periyod: return [0.0] * len(seri)
-    res = []
-    current_sum = sum(seri[:periyod])
-    res.append(current_sum / periyod)
-    for i in range(periyod, len(seri)):
-        current_sum += seri[i] - seri[i - periyod]
-        res.append(current_sum / periyod)
-    return [0.0] * (periyod - 1) + res
-
-def stdev(seri, periyod):
-    if len(seri) < periyod: return [0.0] * len(seri)
-    res = [0.0] * (periyod - 1)
-    for i in range(periyod, len(seri) + 1):
-        pencere = seri[i - periyod:i]
-        ort = sum(pencere) / periyod
-        varyans = sum((x - ort) ** 2 for x in pencere)
-        res.append(math.sqrt(varyans / periyod))
-    return res
-
 def rsi_hesapla(kapanislar, periyod=14):
     if len(kapanislar) < periyod + 1: return 50.0
     kazanclar, kayiplar = [], []
@@ -110,7 +87,7 @@ def rsi_hesapla(kapanislar, periyod=14):
     if ort_kayip <= 0.00000001: return 100.0  
     return 100.0 - (100.0 / (1.0 + (ort_kazanc / ort_kayip)))
 
-# 🎛️ YENİLENEN STRATEJİ MOTORU (RSI KESİŞİM MANTIĞI)
+# 🎛️ YENİLENEN STRATEJİ MOTORU (SADECE RSI REJECTION - BOLLINGER KALDIRILDI)
 def strateji_sinyal_uret(v, anlik_fiyat, en_yuksek_fiyat, en_dusuk_fiyat):
     kapanislar = list(v["kapanislar"])
     if not kapanislar or anlik_fiyat <= 0: return "HOLD", 50.0
@@ -122,25 +99,20 @@ def strateji_sinyal_uret(v, anlik_fiyat, en_yuksek_fiyat, en_dusuk_fiyat):
 
     kapanislar.append(anlik_fiyat)
     L = len(kapanislar)
-    gerekli_uzunluk = max(config.BB_LEN, config.RSI_LEN) + 5
+    gerekli_uzunluk = config.RSI_LEN + 5
     if L < gerekli_uzunluk: return "HOLD", 50.0
-
-    basis = sma(kapanislar, config.BB_LEN)
-    dev = stdev(kapanislar, config.BB_LEN)
-    lower_bb = basis[-1] - (config.BB_MULT * dev[-1])
-    upper_bb = basis[-1] + (config.BB_MULT * dev[-1])
 
     # 1. Güncel anlık RSI
     rsi_guncel = rsi_hesapla(kapanislar, config.RSI_LEN)
     
-    # 2. Bir önceki mum kapanışındaki RSI (Son anlık fiyatı listeden çıkartarak hesaplıyoruz)
+    # 2. Bir önceki mum kapanışındaki RSI
     rsi_onceki = rsi_hesapla(kapanislar[:-1], config.RSI_LEN)
 
-    # LONG ŞARTI: Önceki RSI 20'nin (OS) altındaydı VE şu an 20'nin üzerine çıktı (Yukarı Kesti)
-    long_ok = (rsi_onceki < config.RSI_OS) and (rsi_guncel >= config.RSI_OS) and (anlik_fiyat < lower_bb * 1.01)
+    # LONG ŞARTI: Önceki RSI 25'in altındaydı VE şu an 25'in üzerine çıktı (Yukarı Kesti)
+    long_ok = (rsi_onceki < config.RSI_OS) and (rsi_guncel >= config.RSI_OS)
 
-    # SHORT ŞARTI: Önceki RSI 80'in (OB) üzerindeydi VE şu an 80'in altına indi (Aşağı Kesti)
-    short_ok = (rsi_onceki > config.RSI_OB) and (rsi_guncel <= config.RSI_OB) and (anlik_fiyat > upper_bb * 0.99)
+    # SHORT ŞARTI: Önceki RSI 75'in üzerindeydi VE şu an 75'in altına indi (Aşağı Kesti)
+    short_ok = (rsi_onceki > config.RSI_OB) and (rsi_guncel <= config.RSI_OB)
 
     if long_ok: return "BUY", rsi_guncel
     elif short_ok: return "SELL", rsi_guncel
@@ -272,9 +244,10 @@ def telegram_canli_rapor_uret():
         durum_str = "🟢 Pure API Tarama" if config.BOT_CALISIYOR else "🔴 Sistem Durduruldu"
 
         rapor = (
-            f"⚙️ <b>RSI Rejection + İzole Koruma Botu</b>\n"
+            f"⚙️ <b>RSI Rejection Botu (Bollinger Kaldırıldı)</b>\n"
             f"• Sistem: {durum_str}\n"
             f"• Risk Limiti: {acik_pozlar}/{config.MAX_ACIK_POZISYON} Pozisyon\n"
+            f"• RSI Sınırları: 25 / 75 📊\n"
             f"• TP Hedefi: {config.SABIT_DOLAR_TP} USD\n"
             f"• Güvenlik: %{config.VOLATILITE_SINIRI} Volatilite Filtresi 🚫\n"
             f"• Yapı: %100 Saf İzole Marjin (Borsa SL Yok)\n\n"
@@ -384,13 +357,15 @@ def hizli_acik_pozisyon_takip_dongusu():
                         side_to_close = SIDE_SELL if pos["yon"] == "LONG" else SIDE_BUY
                         
                         if qty_to_close > 0:
+                            # 🛠️ GÜVENLİK GÜNCELLEMESİ: Mükerrer emri önlemek için borsa öncesi local durumu hemen sıfırlıyoruz
+                            with data_lock:
+                                son_islem_zamanlari[symbol] = su_an_ts  
+                                aktif_pozisyonlar[symbol] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0, "dca_kademe": 0}
+                            
                             order_client.futures_create_order(
                                 symbol=symbol.upper(), side=side_to_close, type=ORDER_TYPE_MARKET, 
                                 quantity=qty_to_close, reduceOnly=True
                             )
-                            with data_lock:
-                                son_islem_zamanlari[symbol] = su_an_ts  
-                                aktif_pozisyonlar[symbol] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0, "dca_kademe": 0}
                             telegram_bildir(f"💰 <b>{symbol.upper()} {pos['yon']} {round(anlik_kar_dolar, 3)}$ Kar ile Kapatıldı!</b>")
                     except Exception as e:
                         print(f"❌ Kapatma hatası ({symbol}): {e}")
@@ -414,17 +389,20 @@ def hizli_acik_pozisyon_takip_dongusu():
                                 dca_side = SIDE_BUY if pos["yon"] == "LONG" else SIDE_SELL
                                 telegram_bildir(f"⚠️ <b>{symbol.upper()} %{round(fiyat_sapma_yuzde, 2)} Terste!</b> DCA 1 tetikleniyor...")
                                 
+                                # 🛠️ GÜVENLİK GÜNCELLEMESİ: Yarış durumunu engellemek için borsa emrinden önce kademeyi hemen 1 yapıyoruz
+                                with data_lock:
+                                    aktif_pozisyonlar[symbol]["dca_kademe"] = 1
+                                
                                 order_client.futures_create_order(
                                     symbol=symbol.upper(), side=dca_side, type=ORDER_TYPE_MARKET, quantity=dca_qty
                                 )
-                                
-                                with data_lock:
-                                    aktif_pozisyonlar[symbol]["dca_kademe"] = 1
                                 
                                 time.sleep(1.0)
                                 acik_pozisyonlari_binanceden_guncelle()
                                 telegram_bildir(f"✅ <b>DCA 1 Başarılı! {symbol.upper()}</b> Maliyet optimize edildi.")
                         except Exception as e:
+                            # Hata durumunda kademeyi geri sıfırla ki tekrar deneyebilsin
+                            with data_lock: aktif_pozisyonlar[symbol]["dca_kademe"] = 0
                             print(f"❌ DCA Kademe 1 Hatası ({symbol}): {e}")
                         finally:
                             with data_lock: emir_beklemede_durumu[symbol] = False
@@ -438,17 +416,19 @@ def hizli_acik_pozisyon_takip_dongusu():
                         try:
                             telegram_bildir(f"🛡️ <b>{symbol.upper()} %{round(fiyat_sapma_yuzde, 2)} Terste!</b> İzole marjine {config.DCA2_EK_MARJIN} USDT nakit ekleniyor...")
                             
+                            # 🛠️ GÜVENLİK GÜNCELLEMESİ: Borsa öncesi local durumu hemen 2 yapıyoruz
+                            with data_lock:
+                                aktif_pozisyonlar[symbol]["dca_kademe"] = 2
+                                
                             order_client.futures_change_position_margin(
                                 symbol=symbol.upper(), amount=config.DCA2_EK_MARJIN, type=1  
                             )
-                            
-                            with data_lock:
-                                aktif_pozisyonlar[symbol]["dca_kademe"] = 2
                             
                             time.sleep(1.0)
                             acik_pozisyonlari_binanceden_guncelle()
                             telegram_bildir(f"✅ <b>Güvenlik Teminatı Eklendi! {symbol.upper()}</b> Liq fiyatı izole havuz içinde uzaklaştırıldı.")
                         except Exception as e:
+                            with data_lock: aktif_pozisyonlar[symbol]["dca_kademe"] = 1
                             print(f"❌ Marjin Ekleme Hatası ({symbol}): {e}")
                         finally:
                             with data_lock: emir_beklemede_durumu[symbol] = False
@@ -487,7 +467,7 @@ def pure_api_tarama_dongusu():
                     pos = dict(aktif_pozisyonlar[symbol])
                     son_islem = son_islem_zamanlari[symbol]
 
-                if len(v["kapanislar"]) < 40 or not v["anlik_fiyat"] or v["anlik_fiyat"] <= 0:
+                if len(v["kapanislar"]) < 20 or not v["anlik_fiyat"] or v["anlik_fiyat"] <= 0:
                     time.sleep(config.API_DELAY)
                     continue
                 
@@ -527,17 +507,24 @@ def pure_api_tarama_dongusu():
 
                             if qty > 0:
                                 if sinyal == "BUY":
-                                    order_client.futures_create_order(symbol=symbol.upper(), side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=qty)
+                                    # 🛠️ GÜVENLİK GÜNCELLEMESİ: Emir borsa yolundayken local durumu anında True yapıyoruz
                                     with data_lock:
                                         aktif_pozisyonlar[symbol] = {"aktif": True, "yon": "LONG", "adet": qty, "giris_fiyati": anlik_fiyat, "dca_kademe": 0}
-                                    telegram_bildir(f"🚀 <b>{symbol.upper()} LONG (RSI Rejection) Açıldı!</b>\nFiyat: {anlik_fiyat}\nRSI: {round(guncel_rsi, 2)}")
+                                    
+                                    order_client.futures_create_order(symbol=symbol.upper(), side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=qty)
+                                    telegram_bildir(f"🚀 <b>{symbol.upper()} LONG (RSI 25 Rejection) Açıldı!</b>\nFiyat: {anlik_fiyat}\nRSI: {round(guncel_rsi, 2)}")
                                         
                                 elif sinyal == "SELL":
-                                    order_client.futures_create_order(symbol=symbol.upper(), side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=qty)
+                                    # 🛠️ GÜVENLİK GÜNCELLEMESİ: Emir borsa yolundayken local durumu anında True yapıyoruz
                                     with data_lock:
                                         aktif_pozisyonlar[symbol] = {"aktif": True, "yon": "SHORT", "adet": qty, "giris_fiyati": anlik_fiyat, "dca_kademe": 0}
-                                    telegram_bildir(f"🚀 <b>{symbol.upper()} SHORT (RSI Rejection) Açıldı!</b>\nFiyat: {anlik_fiyat}\nRSI: {round(guncel_rsi, 2)}")
+                                    
+                                    order_client.futures_create_order(symbol=symbol.upper(), side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=qty)
+                                    telegram_bildir(f"🚀 <b>{symbol.upper()} SHORT (RSI 75 Rejection) Açıldı!</b>\nFiyat: {anlik_fiyat}\nRSI: {round(guncel_rsi, 2)}")
                         except Exception as e:
+                            # Emir başarısız olursa durumu temizle
+                            with data_lock: 
+                                aktif_pozisyonlar[symbol] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0, "dca_kademe": 0}
                             print(f"❌ Emir gönderme hatası ({symbol}): {e}")
                         finally:
                             with data_lock: emir_beklemede_durumu[symbol] = False
@@ -549,7 +536,7 @@ def pure_api_tarama_dongusu():
 
 # --- 🚀 ANA ÇALIŞTIRICI SİSTEM ---
 if __name__ == "__main__":
-    print("🎬 RSI Rejection + İzole Güvenlik Botu Başlatılıyor...")
+    print("🎬 RSI 25/75 Rejection Botu Başlatılıyor (Bollinger Devre Dışı)...")
     
     print("🔍 Binance üzerindeki mevcut açık pozisyonlar taranıyor...")
     try:
@@ -575,7 +562,7 @@ if __name__ == "__main__":
     
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
         threading.Thread(target=telegram_gelen_mesaj_dinleyici, daemon=True).start()
-        telegram_bildir("🤖 <b>Bot RSI Rejection Modunda Başlatıldı!</b>\nPozisyonlar izole yönetiliyor, donanım stopu deaktif.")
+        telegram_bildir("🤖 <b>Bot RSI 25/75 Rejection Modunda Başlatıldı!</b>\nBollinger filtresi devredışı. Güvenlik senkronizasyonu aktif.")
     
     threading.Thread(target=hizli_acik_pozisyon_takip_dongusu, daemon=True).start()
     print("⚡ Hızlı açık pozisyon kontrol kanalı aktif edildi.")
