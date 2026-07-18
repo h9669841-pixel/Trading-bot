@@ -43,7 +43,7 @@ class TrendBotConfig:
         # === 🛡️ ÇİFT KADEMELİ GÜVENLİK AYARLARI ===
         self.DCA1_TETIK_YUZDE = 5.0
         self.DCA1_MARJIN = 5.0
-        self.DCA2_TETIK_YUZDE = 10.0
+        self.DCA2_TETIK_YUZDE = 6.5
         self.DCA2_EK_MARJIN = 5.0
 
         # === Bollinger & RSI Parametreleri ===
