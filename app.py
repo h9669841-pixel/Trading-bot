@@ -63,6 +63,7 @@ aktif_pozisyonlar = {}
 FUTURES_HASSASIYETLERI = {}
 son_islem_zamanlari = {}
 emir_beklemede_durumu = {}
+son_kapatilan_mum_zamanlari = {}  # 📌 YENİ: Kapatılan pozisyonun mum başlangıç zamanını (timestamp) tutar
 data_lock = threading.Lock()
 
 # --- 🛠️ MATEMATİKSEL İNDİKATÖR MOTORU ---
@@ -86,38 +87,69 @@ def stdev(seri, periyod):
         res.append(math.sqrt(varyans / periyod))
     return res
 
-def rsi_hesapla(kapanislar, periyod=14):
-    if len(kapanislar) < periyod + 1: return 50.0
+def rsi_serisi_hesapla(kapanislar, periyod=14):
+    """📌 YENİ: Geçmiş kırılımları kontrol edebilmek için tüm mumların RSI değerlerini liste olarak döner."""
+    if len(kapanislar) < periyod + 1: 
+        return [50.0] * len(kapanislar)
+    
     kazanclar, kayiplar = [], []
     for i in range(1, len(kapanislar)):
         fark = kapanislar[i] - kapanislar[i-1]
-        if fark > 0: kazanclar.append(fark); kayiplar.append(0)
-        else: kazanclar.append(0); kayiplar.append(abs(fark))
+        if fark > 0: 
+            kazanclar.append(fark)
+            kayiplar.append(0)
+        else: 
+            kazanclar.append(0)
+            kayiplar.append(abs(fark))
+            
+    rsi_list = [50.0] * periyod
     ort_kazanc = sum(kazanclar[:periyod]) / periyod
     ort_kayip = sum(kayiplar[:periyod]) / periyod
+    
+    if ort_kayip <= 0.00000001: 
+        rsi_list.append(100.0)
+    else: 
+        rsi_list.append(100.0 - (100.0 / (1.0 + (ort_kazanc / ort_kayip))))
+    
     for i in range(periyod, len(kazanclar)):
         ort_kazanc = (ort_kazanc * (periyod - 1) + kazanclar[i]) / periyod
         ort_kayip = (ort_kayip * (periyod - 1) + kayiplar[i]) / periyod
-    if ort_kayip <= 0.00000001: return 100.0
-    return 100.0 - (100.0 / (1.0 + (ort_kazanc / ort_kayip)))
+        if ort_kayip <= 0.00000001: 
+            rsi_list.append(100.0)
+        else: 
+            rsi_list.append(100.0 - (100.0 / (1.0 + (ort_kazanc / ort_kayip))))
+            
+    return rsi_list
 
 def strateji_sinyal_uret(v, anlik_fiyat):
+    """📌 YENİLENEN MOTOR: RSI aşırı bölgeden içeri girdiğinde (kırılım yaptığında) sinyal üretir."""
     kapanislar = list(v["kapanislar"])
     if not kapanislar or anlik_fiyat <= 0: return "HOLD", 50.0
     kapanislar.append(anlik_fiyat)
     L = len(kapanislar)
     gerekli_uzunluk = max(config.BB_LEN, config.RSI_LEN) + 3
     if L < gerekli_uzunluk: return "HOLD", 50.0
+    
+    # --- Bollinger Hesaplamaları ---
     basis = sma(kapanislar, config.BB_LEN)
     dev = stdev(kapanislar, config.BB_LEN)
     upper_bb = basis[-1] + (config.BB_MULT * dev[-1])
     lower_bb = basis[-1] - (config.BB_MULT * dev[-1])
-    rsi_val = rsi_hesapla(kapanislar, config.RSI_LEN)
-    long_ok = (anlik_fiyat < lower_bb) and (rsi_val < config.RSI_OS)
-    short_ok = (anlik_fiyat > upper_bb) and (rsi_val > config.RSI_OB)
-    if long_ok: return "BUY", rsi_val
-    elif short_ok: return "SELL", rsi_val
-    return "HOLD", rsi_val
+    
+    # --- RSI Serisi Hesaplamaları ---
+    rsi_seri = rsi_serisi_hesapla(kapanislar, config.RSI_LEN)
+    rsi_val_current = rsi_seri[-1]  # Anlık/Güncel mumun RSI değeri
+    rsi_val_prev = rsi_seri[-2]     # Bir önceki kapanan mumun RSI değeri
+    
+    # Kırılım Şartları: 
+    # LONG: Bir önceki mumda RSI 20'den küçüktü, ŞİMDİ 20 veya üzerine çıktı.
+    long_ok = (rsi_val_prev < config.RSI_OS) and (rsi_val_current >= config.RSI_OS) and (anlik_fiyat < lower_bb)
+    # SHORT: Bir önceki mumda RSI 80'den büyüktü, ŞİMDİ 80 veya altına indi.
+    short_ok = (rsi_val_prev > config.RSI_OB) and (rsi_val_current <= config.RSI_OB) and (anlik_fiyat > upper_bb)
+    
+    if long_ok: return "BUY", rsi_val_current
+    elif short_ok: return "SELL", rsi_val_current
+    return "HOLD", rsi_val_current
 
 # --- 🌐 REST API ALTYAPI FONKSİYONLARI ---
 def ilk_100_hacimli_coin_bul():
@@ -162,10 +194,11 @@ def kontrollu_coin_ekle(coin_adi, eski_pozisyon_mu=False):
         with data_lock:
             if coin_lower not in SYMBOLS:
                 SYMBOLS.append(coin_lower)
-            piyasa_verisi[coin_lower] = {"anlik_fiyat": 0.0, "kapanislar": []}
+            piyasa_verisi[coin_lower] = {"anlik_fiyat": 0.0, "kapanislar": [], "guncel_mum_zamani": 0}
             aktif_pozisyonlar[coin_lower] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0, "resmi_pnl": 0.0, "dca_kademe": 0}
             son_islem_zamanlari[coin_lower] = 0.0
             emir_beklemede_durumu[coin_lower] = False
+            son_kapatilan_mum_zamanlari[coin_lower] = 0 # Başlangıç değeri atandı
         return True
     except Exception:
         return False
@@ -180,9 +213,14 @@ def tek_coin_api_verisi_guncelle(s):
         if not k or len(k) == 0: return False
         kapanislar_yeni = [float(x[4]) for x in k]
         anlik_fiyat_yeni = kapanislar_yeni[-1]
+        
+        # 📌 YENİ: Anlık tarama yapılan mumun başlangıç zaman damgasını (open time) alıyoruz.
+        guncel_mum_zamani = k[-1][0]
+        
         with data_lock:
             piyasa_verisi[s]["kapanislar"] = kapanislar_yeni[:-1]
             piyasa_verisi[s]["anlik_fiyat"] = anlik_fiyat_yeni
+            piyasa_verisi[s]["guncel_mum_zamani"] = guncel_mum_zamani
         return True
     except Exception:
         return False
@@ -205,7 +243,7 @@ def acik_pozisyonlari_binanceden_guncelle():
                     if emir_beklemede_durumu.get(sym, False): continue
                     amt = float(p.get("positionAmt", 0))
                     entry_price = float(p.get("entryPrice", 0))
-                    unrealized_pnl = float(p.get("unrealizedProfit", 0.0)) # Arayüzdeki net PNL verisi
+                    unrealized_pnl = float(p.get("unrealizedProfit", 0.0))
                     
                     if amt != 0:
                         aktif_pozisyonlar[sym]["aktif"] = True
@@ -286,7 +324,6 @@ def hizli_acik_pozisyon_takip_dongusu():
                 time.sleep(1.0)
                 continue
             
-            # 1. Aşama: Canlı cüzdandan gelen en güncel PNL değerlerini hafızaya alıyoruz
             acik_pozisyonlari_binanceden_guncelle()
             
             with data_lock:
@@ -298,7 +335,6 @@ def hizli_acik_pozisyon_takip_dongusu():
 
             su_an_ts = time.time()
             
-            # 2. Aşama: Her bir açık pozisyonu cüzdandan okunan net PNL değerine göre kontrol et ve kapat!
             for symbol in acik_semboller:
                 with data_lock:
                     pos = dict(aktif_pozisyonlar[symbol])
@@ -307,10 +343,9 @@ def hizli_acik_pozisyon_takip_dongusu():
                 if emir_beklemede or pos["adet"] <= 0: 
                     continue
                 
-                # 📌 BURASI: Pozisyonu kapatmak için doğrudan en doğru PNL değerini aldığı 'resmi_pnl' kullanılıyor.
                 anlik_kar_dolar = pos["resmi_pnl"] 
 
-                # 💰 HEDEF YAKALANDI MI? (Örn: Canlı PNL >= 0.15$)
+                # 💰 HEDEF YAKALANDI MI? 
                 if anlik_kar_dolar >= config.SABIT_DOLAR_TP:
                     with data_lock:
                         if emir_beklemede_durumu[symbol]: continue
@@ -332,6 +367,11 @@ def hizli_acik_pozisyon_takip_dongusu():
                             )
                         with data_lock:
                             son_islem_zamanlari[symbol] = su_an_ts
+                            
+                            # 📌 YENİ: Pozisyon kapandığı an, hangi munda kapandığını 'son_kapatilan_mum_zamanlari' değişkenine not ediyoruz.
+                            if "guncel_mum_zamani" in piyasa_verisi[symbol]:
+                                son_kapatilan_mum_zamanlari[symbol] = piyasa_verisi[symbol]["guncel_mum_zamani"]
+                                
                             aktif_pozisyonlar[symbol] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0, "resmi_pnl": 0.0, "dca_kademe": 0}
                         telegram_bildir(f"💰 <b>{symbol.upper()} {pos['yon']} Canlı Cüzdan PNL: {round(anlik_kar_dolar, 3)}$ ile Kapatıldı!</b>")
                     except Exception as e:
@@ -340,8 +380,6 @@ def hizli_acik_pozisyon_takip_dongusu():
                     finally:
                         with data_lock: emir_beklemede_durumu[symbol] = False
 
-            # 3. Aşama: DCA Adımları İçin Ayrı Bir Blokta Fiyat Sorgusu Yapıyoruz
-            # (Fiyat sorgusunun çökmesi üstteki Canlı PNL Kapatma mekanizmasını asla etkilemez!)
             try:
                 price_resp = requests.get("https://fapi.binance.com/fapi/v1/ticker/price", timeout=3)
                 if price_resp.status_code == 200:
@@ -354,7 +392,7 @@ def hizli_acik_pozisyon_takip_dongusu():
             except Exception as pe:
                 print(f"⚠️ DCA fiyat sunucu uyarısı (Kâr almayı engellemez): {pe}")
 
-            # 4. Aşama: DCA Güvenlik Kademe Kontrolleri
+            # DCA Güvenlik Kademe Kontrolleri
             for symbol in acik_semboller:
                 with data_lock:
                     pos = dict(aktif_pozisyonlar[symbol])
@@ -370,7 +408,7 @@ def hizli_acik_pozisyon_takip_dongusu():
                 else:
                     fiyat_sapma_yuzde = ((anlik_fiyat - maliyet) / maliyet) * 100
 
-                # 🛡️ KADEME 1: %3.0 Sapma (DCA Alımı)
+                # 🛡️ KADEME 1: (DCA Alımı)
                 if fiyat_sapma_yuzde >= config.DCA1_TETIK_YUZDE and pos.get("dca_kademe", 0) == 0:
                     with data_lock:
                         if emir_beklemede_durumu[symbol]: continue
@@ -391,7 +429,7 @@ def hizli_acik_pozisyon_takip_dongusu():
                     finally:
                         with data_lock: emir_beklemede_durumu[symbol] = False
                 
-                # 🛡️ KADEME 2: %3.5 Sapma (Marjin Ekleme)
+                # 🛡️ KADEME 2: (Marjin Ekleme)
                 elif fiyat_sapma_yuzde >= config.DCA2_TETIK_YUZDE and pos.get("dca_kademe", 0) == 1:
                     with data_lock:
                         if emir_beklemede_durumu[symbol]: continue
@@ -437,7 +475,19 @@ def pure_api_tarama_dongusu():
                 if len(v["kapanislar"]) < 40 or not v["anlik_fiyat"] or v["anlik_fiyat"] <= 0:
                     time.sleep(config.API_DELAY)
                     continue
+                
                 anlik_fiyat = v["anlik_fiyat"]
+                
+                # 📌 YENİ: Aynı mum içinde tekrar pozisyon açmama kontrolü
+                guncel_mum_ts = v.get("guncel_mum_zamani", 0)
+                with data_lock:
+                    son_kapatilan_mum_ts = son_kapatilan_mum_zamanlari.get(symbol, 0)
+                
+                if guncel_mum_ts == son_kapatilan_mum_ts and guncel_mum_ts != 0:
+                    # Kapatılan mum hala bitmedi (aktif), o yüzden bu mumu es geçip sonraki coine atlıyoruz.
+                    time.sleep(config.API_DELAY)
+                    continue
+                
                 if not pos["aktif"]:
                     if su_an_ts - son_islem < config.COOLDOWN_SURESI:
                         time.sleep(config.API_DELAY)
@@ -466,11 +516,11 @@ def pure_api_tarama_dongusu():
                         if sinyal == "BUY":
                             order_client.futures_create_order(symbol=symbol.upper(), side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=qty)
                             with data_lock: aktif_pozisyonlar[symbol] = {"aktif": True, "yon": "LONG", "adet": qty, "giris_fiyati": anlik_fiyat, "resmi_pnl": 0.0, "dca_kademe": 0}
-                            telegram_bildir(f"🚀 <b>{symbol.upper()} LONG Açıldı!</b>\nFiyat: {anlik_fiyat}\nRSI: {round(guncel_rsi, 2)}")
+                            telegram_bildir(f"🚀 <b>{symbol.upper()} LONG Açıldı!</b>\nFiyat: {anlik_fiyat}\nRSI: {round(guncel_rsi, 2)} (Aşırı satımdan geri döndü)")
                         elif sinyal == "SELL":
                             order_client.futures_create_order(symbol=symbol.upper(), side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=qty)
                             with data_lock: aktif_pozisyonlar[symbol] = {"aktif": True, "yon": "SHORT", "adet": qty, "giris_fiyati": anlik_fiyat, "resmi_pnl": 0.0, "dca_kademe": 0}
-                            telegram_bildir(f"🚀 <b>{symbol.upper()} SHORT Açıldı!</b>\nFiyat: {anlik_fiyat}\nRSI: {round(guncel_rsi, 2)}")
+                            telegram_bildir(f"🚀 <b>{symbol.upper()} SHORT Açıldı!</b>\nFiyat: {anlik_fiyat}\nRSI: {round(guncel_rsi, 2)} (Aşırı alımdan geri döndü)")
                     except Exception as e:
                         print(f"❌ Emir hatası: {e}")
                     finally:
@@ -482,7 +532,7 @@ def pure_api_tarama_dongusu():
 
 # --- 🚀 ANA ÇALIŞTIRICI SİSTEM ---
 if __name__ == "__main__":
-    print("🎬 Canlı Cüzdan PNL Kapatma Entegrasyonlu Bot Başlatılıyor...")
+    print("🎬 Canlı Cüzdan PNL Kapatma & RSI Kırılım Korumalı Bot Başlatılıyor...")
     try:
         hesap_bilgisi = order_client.futures_account()
         mevcut_pozisyonlar = hesap_bilgisi.get("positions", [])
@@ -503,7 +553,7 @@ if __name__ == "__main__":
 
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
         threading.Thread(target=telegram_gelen_mesaj_dinleyici, daemon=True).start()
-        telegram_bildir("🤖 <b>Bot Canlı PNL Kapatma Modunda Aktif!</b>\nPozisyon kapatma kararları tamamen cüzdandan gelen net değere bağlandı.")
+        telegram_bildir("🤖 <b>Bot RSI Kırılımı ve Aynı Mum Koruması ile Aktif!</b>\nEkstrem indikatör dönüşleri taranıyor.")
 
     threading.Thread(target=hizli_acik_pozisyon_takip_dongusu, daemon=True).start()
     pure_api_tarama_dongusu()
