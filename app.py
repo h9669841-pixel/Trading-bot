@@ -70,6 +70,9 @@ emir_beklemede_durumu = {}
 # 🔒 Aynı mumda tekrar işlem açmayı engelleyen kilit sözlüğü
 son_sinyal_mum_zamanlari = {} 
 
+# 🛡️ Bakiye hatası alan coinleri cezaya atmak için cooldown sözlüğü
+hata_cooldown_zamanlari = {}
+
 data_lock = threading.Lock()
 
 # --- 🛠️ MATEMATİKSEL İNDİKATÖR MOTORU ---
@@ -188,7 +191,6 @@ def tek_coin_api_verisi_guncelle(s):
         if not k or len(k) == 0:
             return False
         
-        # Mumun açılış zamanını (k[4][0]) yakalıyoruz
         son_mum_baslangic = int(k[-1][0])
         kapanislar_yeni = [float(x[4]) for x in k]
         anlik_fiyat_yeni = kapanislar_yeni[-1]
@@ -205,24 +207,42 @@ def acik_pozisyonlari_binanceden_guncelle():
     try:
         pozisyonlar = order_client.futures_position_information()
         with data_lock:
+            # Önce mevcut takip listesindeki pozisyon durumlarını temizle
             for s in SYMBOLS:
                 if not emir_beklemede_durumu.get(s, False):
                     eski_kademe = aktif_pozisyonlar[s].get("dca_kademe", 0)
                     aktif_pozisyonlar[s] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0, "dca_kademe": eski_kademe}
+            
+            # Binance'ten gelen tüm açık pozisyonları listeye işle
             for p in pozisyonlar:
-                sym = p.get("symbol", "").lower()
-                if sym in aktif_pozisyonlar:
+                amt = float(p.get("positionAmt", 0))
+                if amt != 0:
+                    sym = p.get("symbol", "").lower()
+                    entry_price = float(p.get("entryPrice", 0))
+                    
+                    # 🌟 Gelişmiş Senkronizasyon: Eğer coin hafızada yoksa listelere zorla ekle
+                    if sym not in aktif_pozisyonlar:
+                        if sym not in SYMBOLS:
+                            SYMBOLS.append(sym)
+                        piyasa_verisi[sym] = {"anlik_fiyat": entry_price, "kapanislar": [], "son_mum_zamani": 0}
+                        aktif_pozisyonlar[sym] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0, "dca_kademe": 0}
+                        son_islem_zamanlari[sym] = 0.0
+                        emir_beklemede_durumu[sym] = False
+                        son_sinyal_mum_zamanlari[sym] = 0
+                    
                     if emir_beklemede_durumu.get(sym, False):
                         continue
-                    amt = float(p.get("positionAmt", 0))
-                    entry_price = float(p.get("entryPrice", 0))
-                    if amt != 0:
-                        aktif_pozisyonlar[sym]["aktif"] = True
-                        aktif_pozisyonlar[sym]["yon"] = "LONG" if amt > 0 else "SHORT"
-                        aktif_pozisyonlar[sym]["adet"] = abs(amt)
-                        aktif_pozisyonlar[sym]["giris_fiyati"] = entry_price
-                    else:
-                        aktif_pozisyonlar[sym]["dca_kademe"] = 0
+                        
+                    aktif_pozisyonlar[sym]["aktif"] = True
+                    aktif_pozisyonlar[sym]["yon"] = "LONG" if amt > 0 else "SHORT"
+                    aktif_pozisyonlar[sym]["adet"] = abs(amt)
+                    aktif_pozisyonlar[sym]["giris_fiyati"] = entry_price
+                else:
+                    sym = p.get("symbol", "").lower()
+                    if sym in aktif_pozisyonlar and not emir_beklemede_durumu.get(sym, False):
+                        # Pozisyon kapandıysa DCA kademesini sıfırla
+                        if not aktif_pozisyonlar[sym]["aktif"]:
+                            aktif_pozisyonlar[sym]["dca_kademe"] = 0
     except Exception as e:
         print(f"❌ Pozisyon senkronizasyon hatası: {e}")
 
@@ -378,6 +398,11 @@ def hizli_acik_pozisyon_takip_dongusu():
                             precision = FUTURES_HASSASIYETLERI.get(symbol, 2)
                             dca_qty = (config.DCA1_MARJIN * config.KALDIRAC) / anlik_fiyat
                             dca_qty = float(int(dca_qty * (10 ** precision))) / (10 ** precision) if precision > 0 else int(dca_qty)
+                            
+                            # 🛡️ DCA-1 İÇİN BAKİYE CEZASI KONTROLÜ
+                            if time.time() < hata_cooldown_zamanlari.get(symbol, 0):
+                                continue
+
                             if dca_qty > 0:
                                 dca_side = SIDE_BUY if pos["yon"] == "LONG" else SIDE_SELL
                                 telegram_bildir(f"⚠️ <b>{symbol.upper()} %{round(fiyat_sapma_yuzde, 2)} Terste kaldı!</b>\nKademe 1 DCA Eklemesi Yapılıyor...")
@@ -391,6 +416,11 @@ def hizli_acik_pozisyon_takip_dongusu():
                                 telegram_bildir(f"✅ <b>DCA 1 Başarılı! {symbol.upper()}</b>\nYeni Giriş Ort: {yeni_pos['giris_fiyati']}")
                         except Exception as e:
                             print(f"❌ DCA Kademe 1 Hatası ({symbol}): {e}")
+                            # 🛡️ DCA bakiye yetersizliği koruması
+                            if "Margin is insufficient" in str(e) or "-2019" in str(e):
+                                hata_cooldown_zamanlari[symbol] = time.time() + 300
+                                telegram_bildir(f"⚠️ <b>{symbol.upper()} DCA-1 için bakiye yetersiz!</b> 5 dakika askıya alındı.")
+                                time.sleep(2.0)
                         finally:
                             with data_lock:
                                 emir_beklemede_durumu[symbol] = False
@@ -400,6 +430,10 @@ def hizli_acik_pozisyon_takip_dongusu():
                                 continue
                             emir_beklemede_durumu[symbol] = True
                         try:
+                            # 🛡️ DCA-2 İÇİN BAKİYE CEZASI KONTROLÜ
+                            if time.time() < hata_cooldown_zamanlari.get(symbol, 0):
+                                continue
+
                             telegram_bildir(f"🛡️ <b>{symbol.upper()} %{round(fiyat_sapma_yuzde, 2)} Terste!</b>\nİzole marjine {config.DCA2_EK_MARJIN} USDT ekleniyor...")
                             order_client.futures_change_position_margin(symbol=symbol.upper(), amount=config.DCA2_EK_MARJIN, type=1)
                             with data_lock:
@@ -409,6 +443,11 @@ def hizli_acik_pozisyon_takip_dongusu():
                             telegram_bildir(f"✅ <b>Güvenlik Marjini Eklendi! {symbol.upper()}</b>")
                         except Exception as e:
                             print(f"❌ Marjin Ekleme Hatası ({symbol}): {e}")
+                            # 🛡️ Marjin ekleme bakiye yetersizliği koruması
+                            if "Margin is insufficient" in str(e) or "-2019" in str(e):
+                                hata_cooldown_zamanlari[symbol] = time.time() + 300
+                                telegram_bildir(f"⚠️ <b>{symbol.upper()} Marjin Ekleme için bakiye yetersiz!</b> 5 dakika askıya alındı.")
+                                time.sleep(2.0)
                         finally:
                             with data_lock:
                                 emir_beklemede_durumu[symbol] = False
@@ -443,7 +482,7 @@ def pure_api_tarama_dongusu():
                     guncel_mum_zamani = v.get("son_mum_zamani", 0)
                     kilitli_mum_zamani = son_sinyal_mum_zamanlari.get(symbol, 0)
                 
-                # 🌟 KRİTİK DÜZELTME: Eğer bu mumda daha önce sinyal alıp işleme girdiysek, mum kapanana kadar pas geç
+                # Sinyal alıp işleme girdiğimiz mum kapanana kadar pas geç
                 if guncel_mum_zamani > 0 and guncel_mum_zamani == kilitli_mum_zamani:
                     continue
 
@@ -476,21 +515,33 @@ def pure_api_tarama_dongusu():
                                 with data_lock:
                                     emir_beklemede_durumu[symbol] = False
                                 continue
+                            
+                            # 🛡️ EĞER BU COIN HATA CEZASINDAYSA YENİ POZİSYON AÇMA PAS GEÇ
+                            if time.time() < hata_cooldown_zamanlari.get(symbol, 0):
+                                with data_lock:
+                                    emir_beklemede_durumu[symbol] = False
+                                continue
+
                             if qty > 0:
                                 if sinyal == "BUY":
                                     order_client.futures_create_order(symbol=symbol.upper(), side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=qty)
                                     with data_lock:
                                         aktif_pozisyonlar[symbol] = {"aktif": True, "yon": "LONG", "adet": qty, "giris_fiyati": anlik_fiyat, "dca_kademe": 0}
-                                        son_sinyal_mum_zamanlari[symbol] = guncel_mum_zamani # 🌟 Mumu kilitle
+                                        son_sinyal_mum_zamanlari[symbol] = guncel_mum_zamani
                                     telegram_bildir(f"🚀 <b>{symbol.upper()} LONG Pozisyonu Açıldı!</b>\nRSI Dönüşü: {round(guncel_rsi, 2)}")
                                 elif sinyal == "SELL":
                                     order_client.futures_create_order(symbol=symbol.upper(), side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=qty)
                                     with data_lock:
                                         aktif_pozisyonlar[symbol] = {"aktif": True, "yon": "SHORT", "adet": qty, "giris_fiyati": anlik_fiyat, "dca_kademe": 0}
-                                        son_sinyal_mum_zamanlari[symbol] = guncel_mum_zamani # 🌟 Mumu kilitle
+                                        son_sinyal_mum_zamanlari[symbol] = guncel_mum_zamani
                                     telegram_bildir(f"🚀 <b>{symbol.upper()} SHORT Pozisyonu Açıldı!</b>\nRSI Dönüşü: {round(guncel_rsi, 2)}")
                         except Exception as e:
                             print(f"❌ Emir gönderme hatası ({symbol}): {e}")
+                            # 🛡️ KRİTİK KORUMA: Eğer hata bakiye yetersizliği ise botu cezaya at
+                            if "Margin is insufficient" in str(e) or "-2019" in str(e):
+                                hata_cooldown_zamanlari[symbol] = time.time() + 300 # 5 dakika bu coine dokunma
+                                telegram_bildir(f"⚠️ <b>{symbol.upper()} için bakiye yetersiz!</b> Bakiye koruması devreye girdi, bu parite 5 dakika askıya alındı.")
+                                time.sleep(2.0) # Spam engellemek için döngüyü yavaşlat
                         finally:
                             with data_lock:
                                 emir_beklemede_durumu[symbol] = False
