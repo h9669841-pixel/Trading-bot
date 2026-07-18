@@ -50,8 +50,8 @@ class TrendBotConfig:
         self.BB_LEN = 20
         self.BB_MULT = 2.0
         self.RSI_LEN = 14
-        self.RSI_OB = 80
-        self.RSI_OS = 20
+        self.RSI_OB = 77
+        self.RSI_OS = 23
 
         self.API_DELAY = 0.5
         self.HIZLI_TAKIP_PERIYODU = 1.0
