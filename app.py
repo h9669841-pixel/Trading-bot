@@ -10,8 +10,8 @@ from binance.enums import *
 from binance.exceptions import BinanceAPIException
 
 # --- 🔑 GÜVENLİK VE API AYARLARI ---
-BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY")
-BINANCE_SECRET_KEY = os.environ.get("BINANCE_SECRET_KEY")
+BINANCE_API_KEY = os.environ.get("BINANCE_API_KEY", "").strip()
+BINANCE_SECRET_KEY = os.environ.get("BINANCE_SECRET_KEY", "").strip()
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 PROXY_URL = os.environ.get("PROXY_URL")
@@ -22,20 +22,28 @@ if PROXY_URL:
     if PROXY_URL.startswith("socks5://"):
         proxy_formatted = PROXY_URL.replace("socks5://", "socks5h://")
 
-# ⚡ BAĞLANTI HIZLANDIRICI SESSION KURUMLARI (Keep-Alive Aktif)
+# ⚡ BAĞLANTI HIZLANDIRICI SESSION KURUMLARI
 session_tarama = requests.Session()
 session_emir = requests.Session()
 
 if proxy_formatted:
-    print(f"🌐 Emir istemcisi için statik IP tüneli ve Session hazırlandı.")
+    print(f"🌐 Emir istemcisi için statik IP tüneli hazırlandı.")
     session_emir.proxies = {"http": proxy_formatted, "https": proxy_formatted}
 
-# İstemcileri Session'lar ile bağlıyoruz (Bu işlem SSL el sıkışma gecikmesini sıfırlar)
-client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY)
-client.session = session_tarama
+# --- 🚀 DOĞRU BAĞLANTI ENJEKSİYONU (API Key Hatasını Çözen Kısım) ---
+# requests.Session nesnesini doğrudanrequests_params içine gönderiyoruz.
+# Böylece Binance kütüphanesi API anahtarlarını bozmadan güvenle taşır.
+client = Client(
+    api_key=BINANCE_API_KEY, 
+    api_secret=BINANCE_SECRET_KEY,
+    requests_params={"session": session_tarama}
+)
 
-order_client = Client(BINANCE_API_KEY, BINANCE_SECRET_KEY)
-order_client.session = session_emir
+order_client = Client(
+    api_key=BINANCE_API_KEY, 
+    api_secret=BINANCE_SECRET_KEY,
+    requests_params={"session": session_emir}
+)
 
 class TrendBotConfig:
     def __init__(self):
@@ -60,8 +68,7 @@ class TrendBotConfig:
         self.RSI_OS = 25               
         
         self.API_DELAY = 0.3
-        # ⚡ TAKİP HIZI: Saniyede 5 kez kontrol (200ms) - Gecikmeyi önler
-        self.HIZLI_TAKIP_PERIYODU = 0.2 
+        self.HIZLI_TAKIP_PERIYODU = 0.2 # 200ms
 
 config = TrendBotConfig()
 
@@ -274,10 +281,7 @@ def telegram_gelen_mesaj_dinleyici():
                         telegram_bildir("⏸️ Bot tarama döngüsü <b>durduruldu.</b>", reply_markup=ana_menu_olustur())
         except Exception: time.sleep(5)
 
-
-# =====================================================================
-# 🚀 ULTRA HIZLI TAKIP DONGUSU (KEEP-ALIVE SESSION & 200MS)
-# =====================================================================
+# --- 🚀 ULTRA HIZLI TAKIP DONGUSU ---
 def hizli_acik_pozisyon_takip_dongusu():
     while True:
         try:
@@ -285,7 +289,6 @@ def hizli_acik_pozisyon_takip_dongusu():
                 time.sleep(0.5)
                 continue
 
-            # Optimize edilmiş Keep-Alive Session üzerinden veriyi jet hızıyla çekiyoruz
             try:
                 pozisyonlar = order_client.futures_position_information()
             except Exception as ae:
@@ -302,7 +305,6 @@ def hizli_acik_pozisyon_takip_dongusu():
                 if amt == 0 or symbol not in aktif_pozisyonlar:
                     continue
 
-                # 🎯 Doğrudan ekrandaki Net PNL değeri
                 borsa_net_pnl = float(p.get("unrealizedProfit", 0.0))
                 
                 with data_lock:
@@ -314,12 +316,12 @@ def hizli_acik_pozisyon_takip_dongusu():
                 if emir_beklemede or maliyet <= 0:
                     continue
 
-                if amt > 0: # LONG
+                if amt > 0: 
                     fiyat_sapma_yuzde = ((maliyet - mark_fiyati) / maliyet) * 100
-                else: # SHORT
+                else: 
                     fiyat_sapma_yuzde = ((mark_fiyati - maliyet) / maliyet) * 100
 
-                # 💰 KÂR ALMA (TAKE PROFIT) - 0.15$ Görüldüğü an milisaniyede tetiklenir
+                # 💰 TAKE PROFIT TRIGGER
                 if borsa_net_pnl >= config.SABIT_DOLAR_TP:
                     with data_lock:
                         if emir_beklemede_durumu[symbol]: continue
@@ -347,7 +349,7 @@ def hizli_acik_pozisyon_takip_dongusu():
                     finally:
                         with data_lock: emir_beklemede_durumu[symbol] = False
 
-                # 🛡️ GÜVENLİK KADEMELERİ (DCA)
+                # 🛡️ DCA MOTORU
                 else:
                     if fiyat_sapma_yuzde >= config.DCA1_TETIK_YUZDE and pos.get("dca_kademe", 0) == 0:
                         with data_lock:
@@ -397,7 +399,6 @@ def hizli_acik_pozisyon_takip_dongusu():
         except Exception as e:
             print(f"❌ Hızlı takip hatası: {e}")
             time.sleep(1.0)
-
 
 # --- 🎯 YAVAŞ TARAMA MOTORU ---
 def pure_api_tarama_dongusu():
@@ -487,9 +488,13 @@ def pure_api_tarama_dongusu():
             print(f"❌ Ana döngü hatası: {e}")
             time.sleep(2.0)
 
-# --- 🚀 ANA ÇALIŞTIRICI SİSTEM ---
+# --- 🚀 ANA ÇALIŞTIRICI ---
 if __name__ == "__main__":
-    print("🎬 Optimize Edilmiş Hızlı Bot Başlatılıyor...")
+    print("🎬 Düzeltilmiş Hızlı Bot Başlatılıyor...")
+    
+    # API Anahtarlarının varlığını ve boş olmadığını test et
+    if not BINANCE_API_KEY or not BINANCE_SECRET_KEY:
+        print("❌ HATA: BINANCE_API_KEY veya BINANCE_SECRET_KEY çevre değişkenleri (environment variables) eksik ya da boş!")
     
     try:
         mevcut_pozisyonlar = order_client.futures_position_information()
@@ -499,7 +504,7 @@ if __name__ == "__main__":
             if amt != 0:
                 kontrollu_coin_ekle(sym, eski_pozisyon_mu=True)
     except Exception as e:
-        print(f"❌ İlk pozisyon tarama hatası: {e}")
+        print(f"❌ İlk pozisyon tarama hatası (Lütfen API anahtar karakterlerini kontrol edin): {e}")
     
     hacimli_coinler = ilk_100_hacimli_coin_bul()
     for c in hacimli_coinler:
@@ -507,7 +512,7 @@ if __name__ == "__main__":
             
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
         threading.Thread(target=telegram_gelen_mesaj_dinleyici, daemon=True).start()
-        telegram_bildir("🤖 <b>Bot Hızlı Keep-Alive Modunda Başlatıldı!</b>\nTakip aralığı: 200ms.")
+        telegram_bildir("🤖 <b>Bot API-Key Yamasıyla Yeniden Başlatıldı!</b>\nHız tüneli devrede.")
     
     threading.Thread(target=hizli_acik_pozisyon_takip_dongusu, daemon=True).start()
     pure_api_tarama_dongusu()
