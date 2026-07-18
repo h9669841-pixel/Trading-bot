@@ -51,7 +51,7 @@ class TrendBotConfig:
         self.DCA2_TETIK_YUZDE = 3.5 
         self.DCA2_EK_MARJIN = 2.0 
         
-        # === RSI Parametreleri (25 - 75 ve Bollinger Çıkarıldı) ===
+        # === RSI Parametreleri ===
         self.RSI_LEN = 14
         self.RSI_OB = 75 # Aşırı Alım Sınırı
         self.RSI_OS = 25 # Aşırı Satım Sınırı
@@ -66,6 +66,10 @@ aktif_pozisyonlar = {}
 FUTURES_HASSASIYETLERI = {}
 son_islem_zamanlari = {}
 emir_beklemede_durumu = {}
+
+# 🔒 Aynı mumda tekrar işlem açmayı engelleyen kilit sözlüğü
+son_sinyal_mum_zamanlari = {} 
+
 data_lock = threading.Lock()
 
 # --- 🛠️ MATEMATİKSEL İNDİKATÖR MOTORU ---
@@ -102,7 +106,6 @@ def strateji_sinyal_uret(v, anlik_fiyat):
     rsi_guncel = rsi_hesapla(kapanislar, config.RSI_LEN)
     rsi_onceki = rsi_hesapla(kapanislar[:-1], config.RSI_LEN)
     
-    # Giriş Şartları (Bölgelerden içeri kırılım/dönüş takibi)
     long_ok = (rsi_onceki < config.RSI_OS) and (rsi_guncel >= config.RSI_OS)
     short_ok = (rsi_onceki > config.RSI_OB) and (rsi_guncel <= config.RSI_OB)
     
@@ -136,7 +139,7 @@ def kontrollu_coin_ekle(coin_adi, eski_pozisyon_mu=False):
     if coin_lower in SYMBOLS:
         return True
     try:
-        f_url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
+        f_url = "https://fapi.binance.com/v1/exchangeInfo"
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
@@ -163,10 +166,11 @@ def kontrollu_coin_ekle(coin_adi, eski_pozisyon_mu=False):
         with data_lock:
             if coin_lower not in SYMBOLS:
                 SYMBOLS.append(coin_lower)
-                piyasa_verisi[coin_lower] = {"anlik_fiyat": 0.0, "kapanislar": []}
+                piyasa_verisi[coin_lower] = {"anlik_fiyat": 0.0, "kapanislar": [], "son_mum_zamani": 0}
                 aktif_pozisyonlar[coin_lower] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0, "dca_kademe": 0}
                 son_islem_zamanlari[coin_lower] = 0.0
                 emir_beklemede_durumu[coin_lower] = False
+                son_sinyal_mum_zamanlari[coin_lower] = 0
         return True
     except Exception:
         return False
@@ -183,11 +187,16 @@ def tek_coin_api_verisi_guncelle(s):
         k = response.json()
         if not k or len(k) == 0:
             return False
+        
+        # Mumun açılış zamanını (k[4][0]) yakalıyoruz
+        son_mum_baslangic = int(k[-1][0])
         kapanislar_yeni = [float(x[4]) for x in k]
         anlik_fiyat_yeni = kapanislar_yeni[-1]
+        
         with data_lock:
             piyasa_verisi[s]["kapanislar"] = kapanislar_yeni[:-1]
             piyasa_verisi[s]["anlik_fiyat"] = anlik_fiyat_yeni
+            piyasa_verisi[s]["son_mum_zamani"] = son_mum_baslangic
         return True
     except Exception:
         return False
@@ -431,6 +440,13 @@ def pure_api_tarama_dongusu():
                     v = dict(piyasa_verisi[symbol])
                     pos = dict(aktif_pozisyonlar[symbol])
                     son_islem = son_islem_zamanlari[symbol]
+                    guncel_mum_zamani = v.get("son_mum_zamani", 0)
+                    kilitli_mum_zamani = son_sinyal_mum_zamanlari.get(symbol, 0)
+                
+                # 🌟 KRİTİK DÜZELTME: Eğer bu mumda daha önce sinyal alıp işleme girdiysek, mum kapanana kadar pas geç
+                if guncel_mum_zamani > 0 and guncel_mum_zamani == kilitli_mum_zamani:
+                    continue
+
                 if len(v["kapanislar"]) < 40 or not v["anlik_fiyat"] or v["anlik_fiyat"] <= 0:
                     time.sleep(config.API_DELAY)
                     continue
@@ -465,11 +481,13 @@ def pure_api_tarama_dongusu():
                                     order_client.futures_create_order(symbol=symbol.upper(), side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=qty)
                                     with data_lock:
                                         aktif_pozisyonlar[symbol] = {"aktif": True, "yon": "LONG", "adet": qty, "giris_fiyati": anlik_fiyat, "dca_kademe": 0}
+                                        son_sinyal_mum_zamanlari[symbol] = guncel_mum_zamani # 🌟 Mumu kilitle
                                     telegram_bildir(f"🚀 <b>{symbol.upper()} LONG Pozisyonu Açıldı!</b>\nRSI Dönüşü: {round(guncel_rsi, 2)}")
                                 elif sinyal == "SELL":
                                     order_client.futures_create_order(symbol=symbol.upper(), side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=qty)
                                     with data_lock:
                                         aktif_pozisyonlar[symbol] = {"aktif": True, "yon": "SHORT", "adet": qty, "giris_fiyati": anlik_fiyat, "dca_kademe": 0}
+                                        son_sinyal_mum_zamanlari[symbol] = guncel_mum_zamani # 🌟 Mumu kilitle
                                     telegram_bildir(f"🚀 <b>{symbol.upper()} SHORT Pozisyonu Açıldı!</b>\nRSI Dönüşü: {round(guncel_rsi, 2)}")
                         except Exception as e:
                             print(f"❌ Emir gönderme hatası ({symbol}): {e}")
