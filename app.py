@@ -64,13 +64,13 @@ SYMBOLS = []
 piyasa_verisi = {}
 aktif_pozisyonlar = {}
 FUTURES_HASSASIYETLERI = {}
-son_islem_mum_zamanlari = {}  # Mum Zamanına göre koruma kilidi
+son_islem_mum_zamanlari = {}   # İlk pozisyonun açıldığı mum kilidi
+son_kar_mum_zamanlari = {}     # 🌟 YENİ: Kâr alınan mumu kilitleyen mekanizma
 emir_beklemede_durumu = {}
 data_lock = threading.Lock()
 
 # --- 🛠️ MATEMATİKSEL RSI MOTORU ---
 def rsi_serisi_hesapla(kapanislar, periyod=14):
-    """Sinyal kesişim takibi için tüm geçmiş mumların RSI değerlerini liste olarak döner"""
     L = len(kapanislar)
     if L < periyod + 1:
         return [50.0] * L
@@ -105,11 +105,6 @@ def rsi_serisi_hesapla(kapanislar, periyod=14):
     return rsi_listesi
 
 def strateji_sinyal_uret(v, anlik_fiyat):
-    """
-    🌟 GÜNCELLENDİ (Bollinger Kaldırıldı):
-    - BUY: Önceki RSI 20'nin altındaysa VE canlı mumda RSI 20'nin üstüne çıktıysa
-    - SELL: Önceki RSI 80'in üstündeyken VE canlı mumda RSI 80'in altına indiyse
-    """
     kapanislar = list(v["kapanislar"])
     if not kapanislar or anlik_fiyat <= 0:
         return "HOLD", 50.0
@@ -120,10 +115,9 @@ def strateji_sinyal_uret(v, anlik_fiyat):
     if L < gerekli_uzunluk:
         return "HOLD", 50.0
         
-    # Tüm serinin RSI değerlerini hesapla
     rsi_seri = rsi_serisi_hesapla(kapanislar, config.RSI_LEN)
-    rsi_canli = rsi_seri[-1]   # Canlı mumdaki anlık RSI
-    rsi_onceki = rsi_seri[-2]  # Bir önceki (kapanmış) mumdaki RSI
+    rsi_canli = rsi_seri[-1]   
+    rsi_onceki = rsi_seri[-2]  
     
     # Kesişim Mantığı
     long_ok = (rsi_onceki <= config.RSI_OS) and (rsi_canli > config.RSI_OS)
@@ -184,6 +178,7 @@ def kontrollu_coin_ekle(coin_adi, eski_pozisyon_mu=False):
             piyasa_verisi[coin_lower] = {"anlik_fiyat": 0.0, "kapanislar": [], "canli_mum_zamani": 0}
             aktif_pozisyonlar[coin_lower] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0, "dca_kademe": 0}
             son_islem_mum_zamanlari[coin_lower] = 0
+            son_kar_mum_zamanlari[coin_lower] = 0  # Başlangıçta kilitsiz
             emir_beklemede_durumu[coin_lower] = False
         return True
     except Exception:
@@ -255,7 +250,6 @@ def telegram_canli_rapor_uret():
     with data_lock:
         acik_pozlar = sum(1 for s in SYMBOLS if aktif_pozisyonlar[s]["aktif"])
         durum_str = "🟢 Pure API Tarama" if config.BOT_CALISIYOR else "🔴 Sistem Durduruldu"
-        poz_buyuklugu = config.ISLEM_MARJIN * config.KALDIRAC
         rapor = (
             f"⚙️ <b>Saf RSI Kesişim Botu</b>\n"
             f"• Sistem: {durum_str}\n"
@@ -317,7 +311,7 @@ def hizli_acik_pozisyon_takip_dongusu():
                 continue
             
             try:
-                price_resp = requests.get("https://fapi.binance.com/fapi/v1/ticker/price", timeout=5)
+                price_resp = requests.get("https://fapi.binance.com/v1/ticker/price", timeout=5)
                 if price_resp.status_code == 200:
                     prices_list = price_resp.json()
                     price_map = {item["symbol"].lower(): float(item["price"]) for item in prices_list}
@@ -332,6 +326,7 @@ def hizli_acik_pozisyon_takip_dongusu():
                     pos = dict(aktif_pozisyonlar[symbol])
                     anlik_fiyat = piyasa_verisi[symbol]["anlik_fiyat"]
                     emir_beklemede = emir_beklemede_durumu.get(symbol, False)
+                    canli_mum_zamani = piyasa_verisi[symbol]["canli_mum_zamani"]
                     
                 if emir_beklemede or anlik_fiyat <= 0: continue
                 maliyet = pos["giris_fiyati"]
@@ -362,7 +357,9 @@ def hizli_acik_pozisyon_takip_dongusu():
                             )
                             with data_lock:
                                 aktif_pozisyonlar[symbol] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0, "dca_kademe": 0}
-                            telegram_bildir(f"💰 <b>{symbol.upper()} {pos['yon']} {round(anlik_kar_dolar, 3)}$ Kar ile Kapatıldı!</b>\nFiyat: {anlik_fiyat}")
+                                # 🌟 KİLİT NOKTASI: Kâr alınan canlı mumun zaman damgası hafızaya kaydediliyor.
+                                son_kar_mum_zamanlari[symbol] = canli_mum_zamani 
+                            telegram_bildir(f"💰 <b>{symbol.upper()} {pos['yon']} {round(anlik_kar_dolar, 3)}$ Kar ile Kapatıldı!</b>\nFiyat: {anlik_fiyat}\n🔒 Bu mum boyunca yeni işlem açılmayacak.")
                     except Exception as e:
                         print(f"❌ Kapatma hatası ({symbol}): {e}")
                     finally:
@@ -432,9 +429,9 @@ def pure_api_tarama_dongusu():
                     
                 with data_lock:
                     v = dict(piyasa_verisi[symbol])
-                    pos = dict(aktif_pozisyonlar[symbol])
                     canli_mum = v["canli_mum_zamani"]
                     son_islem_mumu = son_islem_mum_zamanlari.get(symbol, 0)
+                    son_kar_mumu = son_kar_mum_zamanlari.get(symbol, 0)
                     
                 if len(v["kapanislar"]) < 40 or not v["anlik_fiyat"] or v["anlik_fiyat"] <= 0:
                     time.sleep(config.API_DELAY)
@@ -442,8 +439,14 @@ def pure_api_tarama_dongusu():
                     
                 anlik_fiyat = v["anlik_fiyat"]
                 
-                # 🌟 AYNI MUM İÇİNDE KORUMA FİLTRESİ
+                # 🔒 AYNI MUM İÇİNDE POZİSYON AÇMA KORUMASI
                 if canli_mum == son_islem_mumu:
+                    continue
+                    
+                # 🔒 🌟 YENİ: KÂR ALINAN MUM KİLİDİ KONTROLÜ
+                # Eğer canlı mum, en son kâr aldığımız muma eşitse aramayı durdurur ve atlar.
+                # Yeni muma geçildiğinde canli_mum değişeceği için kilit kendiliğinden açılır.
+                if canli_mum == son_kar_mumu:
                     continue
                     
                 with data_lock:
