@@ -228,7 +228,8 @@ def tek_coin_api_verisi_guncelle(s):
 # --- 🎯 CANLI CÜZDAN ÜZERİNDEN NET PNL OKUMA FONKSİYONU ---
 def acik_pozisyonlari_binanceden_guncelle():
     try:
-        pozisyonlar = order_client.futures_position_information()
+        hesap_bilgisi = order_client.futures_account()
+        pozisyonlar = hesap_bilgisi.get("positions", [])
         
         with data_lock:
             for s in SYMBOLS:
