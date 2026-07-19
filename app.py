@@ -41,7 +41,7 @@ class TrendBotConfig:
         self.SABIT_DOLAR_TP = 0.15  # 📌 CANLI CÜZDANDAN OKUNAN NET HEDEF PNL
 
         # === 🛡️ ÇİFT KADEMELİ GÜVENLİK AYARLARI ===
-        self.DCA1_TETIK_YUZDE = 5.0
+        self.DCA1_TETIK_YUZDE = 6.0
         self.DCA1_MARJIN = 2.0
         self.DCA2_TETIK_YUZDE = 6.5
         self.DCA2_EK_MARJIN = 2.0
