@@ -33,18 +33,18 @@ else:
 class TrendBotConfig:
     def __init__(self):
         self.TIMEFRAME = Client.KLINE_INTERVAL_15MINUTE
-        self.ISLEM_MARJIN = 5.0
+        self.ISLEM_MARJIN = 2.0
         self.KALDIRAC = 10
         self.MAX_ACIK_POZISYON = 10
         self.BOT_CALISIYOR = True
         self.COOLDOWN_SURESI = 0
-        self.SABIT_DOLAR_TP = 0.20  # 📌 CANLI CÜZDANDAN OKUNAN NET HEDEF PNL
+        self.SABIT_DOLAR_TP = 0.15  # 📌 CANLI CÜZDANDAN OKUNAN NET HEDEF PNL
 
         # === 🛡️ ÇİFT KADEMELİ GÜVENLİK AYARLARI ===
         self.DCA1_TETIK_YUZDE = 5.0
-        self.DCA1_MARJIN = 5.0
+        self.DCA1_MARJIN = 2.0
         self.DCA2_TETIK_YUZDE = 6.5
-        self.DCA2_EK_MARJIN = 5.0
+        self.DCA2_EK_MARJIN = 2.0
 
         # === Bollinger & RSI Parametreleri ===
         self.BB_LEN = 20
