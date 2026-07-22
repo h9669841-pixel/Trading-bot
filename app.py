@@ -54,7 +54,7 @@ class TrendBotConfig:
         self.RSI_OS = 23
 
         self.API_DELAY = 0.5
-        self.HIZLI_TAKIP_PERIYODU = 1.0
+        self.HIZLI_TAKIP_PERIYODU = 2.0
 
 config = TrendBotConfig()
 SYMBOLS = []
