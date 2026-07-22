@@ -38,7 +38,7 @@ class TrendBotConfig:
         self.MAX_ACIK_POZISYON = 10
         self.BOT_CALISIYOR = True
         self.COOLDOWN_SURESI = 0
-        self.SABIT_DOLAR_TP = 0.15  # 📌 CANLI CÜZDANDAN OKUNAN NET HEDEF PNL
+        self.SABIT_DOLAR_TP = 0.16  # 📌 CANLI CÜZDANDAN OKUNAN NET HEDEF PNL
 
         # === 🛡️ ÇİFT KADEMELİ GÜVENLİK AYARLARI ===
         self.DCA1_TETIK_YUZDE = 5.0
