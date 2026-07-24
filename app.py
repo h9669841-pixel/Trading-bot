@@ -33,7 +33,7 @@ else:
 class TrendBotConfig:
     def __init__(self):
         self.TIMEFRAME = Client.KLINE_INTERVAL_1HOUR
-        self.ISLEM_MARJIN = 2.0
+        self.ISLEM_MARJIN = 3.0
         self.KALDIRAC = 10
         self.MAX_ACIK_POZISYON = 10
         self.BOT_CALISIYOR = True
@@ -42,12 +42,12 @@ class TrendBotConfig:
 
         # === 🛡️ ÇİFT KADEMELİ GÜVENLİK AYARLARI ===
         self.DCA1_TETIK_YUZDE = 5.0
-        self.DCA1_MARJIN = 2.0
+        self.DCA1_MARJIN = 3.0
         self.DCA2_TETIK_YUZDE = 5.5
-        self.DCA2_EK_MARJIN = 2.0
+        self.DCA2_EK_MARJIN = 3.0
 
         # === Bollinger & RSI Parametreleri ===
-        self.BB_LEN = 20
+        self.BB_LEN = 10
         self.BB_MULT = 2.0
         self.RSI_LEN = 14
         self.RSI_OB = 77
