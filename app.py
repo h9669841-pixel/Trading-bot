@@ -46,9 +46,7 @@ class TrendBotConfig:
         self.DCA2_TETIK_YUZDE = 5.5
         self.DCA2_EK_MARJIN = 3.0
 
-        # === Bollinger & RSI Parametreleri ===
-        self.BB_LEN = 10
-        self.BB_MULT = 2.0
+        # === RSI Parametreleri ===
         self.RSI_LEN = 14
         self.RSI_OB = 77
         self.RSI_OS = 23
@@ -63,32 +61,12 @@ aktif_pozisyonlar = {}
 FUTURES_HASSASIYETLERI = {}
 son_islem_zamanlari = {}
 emir_beklemede_durumu = {}
-son_kapatilan_mum_zamanlari = {}  # 📌 YENİ: Kapatılan pozisyonun mum başlangıç zamanını (timestamp) tutar
+son_kapatilan_mum_zamanlari = {}  # 📌 Kapatılan pozisyonun mum başlangıç zamanını (timestamp) tutar
 data_lock = threading.Lock()
 
 # --- 🛠️ MATEMATİKSEL İNDİKATÖR MOTORU ---
-def sma(seri, periyod):
-    if len(seri) < periyod: return [0.0] * len(seri)
-    res = []
-    current_sum = sum(seri[:periyod])
-    res.append(current_sum / periyod)
-    for i in range(periyod, len(seri)):
-        current_sum += seri[i] - seri[i - periyod]
-        res.append(current_sum / periyod)
-    return [0.0] * (periyod - 1) + res
-
-def stdev(seri, periyod):
-    if len(seri) < periyod: return [0.0] * len(seri)
-    res = [0.0] * (periyod - 1)
-    for i in range(periyod, len(seri) + 1):
-        pencere = seri[i - periyod:i]
-        ort = sum(pencere) / periyod
-        varyans = sum((x - ort) ** 2 for x in pencere)
-        res.append(math.sqrt(varyans / periyod))
-    return res
-
 def rsi_serisi_hesapla(kapanislar, periyod=14):
-    """📌 YENİ: Geçmiş kırılımları kontrol edebilmek için tüm mumların RSI değerlerini liste olarak döner."""
+    """📌 Geçmiş kırılımları kontrol edebilmek için tüm mumların RSI değerlerini liste olarak döner."""
     if len(kapanislar) < periyod + 1: 
         return [50.0] * len(kapanislar)
     
@@ -122,19 +100,13 @@ def rsi_serisi_hesapla(kapanislar, periyod=14):
     return rsi_list
 
 def strateji_sinyal_uret(v, anlik_fiyat):
-    """📌 YENİLENEN MOTOR: RSI aşırı bölgeden içeri girdiğinde (kırılım yaptığında) sinyal üretir."""
+    """📌 YENİLENEN MOTOR: Sadece RSI aşırı bölgeden içeri girdiğinde (kırılım yaptığında) sinyal üretir."""
     kapanislar = list(v["kapanislar"])
     if not kapanislar or anlik_fiyat <= 0: return "HOLD", 50.0
     kapanislar.append(anlik_fiyat)
     L = len(kapanislar)
-    gerekli_uzunluk = max(config.BB_LEN, config.RSI_LEN) + 3
+    gerekli_uzunluk = config.RSI_LEN + 3
     if L < gerekli_uzunluk: return "HOLD", 50.0
-    
-    # --- Bollinger Hesaplamaları ---
-    basis = sma(kapanislar, config.BB_LEN)
-    dev = stdev(kapanislar, config.BB_LEN)
-    upper_bb = basis[-1] + (config.BB_MULT * dev[-1])
-    lower_bb = basis[-1] - (config.BB_MULT * dev[-1])
     
     # --- RSI Serisi Hesaplamaları ---
     rsi_seri = rsi_serisi_hesapla(kapanislar, config.RSI_LEN)
@@ -142,10 +114,10 @@ def strateji_sinyal_uret(v, anlik_fiyat):
     rsi_val_prev = rsi_seri[-2]     # Bir önceki kapanan mumun RSI değeri
     
     # Kırılım Şartları: 
-    # LONG: Bir önceki mumda RSI 20'den küçüktü, ŞİMDİ 20 veya üzerine çıktı.
-    long_ok = (rsi_val_prev < config.RSI_OS) and (rsi_val_current >= config.RSI_OS) and (anlik_fiyat < lower_bb)
-    # SHORT: Bir önceki mumda RSI 80'den büyüktü, ŞİMDİ 80 veya altına indi.
-    short_ok = (rsi_val_prev > config.RSI_OB) and (rsi_val_current <= config.RSI_OB) and (anlik_fiyat > upper_bb)
+    # LONG: Bir önceki mumda RSI 23'ten küçüktü, ŞİMDİ 23 veya üzerine çıktı.
+    long_ok = (rsi_val_prev < config.RSI_OS) and (rsi_val_current >= config.RSI_OS)
+    # SHORT: Bir önceki mumda RSI 77'den büyüktü, ŞİMDİ 77 veya altına indi.
+    short_ok = (rsi_val_prev > config.RSI_OB) and (rsi_val_current <= config.RSI_OB)
     
     if long_ok: return "BUY", rsi_val_current
     elif short_ok: return "SELL", rsi_val_current
@@ -214,7 +186,7 @@ def tek_coin_api_verisi_guncelle(s):
         kapanislar_yeni = [float(x[4]) for x in k]
         anlik_fiyat_yeni = kapanislar_yeni[-1]
         
-        # 📌 YENİ: Anlık tarama yapılan mumun başlangıç zaman damgasını (open time) alıyoruz.
+        # 📌 Anlık tarama yapılan mumun başlangıç zaman damgasını (open time) alıyoruz.
         guncel_mum_zamani = k[-1][0]
         
         with data_lock:
@@ -274,7 +246,7 @@ def telegram_canli_rapor_uret():
         acik_pozlar = sum(1 for s in SYMBOLS if aktif_pozisyonlar[s]["aktif"])
         durum_str = "🟢 Pure API Tarama" if config.BOT_CALISIYOR else "🔴 Sistem Durduruldu"
         rapor = (
-            f"⚙️ <b>Bollinger & RSI Botu (Canlı Hesap Modu)</b>\n"
+            f"⚙️ <b>RSI Botu (Canlı Hesap Modu)</b>\n"
             f"• Sistem: {durum_str}\n"
             f"• Marjin: {config.ISLEM_MARJIN:.1f} USDT\n"
             f"• Kaldıraç: {config.KALDIRAC}x\n"
@@ -368,7 +340,7 @@ def hizli_acik_pozisyon_takip_dongusu():
                         with data_lock:
                             son_islem_zamanlari[symbol] = su_an_ts
                             
-                            # 📌 YENİ: Pozisyon kapandığı an, hangi munda kapandığını 'son_kapatilan_mum_zamanlari' değişkenine not ediyoruz.
+                            # 📌 Pozisyon kapandığı an, hangi munda kapandığını 'son_kapatilan_mum_zamanlari' değişkenine not ediyoruz.
                             if "guncel_mum_zamani" in piyasa_verisi[symbol]:
                                 son_kapatilan_mum_zamanlari[symbol] = piyasa_verisi[symbol]["guncel_mum_zamani"]
                                 
@@ -478,7 +450,7 @@ def pure_api_tarama_dongusu():
                 
                 anlik_fiyat = v["anlik_fiyat"]
                 
-                # 📌 YENİ: Aynı mum içinde tekrar pozisyon açmama kontrolü
+                # 📌 Aynı mum içinde tekrar pozisyon açmama kontrolü
                 guncel_mum_ts = v.get("guncel_mum_zamani", 0)
                 with data_lock:
                     son_kapatilan_mum_ts = son_kapatilan_mum_zamanlari.get(symbol, 0)
