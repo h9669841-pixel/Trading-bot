@@ -35,21 +35,19 @@ class TrendBotConfig:
         self.TIMEFRAME = Client.KLINE_INTERVAL_4HOUR
         self.ISLEM_MARJIN = 3.0
         self.KALDIRAC = 10
-        self.MAX_ACIK_POZISYON = 10
+        self.MAX_ACIK_POZISYON = 2
         self.BOT_CALISIYOR = True
         self.COOLDOWN_SURESI = 0
         self.SABIT_DOLAR_TP = 0.15  # 📌 CANLI CÜZDANDAN OKUNAN NET HEDEF PNL
 
         # === 🛡️ ÇİFT KADEMELİ GÜVENLİK AYARLARI ===
         self.DCA1_TETIK_YUZDE = 5.0
-        self.DCA1_MARJIN = 3.0
+        self.DCA1_MARJIN = 1.0
         self.DCA2_TETIK_YUZDE = 5.5
-        self.DCA2_EK_MARJIN = 3.0
+        self.DCA2_EK_MARJIN = 1.0
 
-        # === RSI Parametreleri ===
-        self.RSI_LEN = 14
-        self.RSI_OB = 77
-        self.RSI_OS = 23
+        # === EMA Parametreleri ===
+        self.EMA_PERIOD = 9
 
         self.API_DELAY = 0.5
         self.HIZLI_TAKIP_PERIYODU = 2.0
@@ -65,63 +63,38 @@ son_kapatilan_mum_zamanlari = {}  # 📌 Kapatılan pozisyonun mum başlangıç 
 data_lock = threading.Lock()
 
 # --- 🛠️ MATEMATİKSEL İNDİKATÖR MOTORU ---
-def rsi_serisi_hesapla(kapanislar, periyod=14):
-    """📌 Geçmiş kırılımları kontrol edebilmek için tüm mumların RSI değerlerini liste olarak döner."""
-    if len(kapanislar) < periyod + 1: 
-        return [50.0] * len(kapanislar)
+def ema_hesapla(kapanislar, periyod=9):
+    """📌 Kapanış verilerinden EMA (Exponential Moving Average) hesaplar."""
+    if len(kapanislar) < periyod:
+        return None
     
-    kazanclar, kayiplar = [], []
-    for i in range(1, len(kapanislar)):
-        fark = kapanislar[i] - kapanislar[i-1]
-        if fark > 0: 
-            kazanclar.append(fark)
-            kayiplar.append(0)
-        else: 
-            kazanclar.append(0)
-            kayiplar.append(abs(fark))
-            
-    rsi_list = [50.0] * periyod
-    ort_kazanc = sum(kazanclar[:periyod]) / periyod
-    ort_kayip = sum(kayiplar[:periyod]) / periyod
+    k = 2 / (periyod + 1)
+    ema = sum(kapanislar[:periyod]) / periyod  # İlk değer SMA
     
-    if ort_kayip <= 0.00000001: 
-        rsi_list.append(100.0)
-    else: 
-        rsi_list.append(100.0 - (100.0 / (1.0 + (ort_kazanc / ort_kayip))))
-    
-    for i in range(periyod, len(kazanclar)):
-        ort_kazanc = (ort_kazanc * (periyod - 1) + kazanclar[i]) / periyod
-        ort_kayip = (ort_kayip * (periyod - 1) + kayiplar[i]) / periyod
-        if ort_kayip <= 0.00000001: 
-            rsi_list.append(100.0)
-        else: 
-            rsi_list.append(100.0 - (100.0 / (1.0 + (ort_kazanc / ort_kayip))))
-            
-    return rsi_list
+    for fiyat in kapanislar[periyod:]:
+        ema = (fiyat * k) + (ema * (1 - k))
+        
+    return ema
 
 def strateji_sinyal_uret(v, anlik_fiyat):
-    """📌 YENİLENEN MOTOR: Sadece RSI aşırı bölgeden içeri girdiğinde (kırılım yaptığında) sinyal üretir."""
+    """📌 EMA 9 STRATEJİSİ: Fiyat EMA 9 altında ise LONG, üstünde ise SHORT sinyali üretir."""
     kapanislar = list(v["kapanislar"])
-    if not kapanislar or anlik_fiyat <= 0: return "HOLD", 50.0
+    if not kapanislar or anlik_fiyat <= 0: return "HOLD", 0.0
     kapanislar.append(anlik_fiyat)
-    L = len(kapanislar)
-    gerekli_uzunluk = config.RSI_LEN + 3
-    if L < gerekli_uzunluk: return "HOLD", 50.0
     
-    # --- RSI Serisi Hesaplamaları ---
-    rsi_seri = rsi_serisi_hesapla(kapanislar, config.RSI_LEN)
-    rsi_val_current = rsi_seri[-1]  # Anlık/Güncel mumun RSI değeri
-    rsi_val_prev = rsi_seri[-2]     # Bir önceki kapanan mumun RSI değeri
-    
-    # Kırılım Şartları: 
-    # LONG: Bir önceki mumda RSI 23'ten küçüktü, ŞİMDİ 23 veya üzerine çıktı.
-    long_ok = (rsi_val_prev < config.RSI_OS) and (rsi_val_current >= config.RSI_OS)
-    # SHORT: Bir önceki mumda RSI 77'den büyüktü, ŞİMDİ 77 veya altına indi.
-    short_ok = (rsi_val_prev > config.RSI_OB) and (rsi_val_current <= config.RSI_OB)
-    
-    if long_ok: return "BUY", rsi_val_current
-    elif short_ok: return "SELL", rsi_val_current
-    return "HOLD", rsi_val_current
+    if len(kapanislar) < config.EMA_PERIOD:
+        return "HOLD", 0.0
+        
+    ema9_degeri = ema_hesapla(kapanislar, config.EMA_PERIOD)
+    if ema9_degeri is None: return "HOLD", 0.0
+
+    # Sinyal Kararı: Fiyat EMA 9 altında ise BUY (LONG), üstünde ise SELL (SHORT)
+    if anlik_fiyat < ema9_degeri:
+        return "BUY", ema9_degeri
+    elif anlik_fiyat > ema9_degeri:
+        return "SELL", ema9_degeri
+        
+    return "HOLD", ema9_degeri
 
 # --- 🌐 REST API ALTYAPI FONKSİYONLARI ---
 def ilk_100_hacimli_coin_bul():
@@ -170,7 +143,7 @@ def kontrollu_coin_ekle(coin_adi, eski_pozisyon_mu=False):
             aktif_pozisyonlar[coin_lower] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0, "resmi_pnl": 0.0, "dca_kademe": 0}
             son_islem_zamanlari[coin_lower] = 0.0
             emir_beklemede_durumu[coin_lower] = False
-            son_kapatilan_mum_zamanlari[coin_lower] = 0 # Başlangıç değeri atandı
+            son_kapatilan_mum_zamanlari[coin_lower] = 0
         return True
     except Exception:
         return False
@@ -186,7 +159,6 @@ def tek_coin_api_verisi_guncelle(s):
         kapanislar_yeni = [float(x[4]) for x in k]
         anlik_fiyat_yeni = kapanislar_yeni[-1]
         
-        # 📌 Anlık tarama yapılan mumun başlangıç zaman damgasını (open time) alıyoruz.
         guncel_mum_zamani = k[-1][0]
         
         with data_lock:
@@ -246,7 +218,7 @@ def telegram_canli_rapor_uret():
         acik_pozlar = sum(1 for s in SYMBOLS if aktif_pozisyonlar[s]["aktif"])
         durum_str = "🟢 Pure API Tarama" if config.BOT_CALISIYOR else "🔴 Sistem Durduruldu"
         rapor = (
-            f"⚙️ <b>RSI Botu (Canlı Hesap Modu)</b>\n"
+            f"⚙️ <b>EMA 9 Botu (Canlı Hesap Modu)</b>\n"
             f"• Sistem: {durum_str}\n"
             f"• Marjin: {config.ISLEM_MARJIN:.1f} USDT\n"
             f"• Kaldıraç: {config.KALDIRAC}x\n"
@@ -340,7 +312,6 @@ def hizli_acik_pozisyon_takip_dongusu():
                         with data_lock:
                             son_islem_zamanlari[symbol] = su_an_ts
                             
-                            # 📌 Pozisyon kapandığı an, hangi munda kapandığını 'son_kapatilan_mum_zamanlari' değişkenine not ediyoruz.
                             if "guncel_mum_zamani" in piyasa_verisi[symbol]:
                                 son_kapatilan_mum_zamanlari[symbol] = piyasa_verisi[symbol]["guncel_mum_zamani"]
                                 
@@ -444,7 +415,7 @@ def pure_api_tarama_dongusu():
                     v = dict(piyasa_verisi[symbol])
                     pos = dict(aktif_pozisyonlar[symbol])
                     son_islem = son_islem_zamanlari[symbol]
-                if len(v["kapanislar"]) < 40 or not v["anlik_fiyat"] or v["anlik_fiyat"] <= 0:
+                if len(v["kapanislar"]) < 20 or not v["anlik_fiyat"] or v["anlik_fiyat"] <= 0:
                     time.sleep(config.API_DELAY)
                     continue
                 
@@ -456,7 +427,6 @@ def pure_api_tarama_dongusu():
                     son_kapatilan_mum_ts = son_kapatilan_mum_zamanlari.get(symbol, 0)
                 
                 if guncel_mum_ts == son_kapatilan_mum_ts and guncel_mum_ts != 0:
-                    # Kapatılan mum hala bitmedi (aktif), o yüzden bu mumu es geçip sonraki coine atlıyoruz.
                     time.sleep(config.API_DELAY)
                     continue
                 
@@ -470,7 +440,7 @@ def pure_api_tarama_dongusu():
                     time.sleep(config.API_DELAY)
                     continue
                 
-                sinyal, guncel_rsi = strateji_sinyal_uret(v, anlik_fiyat)
+                sinyal, guncel_ema = strateji_sinyal_uret(v, anlik_fiyat)
                 if sinyal != "HOLD":
                     with data_lock:
                         guncel_acik_pozisyon_sayisi = sum(1 for s in SYMBOLS if aktif_pozisyonlar[s]["aktif"])
@@ -487,12 +457,16 @@ def pure_api_tarama_dongusu():
                             continue
                         if sinyal == "BUY":
                             order_client.futures_create_order(symbol=symbol.upper(), side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=qty)
-                            with data_lock: aktif_pozisyonlar[symbol] = {"aktif": True, "yon": "LONG", "adet": qty, "giris_fiyati": anlik_fiyat, "resmi_pnl": 0.0, "dca_kademe": 0}
-                            telegram_bildir(f"🚀 <b>{symbol.upper()} LONG Açıldı!</b>\nFiyat: {anlik_fiyat}\nRSI: {round(guncel_rsi, 2)} (Aşırı satımdan geri döndü)")
+                            with data_lock: 
+                                aktif_pozisyonlar[symbol] = {"aktif": True, "yon": "LONG", "adet": qty, "giris_fiyati": anlik_fiyat, "resmi_pnl": 0.0, "dca_kademe": 0}
+                                son_islem_zamanlari[symbol] = time.time()
+                            telegram_bildir(f"🚀 <b>{symbol.upper()} LONG Açıldı!</b>\nFiyat: {anlik_fiyat}\nEMA 9: {round(guncel_ema, 4)} (Fiyat EMA9 Altında)")
                         elif sinyal == "SELL":
                             order_client.futures_create_order(symbol=symbol.upper(), side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=qty)
-                            with data_lock: aktif_pozisyonlar[symbol] = {"aktif": True, "yon": "SHORT", "adet": qty, "giris_fiyati": anlik_fiyat, "resmi_pnl": 0.0, "dca_kademe": 0}
-                            telegram_bildir(f"🚀 <b>{symbol.upper()} SHORT Açıldı!</b>\nFiyat: {anlik_fiyat}\nRSI: {round(guncel_rsi, 2)} (Aşırı alımdan geri döndü)")
+                            with data_lock: 
+                                aktif_pozisyonlar[symbol] = {"aktif": True, "yon": "SHORT", "adet": qty, "giris_fiyati": anlik_fiyat, "resmi_pnl": 0.0, "dca_kademe": 0}
+                                son_islem_zamanlari[symbol] = time.time()
+                            telegram_bildir(f"🚀 <b>{symbol.upper()} SHORT Açıldı!</b>\nFiyat: {anlik_fiyat}\nEMA 9: {round(guncel_ema, 4)} (Fiyat EMA9 Üstünde)")
                     except Exception as e:
                         print(f"❌ Emir hatası: {e}")
                     finally:
@@ -504,7 +478,7 @@ def pure_api_tarama_dongusu():
 
 # --- 🚀 ANA ÇALIŞTIRICI SİSTEM ---
 if __name__ == "__main__":
-    print("🎬 Canlı Cüzdan PNL Kapatma & RSI Kırılım Korumalı Bot Başlatılıyor...")
+    print("🎬 Canlı Cüzdan PNL Kapatma & EMA 9 Korumalı Bot Başlatılıyor...")
     try:
         hesap_bilgisi = order_client.futures_account()
         mevcut_pozisyonlar = hesap_bilgisi.get("positions", [])
@@ -525,7 +499,7 @@ if __name__ == "__main__":
 
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
         threading.Thread(target=telegram_gelen_mesaj_dinleyici, daemon=True).start()
-        telegram_bildir("🤖 <b>Bot RSI Kırılımı ve Aynı Mum Koruması ile Aktif!</b>\nEkstrem indikatör dönüşleri taranıyor.")
+        telegram_bildir("🤖 <b>Bot EMA 9 Stratejisi ve Aynı Mum Koruması ile Aktif!</b>\nEMA 9 kırılımları taranıyor.")
 
     threading.Thread(target=hizli_acik_pozisyon_takip_dongusu, daemon=True).start()
     pure_api_tarama_dongusu()
