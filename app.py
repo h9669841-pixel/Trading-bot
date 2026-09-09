@@ -40,7 +40,7 @@ class TrendBotConfig:
         self.ISLEM_MARJIN = 2.0                          # 2 USDT
         self.KALDIRAC = 50                              # 50x
         
-        self.MAX_ACIK_POZISYON = 2
+        self.MAX_ACIK_POZISYON = 7
         self.BOT_CALISIYOR = True
         self.COOLDOWN_SURESI = 0
 
