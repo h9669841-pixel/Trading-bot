@@ -36,7 +36,7 @@ else:
 
 class TrendBotConfig:
     def __init__(self):
-        self.TIMEFRAME = Client.KLINE_INTERVAL_30MINUTE  # 30m
+        self.TIMEFRAME = Client.KLINE_INTERVAL_15MINUTE  # 15m
         self.ISLEM_MARJIN = 2.0                          # 2 USDT
         self.KALDIRAC = 50                              # 50x
         
@@ -44,27 +44,23 @@ class TrendBotConfig:
         self.BOT_CALISIYOR = True
         self.COOLDOWN_SURESI = 0
 
-        # === STRATEJİ PARAMETRELERİ ===
-        self.EMA_TREND_PERIOD = 200
-        self.RSI_PERIOD = 14
-        self.PIVOT_LOOKBACK = 3
-        self.SUPERTREND_ATR_PERIOD = 10
-        self.SUPERTREND_FACTOR = 3.0
+        # === AKÜLASYON & BOLLINGER STRATEJİ PARAMETRELERİ ===
+        self.CHANNEL_LEN = 47                            # Akülasyon Bandı Çubuk Sayısı
+        self.BREAKOUT_VOL_MULT = 1.6                     # Kırılım Hacim Çarpanı (1.6x)
+        self.BB_LEN = 20                                 # Bollinger Uzunluğu
+        self.BB_MULT = 2.0                               # Bollinger Çarpanı
+        self.SQUEEZE_THRESH = 0.03                       # %3 Sıkışma Eşik Değeri
 
-        # 🎯 KÂR AL (TAKE PROFIT) YÜZDESİ
-        self.TAKE_PROFIT_PERCENT = 1.0                   # %1.0 Fiyat Değişimi Kâr Al Hedefi
-
-        # 🛡️ YATAY PİYASA KORUMA FİLTRELERİ (ADX)
-        self.USE_ADX_FILTER = True
-        self.ADX_PERIOD = 14
-        self.ADX_THRESHOLD = 20.0                        # 20 üzerindeki trendlerde işleme girer
+        # 🎯 RİSK YÖNETİMİ
+        self.TAKE_PROFIT_PERCENT = 7.0                   # %7 Kâr Al Hedefi
+        self.STOP_LOSS_PERCENT = 2.0                     # %2 Zarar Durdur Hedefi
 
         self.API_DELAY = 0.5
         self.HIZLI_TAKIP_PERIYODU = 2.0
 
 config = TrendBotConfig()
 
-# 📌 Takip Edilecek Özel Parite Listesi
+# 📌 Takip Edilecek Özel Parite Listesi (Görselinizdeki Çiftler)
 OZEL_COIN_LISTESI = [
     "btcusdt",
     "ethusdt",
@@ -72,7 +68,13 @@ OZEL_COIN_LISTESI = [
     "xrpusdt",
     "xauusdt",
     "zecusdt",
-    "spcxusdt"
+    "avaxusdt",
+    "bnbusdt",
+    "dogeusdt",
+    "adausdt",
+    "linkusdt",
+    "arbusdt",
+    "opusdt"
 ]
 
 SYMBOLS = []
@@ -84,93 +86,11 @@ emir_beklemede_durumu = {}
 son_kapatilan_mum_zamanlari = {}
 data_lock = threading.Lock()
 
-# --- 🛠️ MATEMATİKSEL İNDİKATÖR FONKSİYONLARI ---
-def hesapla_rsi(series, period=14):
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
-
-def hesapla_adx(df, period=14):
-    df_copy = df.copy()
-    high = df_copy['high']
-    low = df_copy['low']
-    close = df_copy['close']
-
-    df_copy['tr1'] = high - low
-    df_copy['tr2'] = (high - close.shift(1)).abs()
-    df_copy['tr3'] = (low - close.shift(1)).abs()
-    df_copy['tr'] = df_copy[['tr1', 'tr2', 'tr3']].max(axis=1)
-
-    df_copy['up_move'] = high - high.shift(1)
-    df_copy['down_move'] = low.shift(1) - low
-
-    df_copy['plus_dm'] = np.where((df_copy['up_move'] > df_copy['down_move']) & (df_copy['up_move'] > 0), df_copy['up_move'], 0.0)
-    df_copy['minus_dm'] = np.where((df_copy['down_move'] > df_copy['up_move']) & (df_copy['down_move'] > 0), df_copy['down_move'], 0.0)
-
-    tr_smooth = df_copy['tr'].rolling(period).sum()
-    plus_di = 100 * (df_copy['plus_dm'].rolling(period).sum() / tr_smooth)
-    minus_di = 100 * (df_copy['minus_dm'].rolling(period).sum() / tr_smooth)
-
-    dx = 100 * ((plus_di - minus_di).abs() / (plus_di + minus_di))
-    adx = dx.rolling(period).mean()
-    return adx
-
-def hesapla_supertrend(df, atr_period=10, factor=3.0):
-    high = df['high']
-    low = df['low']
-    close = df['close']
-    
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(abs(high - close.shift(1)))
-    tr3 = pd.Series(abs(low - close.shift(1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(atr_period).mean()
-
-    hl2 = (high + low) / 2
-    basic_upper = hl2 + (factor * atr)
-    basic_lower = hl2 - (factor * atr)
-
-    upper_band = basic_upper.copy()
-    lower_band = basic_lower.copy()
-
-    for i in range(1, len(df)):
-        if basic_upper.iloc[i] < upper_band.iloc[i-1] or close.iloc[i-1] > upper_band.iloc[i-1]:
-            upper_band.iloc[i] = basic_upper.iloc[i]
-        else:
-            upper_band.iloc[i] = upper_band.iloc[i-1]
-
-        if basic_lower.iloc[i] > lower_band.iloc[i-1] or close.iloc[i-1] < lower_band.iloc[i-1]:
-            lower_band.iloc[i] = basic_lower.iloc[i]
-        else:
-            lower_band.iloc[i] = lower_band.iloc[i-1]
-
-    direction = pd.Series(1, index=df.index)
-    supertrend = pd.Series(0.0, index=df.index)
-
-    for i in range(1, len(df)):
-        if direction.iloc[i-1] == 1:
-            if close.iloc[i] < lower_band.iloc[i-1]:
-                direction.iloc[i] = -1
-                supertrend.iloc[i] = upper_band.iloc[i]
-            else:
-                direction.iloc[i] = 1
-                supertrend.iloc[i] = lower_band.iloc[i]
-        else:
-            if close.iloc[i] > upper_band.iloc[i-1]:
-                direction.iloc[i] = 1
-                supertrend.iloc[i] = lower_band.iloc[i]
-            else:
-                direction.iloc[i] = -1
-                supertrend.iloc[i] = upper_band.iloc[i]
-
-    return supertrend, direction
-
+# --- 🛠️ YENİ STRATEJİ ANALİZİ (PINE SCRIPT İLE BİREBİR UYUMLU) ---
 def strateji_analiz(v, anlik_fiyat):
     candles = list(v["klines"])
-    if not candles or len(candles) < 210:
-        return "HOLD", False, 0.0, 0.0, 0, 0.0
+    if not candles or len(candles) < config.CHANNEL_LEN + 10:
+        return "HOLD", 0.0, 0.0, False
 
     df = pd.DataFrame(candles)
     df = df.iloc[:, :6]
@@ -180,76 +100,50 @@ def strateji_analiz(v, anlik_fiyat):
     df['high'] = df['high'].astype(float)
     df['low'] = df['low'].astype(float)
     df['open'] = df['open'].astype(float)
+    df['volume'] = df['volume'].astype(float)
     
+    # Anlık fiyatı son muma güncelle
     df.iloc[-1, df.columns.get_loc('close')] = anlik_fiyat
 
-    df['ema200'] = df['close'].ewm(span=config.EMA_TREND_PERIOD, adjust=False).mean()
-    df['rsi'] = hesapla_rsi(df['close'], config.RSI_PERIOD)
-    df['adx'] = hesapla_adx(df, config.ADX_PERIOD)
-    st_series, st_direction = hesapla_supertrend(df, config.SUPERTREND_ATR_PERIOD, config.SUPERTREND_FACTOR)
+    # 1. Hacim Ortalaması ve Yüksek Hacim Kontrolü
+    vol_sma = df['volume'].rolling(window=20).mean()
+    is_high_volume = df['volume'].iloc[-1] >= (vol_sma.iloc[-1] * config.BREAKOUT_VOL_MULT)
 
+    # 2. Akülasyon Bandı Hesaplaması (Önceki mumlara göre)
+    # Pine Script'teki ta.highest(high[1], channelLen) karşılığı:
+    range_high = df['high'].iloc[:-1].tail(config.CHANNEL_LEN).max()
+    range_low  = df['low'].iloc[:-1].tail(config.CHANNEL_LEN).min()
+
+    # 3. Bollinger Bantları ve Sıkışma (Squeeze) Hesaplaması
+    bb_middle = df['close'].rolling(window=config.BB_LEN).mean()
+    bb_std = df['close'].rolling(window=config.BB_LEN).std(ddof=0)
+    bb_upper = bb_middle + (bb_std * config.BB_MULT)
+    bb_lower = bb_middle - (bb_std * config.BB_MULT)
+
+    curr_middle = bb_middle.iloc[-1]
+    curr_upper = bb_upper.iloc[-1]
+    curr_lower = bb_lower.iloc[-1]
+
+    bb_width = (curr_upper - curr_lower) / curr_middle if curr_middle != 0 else 0
+    is_squeezed = bb_width <= config.SQUEEZE_THRESH
+
+    # 4. Kırılım Koşulları (Pine Script ta.crossover ve ta.crossunder karşılığı)
+    prev_close = df['close'].iloc[-2]
     curr_close = df['close'].iloc[-1]
-    curr_open = df['open'].iloc[-1]
-    curr_ema = df['ema200'].iloc[-1]
-    curr_st = st_series.iloc[-1]
-    curr_st_dir = st_direction.iloc[-1]
-    curr_adx = df['adx'].iloc[-1]
 
-    is_trending = (curr_adx > config.ADX_THRESHOLD) if config.USE_ADX_FILTER else True
+    # Long: Fiyatın tavanı yukarı kırması ve yüksek hacim
+    long_condition = (prev_close <= range_high) and (curr_close > range_high) and is_high_volume
 
-    lb = config.PIVOT_LOOKBACK
-    hidden_bull = False
-    hidden_bear = False
-
-    rsi_vals = df['rsi'].values
-    low_vals = df['low'].values
-    high_vals = df['high'].values
-
-    # Pivot Low
-    pivots_low = []
-    for i in range(len(df) - lb - 1, len(df) - 30, -1):
-        if i - lb < 0 or i + lb >= len(df): continue
-        is_pivot = True
-        for j in range(1, lb + 1):
-            if rsi_vals[i] >= rsi_vals[i-j] or rsi_vals[i] >= rsi_vals[i+j]:
-                is_pivot = False
-                break
-        if is_pivot:
-            pivots_low.append((i, rsi_vals[i], low_vals[i]))
-            if len(pivots_low) == 2: break
-
-    if len(pivots_low) == 2:
-        p_curr, rsi_curr, price_curr = pivots_low[0]
-        p_prev, rsi_prev, price_prev = pivots_low[1]
-        if price_curr > price_prev and rsi_curr < rsi_prev and curr_close > curr_ema:
-            hidden_bull = True
-
-    # Pivot High
-    pivots_high = []
-    for i in range(len(df) - lb - 1, len(df) - 30, -1):
-        if i - lb < 0 or i + lb >= len(df): continue
-        is_pivot = True
-        for j in range(1, lb + 1):
-            if rsi_vals[i] <= rsi_vals[i-j] or rsi_vals[i] <= rsi_vals[i+j]:
-                is_pivot = False
-                break
-        if is_pivot:
-            pivots_high.append((i, rsi_vals[i], high_vals[i]))
-            if len(pivots_high) == 2: break
-
-    if len(pivots_high) == 2:
-        p_curr, rsi_curr, price_curr = pivots_high[0]
-        p_prev, rsi_prev, price_prev = pivots_high[1]
-        if price_curr < price_prev and rsi_curr > rsi_prev and curr_close < curr_ema:
-            hidden_bear = True
+    # Short: Fiyatın tabanı aşağı kırması ve yüksek hacim
+    short_condition = (prev_close >= range_low) and (curr_close < range_low) and is_high_volume
 
     giris_sinyali = "HOLD"
-    if hidden_bull and curr_close > curr_ema and curr_close > curr_open and is_trending:
+    if long_condition:
         giris_sinyali = "BUY"
-    elif hidden_bear and curr_close < curr_ema and curr_close < curr_open and is_trending:
+    elif short_condition:
         giris_sinyali = "SELL"
 
-    return giris_sinyali, curr_close, curr_ema, curr_st, curr_st_dir, curr_adx
+    return giris_sinyali, range_high, range_low, is_squeezed
 
 # --- 🌐 REST API ALTYAPI FONKSİYONLARI ---
 def kontrollu_coin_ekle(coin_adi, eski_pozisyon_mu=False):
@@ -354,15 +248,14 @@ def telegram_canli_rapor_uret():
         acik_pozlar = sum(1 for s in SYMBOLS if aktif_pozisyonlar[s]["aktif"])
         durum_str = "🟢 Özel Liste Taranıyor" if config.BOT_CALISIYOR else "🔴 Sistem Durduruldu"
         rapor = (
-            f"⚙️ <b>Hidden Divergence Botu (%1 TP - No SL)</b>\n"
+            f"⚙️ <b>Akülasyon Kırılımı & Squeeze Botu</b>\n"
             f"• Sistem: {durum_str}\n"
             f"• Takip Edilen Çiftler: {len(SYMBOLS)}\n"
             f"• Periyot: 30m\n"
-            f"• Marjin: {config.ISLEM_MARJIN:.1f} USDT\n"
-            f"• Kaldıraç: {config.KALDIRAC}x\n"
-            f"• Hedef: <b>%{config.TAKE_PROFIT_PERCENT} Kâr Al</b>\n"
-            f"• Stop Loss: <b>YOK (Likidasyon Modu)</b>\n"
-            f"• ADX Filtresi: {config.ADX_THRESHOLD} (Aktif)\n"
+            f"• Kanal Boyu: {config.CHANNEL_LEN}\n"
+            f"• Hacim Çarpanı: {config.BREAKOUT_VOL_MULT}x\n"
+            f"• Hedef (TP): <b>%{config.TAKE_PROFIT_PERCENT} Kâr Al</b>\n"
+            f"• Stop Loss (SL): <b>%{config.STOP_LOSS_PERCENT} Zarar Durdur</b>\n"
             f"• Risk Limiti: {acik_pozlar}/{config.MAX_ACIK_POZISYON} Poz.\n\n"
             f"⚡ <b>Açık İşlemler:</b>\n"
         )
@@ -399,7 +292,7 @@ def telegram_gelen_mesaj_dinleyici():
         except Exception: time.sleep(5)
 
 # =====================================================================
-# 🚀 AÇIK POZİSYON KONTROL, %1 TP VE SUPERTREND ÇIKIŞ DÖNGÜSÜ
+# 🚀 AÇIK POZİSYON KONTROL, %7 TP VE %2 SL TAKİP DÖNGÜSÜ
 # =====================================================================
 def hizli_acik_pozisyon_takip_dongusu():
     while True:
@@ -434,27 +327,26 @@ def hizli_acik_pozisyon_takip_dongusu():
                 anlik_fiyat = v.get("anlik_fiyat", 0.0)
                 if anlik_fiyat <= 0: continue
 
-                _, _, ema200, supertrend, supertrend_dir, adx_val = strateji_analiz(v, anlik_fiyat)
-
                 kapatma_nedeni = None
                 giris_fiyati = pos["giris_fiyati"]
 
-                # 🎯 %1 KÂR AL HESAPLAMASI & SUPERTREND ÇIKIŞI (STOP LOSS YOK)
+                # 🎯 LONG HESAPLAMALARI (TP: %7, SL: %2)
                 if pos["yon"] == "LONG":
                     fiyat_degisim_yuzdesi = ((anlik_fiyat - giris_fiyati) / giris_fiyati) * 100
                     
                     if fiyat_degisim_yuzdesi >= config.TAKE_PROFIT_PERCENT:
                         kapatma_nedeni = f"%{config.TAKE_PROFIT_PERCENT} Kâr Al (TP) Hedefine Ulaşıldı"
-                    elif supertrend_dir == -1 or anlik_fiyat < supertrend:
-                        kapatma_nedeni = "Supertrend Altına İndi (Trend Dönüşü)"
+                    elif fiyat_degisim_yuzdesi <= -config.STOP_LOSS_PERCENT:
+                        kapatma_nedeni = f"%{config.STOP_LOSS_PERCENT} Zarar Durdur (SL) Tetiklendi"
 
+                # 🎯 SHORT HESAPLAMALARI (TP: %7, SL: %2)
                 elif pos["yon"] == "SHORT":
                     fiyat_degisim_yuzdesi = ((giris_fiyati - anlik_fiyat) / giris_fiyati) * 100
                     
                     if fiyat_degisim_yuzdesi >= config.TAKE_PROFIT_PERCENT:
                         kapatma_nedeni = f"%{config.TAKE_PROFIT_PERCENT} Kâr Al (TP) Hedefine Ulaşıldı"
-                    elif supertrend_dir == 1 or anlik_fiyat > supertrend:
-                        kapatma_nedeni = "Supertrend Üstüne Çıktı (Trend Dönüşü)"
+                    elif fiyat_degisim_yuzdesi <= -config.STOP_LOSS_PERCENT:
+                        kapatma_nedeni = f"%{config.STOP_LOSS_PERCENT} Zarar Durdur (SL) Tetiklendi"
 
                 if kapatma_nedeni:
                     with data_lock:
@@ -520,7 +412,7 @@ def pure_api_tarama_dongusu():
                     v = dict(piyasa_verisi[symbol])
                     pos = dict(aktif_pozisyonlar[symbol])
                     son_islem = son_islem_zamanlari[symbol]
-                if len(v["klines"]) < 210 or not v["anlik_fiyat"] or v["anlik_fiyat"] <= 0:
+                if len(v["klines"]) < config.CHANNEL_LEN + 10 or not v["anlik_fiyat"] or v["anlik_fiyat"] <= 0:
                     time.sleep(config.API_DELAY)
                     continue
                 
@@ -544,7 +436,7 @@ def pure_api_tarama_dongusu():
                     time.sleep(config.API_DELAY)
                     continue
                 
-                sinyal, curr_close, guncel_ema, guncel_st, supertrend_dir, guncel_adx = strateji_analiz(v, anlik_fiyat)
+                sinyal, range_high, range_low, is_squeezed = strateji_analiz(v, anlik_fiyat)
                 
                 if sinyal != "HOLD":
                     with data_lock:
@@ -560,18 +452,33 @@ def pure_api_tarama_dongusu():
                         if qty <= 0:
                             with data_lock: emir_beklemede_durumu[symbol] = False
                             continue
+
+                        squeeze_info = " (Bollinger Sıkışması Var ⚡)" if is_squeezed else ""
+
                         if sinyal == "BUY":
                             order_client.futures_create_order(symbol=symbol.upper(), side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=qty)
                             with data_lock: 
                                 aktif_pozisyonlar[symbol] = {"aktif": True, "yon": "LONG", "adet": qty, "giris_fiyati": anlik_fiyat, "resmi_pnl": 0.0}
                                 son_islem_zamanlari[symbol] = time.time()
-                            telegram_bildir(f"🚀 <b>{symbol.upper()} LONG Açıldı!</b>\nFiyat: {anlik_fiyat}\nHedef: %{config.TAKE_PROFIT_PERCENT} TP\nADX Gücü: {round(guncel_adx, 2)}\nSinyal: Hidden Bullish Divergence")
+                            telegram_bildir(
+                                f"🚀 <b>{symbol.upper()} LONG Açıldı!</b>\n"
+                                f"Fiyat: {anlik_fiyat}\n"
+                                f"Kanal Tavanı: {range_high}\n"
+                                f"Hedef: %{config.TAKE_PROFIT_PERCENT} TP | Stop: %{config.STOP_LOSS_PERCENT} SL\n"
+                                f"Sinyal: Akülasyon Direnci Kırılımı (1.6x Hacim){squeeze_info}"
+                            )
                         elif sinyal == "SELL":
                             order_client.futures_create_order(symbol=symbol.upper(), side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=qty)
                             with data_lock: 
                                 aktif_pozisyonlar[symbol] = {"aktif": True, "yon": "SHORT", "adet": qty, "giris_fiyati": anlik_fiyat, "resmi_pnl": 0.0}
                                 son_islem_zamanlari[symbol] = time.time()
-                            telegram_bildir(f"🚀 <b>{symbol.upper()} SHORT Açıldı!</b>\nFiyat: {anlik_fiyat}\nHedef: %{config.TAKE_PROFIT_PERCENT} TP\nADX Gücü: {round(guncel_adx, 2)}\nSinyal: Hidden Bearish Divergence")
+                            telegram_bildir(
+                                f"🚀 <b>{symbol.upper()} SHORT Açıldı!</b>\n"
+                                f"Fiyat: {anlik_fiyat}\n"
+                                f"Kanal Tabanı: {range_low}\n"
+                                f"Hedef: %{config.TAKE_PROFIT_PERCENT} TP | Stop: %{config.STOP_LOSS_PERCENT} SL\n"
+                                f"Sinyal: Akülasyon Desteği Kırılımı (1.6x Hacim){squeeze_info}"
+                            )
                     except Exception as e:
                         print(f"❌ Emir hatası: {e}")
                     finally:
@@ -583,7 +490,7 @@ def pure_api_tarama_dongusu():
 
 # --- 🚀 ANA ÇALIŞTIRICI SİSTEM ---
 if __name__ == "__main__":
-    print("🎬 %1 TP + Likidasyon Modu Bot Başlatılıyor...")
+    print("🎬 Akülasyon Kırılımı & Squeeze Botu Başlatılıyor...")
     try:
         hesap_bilgisi = order_client.futures_account()
         mevcut_pozisyonlar = hesap_bilgisi.get("positions", [])
@@ -604,7 +511,11 @@ if __name__ == "__main__":
 
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
         threading.Thread(target=telegram_gelen_mesaj_dinleyici, daemon=True).start()
-        telegram_bildir(f"🤖 <b>%1 TP + Likidasyon Modu Bot Aktif!</b>\nStop Loss kaldırıldı, pozisyonlar %1 kârda veya Supertrend dönüşünde kapanır.")
+        telegram_bildir(
+            f"🤖 <b>Akülasyon Kırılımı & Squeeze Botu Aktif!</b>\n"
+            f"• Parametreler: 47 Çubuk Kanal | 1.6x Hacim\n"
+            f"• Risk Mantığı: %7 TP / %2 SL"
+        )
 
     threading.Thread(target=hizli_acik_pozisyon_takip_dongusu, daemon=True).start()
     pure_api_tarama_dongusu()
