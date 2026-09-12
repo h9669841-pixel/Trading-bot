@@ -2,3 +2,4 @@ requests[socks]
 python-binance
 pandas
 numpy
+urllib3
