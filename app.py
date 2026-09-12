@@ -56,7 +56,7 @@ class TrendBotConfig:
 
 config = TrendBotConfig()
 
-# 📌 Takip Edilecek Özel Parite Listesi
+# 📌 Takip Edilecek Özel Parite Listesi (Orijinal Liste Korundu)
 OZEL_COIN_LISTESI = [
     "btcusdt",
     "ethusdt",
@@ -139,7 +139,13 @@ def strateji_analiz(v, anlik_fiyat):
     if not candles or len(candles) < 210:
         return "HOLD", False, 0.0, 0.0, 0
 
-    df = pd.DataFrame(candles, columns=['open_time', 'open', 'high', 'low', 'close', 'volume'])
+    # -------------------------------------------------------------
+    # 🚨 HATA DÜZELTİLDİ: Binance 12 sütun döndürür, ilk 6'sı seçildi
+    # -------------------------------------------------------------
+    df = pd.DataFrame(candles)
+    df = df.iloc[:, :6]
+    df.columns = ['open_time', 'open', 'high', 'low', 'close', 'volume']
+
     df['close'] = df['close'].astype(float)
     df['high'] = df['high'].astype(float)
     df['low'] = df['low'].astype(float)
@@ -421,8 +427,7 @@ def hizli_acik_pozisyon_takip_dongusu():
                         emir_beklemede_durumu[symbol] = True
                     try:
                         precision = FUTURES_HASSASIYETLERI.get(symbol, 2)
-                        faktor = 10 ** precision
-                        qty_to_close = math.floor(pos["adet"] * faktor) / faktor if precision > 0 else int(pos["adet"])
+                        qty_to_close = round(pos["adet"], precision) if precision > 0 else int(pos["adet"])
                         side_to_close = SIDE_SELL if pos["yon"] == "LONG" else SIDE_BUY
                         
                         if qty_to_close > 0:
@@ -518,7 +523,7 @@ def pure_api_tarama_dongusu():
                     try:
                         precision = FUTURES_HASSASIYETLERI.get(symbol, 2)
                         qty = (config.ISLEM_MARJIN * config.KALDIRAC) / anlik_fiyat
-                        qty = float(int(qty * (10 ** precision))) / (10 ** precision) if precision > 0 else int(qty)
+                        qty = round(qty, precision) if precision > 0 else int(qty)
                         if qty <= 0:
                             with data_lock: emir_beklemede_durumu[symbol] = False
                             continue
