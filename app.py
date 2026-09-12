@@ -36,7 +36,7 @@ else:
 
 class TrendBotConfig:
     def __init__(self):
-        self.TIMEFRAME = Client.KLINE_INTERVAL_15MINUTE  # 15m
+        self.TIMEFRAME = Client.KLINE_INTERVAL_15MINUTE  # 30m
         self.ISLEM_MARJIN = 2.0                          # 2 USDT
         self.KALDIRAC = 50                              # 50x
         
@@ -52,15 +52,15 @@ class TrendBotConfig:
         self.SQUEEZE_THRESH = 0.03                       # %3 Sıkışma Eşik Değeri
 
         # 🎯 RİSK YÖNETİMİ
-        self.TAKE_PROFIT_PERCENT = 7.0                   # %7 Kâr Al Hedefi
-        self.STOP_LOSS_PERCENT = 2.0                     # %2 Zarar Durdur Hedefi
+        self.TAKE_PROFIT_USD = 7.0                       # 💵 Kâr Al Hedefi: Net +7$ PNL
+        self.STOP_LOSS_PERCENT = 2.0                     # %2 Zarar Durdur Hedefi (Fiyat Değişimi)
 
         self.API_DELAY = 0.5
         self.HIZLI_TAKIP_PERIYODU = 2.0
 
 config = TrendBotConfig()
 
-# 📌 Takip Edilecek Özel Parite Listesi (Görselinizdeki Çiftler)
+# 📌 Takip Edilecek Özel Parite Listesi
 OZEL_COIN_LISTESI = [
     "btcusdt",
     "ethusdt",
@@ -86,7 +86,7 @@ emir_beklemede_durumu = {}
 son_kapatilan_mum_zamanlari = {}
 data_lock = threading.Lock()
 
-# --- 🛠️ YENİ STRATEJİ ANALİZİ (PINE SCRIPT İLE BİREBİR UYUMLU) ---
+# --- 🛠️ YENİ STRATEJİ ANALİZİ ---
 def strateji_analiz(v, anlik_fiyat):
     candles = list(v["klines"])
     if not candles or len(candles) < config.CHANNEL_LEN + 10:
@@ -109,8 +109,7 @@ def strateji_analiz(v, anlik_fiyat):
     vol_sma = df['volume'].rolling(window=20).mean()
     is_high_volume = df['volume'].iloc[-1] >= (vol_sma.iloc[-1] * config.BREAKOUT_VOL_MULT)
 
-    # 2. Akülasyon Bandı Hesaplaması (Önceki mumlara göre)
-    # Pine Script'teki ta.highest(high[1], channelLen) karşılığı:
+    # 2. Akülasyon Bandı Hesaplaması
     range_high = df['high'].iloc[:-1].tail(config.CHANNEL_LEN).max()
     range_low  = df['low'].iloc[:-1].tail(config.CHANNEL_LEN).min()
 
@@ -127,14 +126,11 @@ def strateji_analiz(v, anlik_fiyat):
     bb_width = (curr_upper - curr_lower) / curr_middle if curr_middle != 0 else 0
     is_squeezed = bb_width <= config.SQUEEZE_THRESH
 
-    # 4. Kırılım Koşulları (Pine Script ta.crossover ve ta.crossunder karşılığı)
+    # 4. Kırılım Koşulları
     prev_close = df['close'].iloc[-2]
     curr_close = df['close'].iloc[-1]
 
-    # Long: Fiyatın tavanı yukarı kırması ve yüksek hacim
     long_condition = (prev_close <= range_high) and (curr_close > range_high) and is_high_volume
-
-    # Short: Fiyatın tabanı aşağı kırması ve yüksek hacim
     short_condition = (prev_close >= range_low) and (curr_close < range_low) and is_high_volume
 
     giris_sinyali = "HOLD"
@@ -251,10 +247,10 @@ def telegram_canli_rapor_uret():
             f"⚙️ <b>Akülasyon Kırılımı & Squeeze Botu</b>\n"
             f"• Sistem: {durum_str}\n"
             f"• Takip Edilen Çiftler: {len(SYMBOLS)}\n"
-            f"• Periyot: 30m\n"
+            f"• Periyot: 15m\n"
             f"• Kanal Boyu: {config.CHANNEL_LEN}\n"
             f"• Hacim Çarpanı: {config.BREAKOUT_VOL_MULT}x\n"
-            f"• Hedef (TP): <b>%{config.TAKE_PROFIT_PERCENT} Kâr Al</b>\n"
+            f"• Hedef (TP): <b>+{config.TAKE_PROFIT_USD}$ Kâr Al</b>\n"
             f"• Stop Loss (SL): <b>%{config.STOP_LOSS_PERCENT} Zarar Durdur</b>\n"
             f"• Risk Limiti: {acik_pozlar}/{config.MAX_ACIK_POZISYON} Poz.\n\n"
             f"⚡ <b>Açık İşlemler:</b>\n"
@@ -292,7 +288,7 @@ def telegram_gelen_mesaj_dinleyici():
         except Exception: time.sleep(5)
 
 # =====================================================================
-# 🚀 AÇIK POZİSYON KONTROL, %7 TP VE %2 SL TAKİP DÖNGÜSÜ
+# 🚀 AÇIK POZİSYON KONTROL, NET +7$ PNL İLE TP VE %2 SL TAKİP DÖNGÜSÜ
 # =====================================================================
 def hizli_acik_pozisyon_takip_dongusu():
     while True:
@@ -329,23 +325,21 @@ def hizli_acik_pozisyon_takip_dongusu():
 
                 kapatma_nedeni = None
                 giris_fiyati = pos["giris_fiyati"]
+                resmi_pnl = pos.get("resmi_pnl", 0.0)
 
-                # 🎯 LONG HESAPLAMALARI (TP: %7, SL: %2)
-                if pos["yon"] == "LONG":
+                # 🎯 1. DOLAR BAZLI KÂR AL (TP) KONTROLÜ (Anlık PNL >= 7$)
+                if resmi_pnl >= config.TAKE_PROFIT_USD:
+                    kapatma_nedeni = f"Net Kâr +{config.TAKE_PROFIT_USD}$ PNL Hedefine Ulaşıldı ({round(resmi_pnl, 2)}$)"
+
+                # 🎯 2. YÜZDESEL ZARAR DURDUR (SL) KONTROLÜ
+                elif pos["yon"] == "LONG":
                     fiyat_degisim_yuzdesi = ((anlik_fiyat - giris_fiyati) / giris_fiyati) * 100
-                    
-                    if fiyat_degisim_yuzdesi >= config.TAKE_PROFIT_PERCENT:
-                        kapatma_nedeni = f"%{config.TAKE_PROFIT_PERCENT} Kâr Al (TP) Hedefine Ulaşıldı"
-                    elif fiyat_degisim_yuzdesi <= -config.STOP_LOSS_PERCENT:
+                    if fiyat_degisim_yuzdesi <= -config.STOP_LOSS_PERCENT:
                         kapatma_nedeni = f"%{config.STOP_LOSS_PERCENT} Zarar Durdur (SL) Tetiklendi"
 
-                # 🎯 SHORT HESAPLAMALARI (TP: %7, SL: %2)
                 elif pos["yon"] == "SHORT":
                     fiyat_degisim_yuzdesi = ((giris_fiyati - anlik_fiyat) / giris_fiyati) * 100
-                    
-                    if fiyat_degisim_yuzdesi >= config.TAKE_PROFIT_PERCENT:
-                        kapatma_nedeni = f"%{config.TAKE_PROFIT_PERCENT} Kâr Al (TP) Hedefine Ulaşıldı"
-                    elif fiyat_degisim_yuzdesi <= -config.STOP_LOSS_PERCENT:
+                    if fiyat_degisim_yuzdesi <= -config.STOP_LOSS_PERCENT:
                         kapatma_nedeni = f"%{config.STOP_LOSS_PERCENT} Zarar Durdur (SL) Tetiklendi"
 
                 if kapatma_nedeni:
@@ -464,7 +458,7 @@ def pure_api_tarama_dongusu():
                                 f"🚀 <b>{symbol.upper()} LONG Açıldı!</b>\n"
                                 f"Fiyat: {anlik_fiyat}\n"
                                 f"Kanal Tavanı: {range_high}\n"
-                                f"Hedef: %{config.TAKE_PROFIT_PERCENT} TP | Stop: %{config.STOP_LOSS_PERCENT} SL\n"
+                                f"Hedef: +{config.TAKE_PROFIT_USD}$ TP | Stop: %{config.STOP_LOSS_PERCENT} SL\n"
                                 f"Sinyal: Akülasyon Direnci Kırılımı (1.6x Hacim){squeeze_info}"
                             )
                         elif sinyal == "SELL":
@@ -476,7 +470,7 @@ def pure_api_tarama_dongusu():
                                 f"🚀 <b>{symbol.upper()} SHORT Açıldı!</b>\n"
                                 f"Fiyat: {anlik_fiyat}\n"
                                 f"Kanal Tabanı: {range_low}\n"
-                                f"Hedef: %{config.TAKE_PROFIT_PERCENT} TP | Stop: %{config.STOP_LOSS_PERCENT} SL\n"
+                                f"Hedef: +{config.TAKE_PROFIT_USD}$ TP | Stop: %{config.STOP_LOSS_PERCENT} SL\n"
                                 f"Sinyal: Akülasyon Desteği Kırılımı (1.6x Hacim){squeeze_info}"
                             )
                     except Exception as e:
@@ -514,7 +508,7 @@ if __name__ == "__main__":
         telegram_bildir(
             f"🤖 <b>Akülasyon Kırılımı & Squeeze Botu Aktif!</b>\n"
             f"• Parametreler: 47 Çubuk Kanal | 1.6x Hacim\n"
-            f"• Risk Mantığı: %7 TP / %2 SL"
+            f"• Risk Mantığı: +7$ PNL / %2 SL"
         )
 
     threading.Thread(target=hizli_acik_pozisyon_takip_dongusu, daemon=True).start()
