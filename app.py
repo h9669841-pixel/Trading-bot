@@ -51,6 +51,9 @@ class TrendBotConfig:
         self.SUPERTREND_ATR_PERIOD = 10
         self.SUPERTREND_FACTOR = 3.0
 
+        # 🎯 KÂR AL (TAKE PROFIT) YÜZDESİ
+        self.TAKE_PROFIT_PERCENT = 1.0                   # %1.0 Fiyat Değişimi Kâr Al Hedefi
+
         # 🛡️ YATAY PİYASA KORUMA FİLTRELERİ (ADX)
         self.USE_ADX_FILTER = True
         self.ADX_PERIOD = 14
@@ -89,7 +92,6 @@ def hesapla_rsi(series, period=14):
     rs = gain / loss
     return 100 - (100 / (1 + rs))
 
-# 🛡️ YENİ EKLENEN ADX HESAPLAMA FONKSİYONU
 def hesapla_adx(df, period=14):
     df_copy = df.copy()
     high = df_copy['high']
@@ -183,7 +185,7 @@ def strateji_analiz(v, anlik_fiyat):
 
     df['ema200'] = df['close'].ewm(span=config.EMA_TREND_PERIOD, adjust=False).mean()
     df['rsi'] = hesapla_rsi(df['close'], config.RSI_PERIOD)
-    df['adx'] = hesapla_adx(df, config.ADX_PERIOD) # ADX Hesaplandı
+    df['adx'] = hesapla_adx(df, config.ADX_PERIOD)
     st_series, st_direction = hesapla_supertrend(df, config.SUPERTREND_ATR_PERIOD, config.SUPERTREND_FACTOR)
 
     curr_close = df['close'].iloc[-1]
@@ -193,10 +195,8 @@ def strateji_analiz(v, anlik_fiyat):
     curr_st_dir = st_direction.iloc[-1]
     curr_adx = df['adx'].iloc[-1]
 
-    # ADX Filtre Kontrolü
     is_trending = (curr_adx > config.ADX_THRESHOLD) if config.USE_ADX_FILTER else True
 
-    # Hidden Divergence Tespiti
     lb = config.PIVOT_LOOKBACK
     hidden_bull = False
     hidden_bear = False
@@ -244,7 +244,6 @@ def strateji_analiz(v, anlik_fiyat):
             hidden_bear = True
 
     giris_sinyali = "HOLD"
-    # Sinyale ADX şartı eklendi (is_trending)
     if hidden_bull and curr_close > curr_ema and curr_close > curr_open and is_trending:
         giris_sinyali = "BUY"
     elif hidden_bear and curr_close < curr_ema and curr_close < curr_open and is_trending:
@@ -355,13 +354,15 @@ def telegram_canli_rapor_uret():
         acik_pozlar = sum(1 for s in SYMBOLS if aktif_pozisyonlar[s]["aktif"])
         durum_str = "🟢 Özel Liste Taranıyor" if config.BOT_CALISIYOR else "🔴 Sistem Durduruldu"
         rapor = (
-            f"⚙️ <b>Hidden Divergence + ADX Botu</b>\n"
+            f"⚙️ <b>Hidden Divergence Botu (%1 TP - No SL)</b>\n"
             f"• Sistem: {durum_str}\n"
             f"• Takip Edilen Çiftler: {len(SYMBOLS)}\n"
             f"• Periyot: 30m\n"
             f"• Marjin: {config.ISLEM_MARJIN:.1f} USDT\n"
             f"• Kaldıraç: {config.KALDIRAC}x\n"
-            f"• ADX Filtresi: <b>{config.ADX_THRESHOLD} (Aktif)</b>\n"
+            f"• Hedef: <b>%{config.TAKE_PROFIT_PERCENT} Kâr Al</b>\n"
+            f"• Stop Loss: <b>YOK (Likidasyon Modu)</b>\n"
+            f"• ADX Filtresi: {config.ADX_THRESHOLD} (Aktif)\n"
             f"• Risk Limiti: {acik_pozlar}/{config.MAX_ACIK_POZISYON} Poz.\n\n"
             f"⚡ <b>Açık İşlemler:</b>\n"
         )
@@ -398,7 +399,7 @@ def telegram_gelen_mesaj_dinleyici():
         except Exception: time.sleep(5)
 
 # =====================================================================
-# 🚀 AÇIK POZİSYON İNDİKATÖR KONTROL VE ÇIKIŞ DÖNGÜSÜ
+# 🚀 AÇIK POZİSYON KONTROL, %1 TP VE SUPERTREND ÇIKIŞ DÖNGÜSÜ
 # =====================================================================
 def hizli_acik_pozisyon_takip_dongusu():
     while True:
@@ -436,18 +437,24 @@ def hizli_acik_pozisyon_takip_dongusu():
                 _, _, ema200, supertrend, supertrend_dir, adx_val = strateji_analiz(v, anlik_fiyat)
 
                 kapatma_nedeni = None
+                giris_fiyati = pos["giris_fiyati"]
 
+                # 🎯 %1 KÂR AL HESAPLAMASI & SUPERTREND ÇIKIŞI (STOP LOSS YOK)
                 if pos["yon"] == "LONG":
-                    if supertrend_dir == -1 or anlik_fiyat < supertrend:
-                        kapatma_nedeni = "Supertrend Altına İndi (Kâr Al / Trend Dönüşü)"
-                    elif anlik_fiyat < ema200:
-                        kapatma_nedeni = "200 EMA Altına Saptı (Stop Loss)"
+                    fiyat_degisim_yuzdesi = ((anlik_fiyat - giris_fiyati) / giris_fiyati) * 100
+                    
+                    if fiyat_degisim_yuzdesi >= config.TAKE_PROFIT_PERCENT:
+                        kapatma_nedeni = f"%{config.TAKE_PROFIT_PERCENT} Kâr Al (TP) Hedefine Ulaşıldı"
+                    elif supertrend_dir == -1 or anlik_fiyat < supertrend:
+                        kapatma_nedeni = "Supertrend Altına İndi (Trend Dönüşü)"
 
                 elif pos["yon"] == "SHORT":
-                    if supertrend_dir == 1 or anlik_fiyat > supertrend:
-                        kapatma_nedeni = "Supertrend Üstüne Çıktı (Kâr Al / Trend Dönüşü)"
-                    elif anlik_fiyat > ema200:
-                        kapatma_nedeni = "200 EMA Üstüne Saptı (Stop Loss)"
+                    fiyat_degisim_yuzdesi = ((giris_fiyati - anlik_fiyat) / giris_fiyati) * 100
+                    
+                    if fiyat_degisim_yuzdesi >= config.TAKE_PROFIT_PERCENT:
+                        kapatma_nedeni = f"%{config.TAKE_PROFIT_PERCENT} Kâr Al (TP) Hedefine Ulaşıldı"
+                    elif supertrend_dir == 1 or anlik_fiyat > supertrend:
+                        kapatma_nedeni = "Supertrend Üstüne Çıktı (Trend Dönüşü)"
 
                 if kapatma_nedeni:
                     with data_lock:
@@ -476,7 +483,7 @@ def hizli_acik_pozisyon_takip_dongusu():
                         
                         telegram_bildir(
                             f"🔴 <b>{symbol.upper()} {pos['yon']} Kapatıldı!</b>\n"
-                            f"• Neden: {kapatma_nedeni}\n"
+                            f"• Neden: <b>{kapatma_nedeni}</b>\n"
                             f"• Son PNL: {round(pos['resmi_pnl'], 3)}$\n"
                             f"• Fiyat: {anlik_fiyat}"
                         )
@@ -558,13 +565,13 @@ def pure_api_tarama_dongusu():
                             with data_lock: 
                                 aktif_pozisyonlar[symbol] = {"aktif": True, "yon": "LONG", "adet": qty, "giris_fiyati": anlik_fiyat, "resmi_pnl": 0.0}
                                 son_islem_zamanlari[symbol] = time.time()
-                            telegram_bildir(f"🚀 <b>{symbol.upper()} LONG Açıldı!</b>\nFiyat: {anlik_fiyat}\nADX Gücü: {round(guncel_adx, 2)}\n200 EMA: {round(guncel_ema, 4)}\nSupertrend: {round(guncel_st, 4)}\nSinyal: Hidden Bullish Divergence")
+                            telegram_bildir(f"🚀 <b>{symbol.upper()} LONG Açıldı!</b>\nFiyat: {anlik_fiyat}\nHedef: %{config.TAKE_PROFIT_PERCENT} TP\nADX Gücü: {round(guncel_adx, 2)}\nSinyal: Hidden Bullish Divergence")
                         elif sinyal == "SELL":
                             order_client.futures_create_order(symbol=symbol.upper(), side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=qty)
                             with data_lock: 
                                 aktif_pozisyonlar[symbol] = {"aktif": True, "yon": "SHORT", "adet": qty, "giris_fiyati": anlik_fiyat, "resmi_pnl": 0.0}
                                 son_islem_zamanlari[symbol] = time.time()
-                            telegram_bildir(f"🚀 <b>{symbol.upper()} SHORT Açıldı!</b>\nFiyat: {anlik_fiyat}\nADX Gücü: {round(guncel_adx, 2)}\n200 EMA: {round(guncel_ema, 4)}\nSupertrend: {round(guncel_st, 4)}\nSinyal: Hidden Bearish Divergence")
+                            telegram_bildir(f"🚀 <b>{symbol.upper()} SHORT Açıldı!</b>\nFiyat: {anlik_fiyat}\nHedef: %{config.TAKE_PROFIT_PERCENT} TP\nADX Gücü: {round(guncel_adx, 2)}\nSinyal: Hidden Bearish Divergence")
                     except Exception as e:
                         print(f"❌ Emir hatası: {e}")
                     finally:
@@ -576,7 +583,7 @@ def pure_api_tarama_dongusu():
 
 # --- 🚀 ANA ÇALIŞTIRICI SİSTEM ---
 if __name__ == "__main__":
-    print("🎬 ADX Filtreli Bot Başlatılıyor...")
+    print("🎬 %1 TP + Likidasyon Modu Bot Başlatılıyor...")
     try:
         hesap_bilgisi = order_client.futures_account()
         mevcut_pozisyonlar = hesap_bilgisi.get("positions", [])
@@ -597,7 +604,7 @@ if __name__ == "__main__":
 
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
         threading.Thread(target=telegram_gelen_mesaj_dinleyici, daemon=True).start()
-        telegram_bildir(f"🤖 <b>ADX Filtreli Bot Aktif!</b>\nPiyasa dalgalı/yatayken (ADX < {config.ADX_THRESHOLD}) işlem açılmayacak.")
+        telegram_bildir(f"🤖 <b>%1 TP + Likidasyon Modu Bot Aktif!</b>\nStop Loss kaldırıldı, pozisyonlar %1 kârda veya Supertrend dönüşünde kapanır.")
 
     threading.Thread(target=hizli_acik_pozisyon_takip_dongusu, daemon=True).start()
     pure_api_tarama_dongusu()
