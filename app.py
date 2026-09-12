@@ -51,12 +51,17 @@ class TrendBotConfig:
         self.SUPERTREND_ATR_PERIOD = 10
         self.SUPERTREND_FACTOR = 3.0
 
+        # 🛡️ YATAY PİYASA KORUMA FİLTRELERİ (ADX)
+        self.USE_ADX_FILTER = True
+        self.ADX_PERIOD = 14
+        self.ADX_THRESHOLD = 20.0                        # 20 üzerindeki trendlerde işleme girer
+
         self.API_DELAY = 0.5
         self.HIZLI_TAKIP_PERIYODU = 2.0
 
 config = TrendBotConfig()
 
-# 📌 Takip Edilecek Özel Parite Listesi (Orijinal Liste Korundu)
+# 📌 Takip Edilecek Özel Parite Listesi
 OZEL_COIN_LISTESI = [
     "btcusdt",
     "ethusdt",
@@ -83,6 +88,32 @@ def hesapla_rsi(series, period=14):
     loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
     rs = gain / loss
     return 100 - (100 / (1 + rs))
+
+# 🛡️ YENİ EKLENEN ADX HESAPLAMA FONKSİYONU
+def hesapla_adx(df, period=14):
+    df_copy = df.copy()
+    high = df_copy['high']
+    low = df_copy['low']
+    close = df_copy['close']
+
+    df_copy['tr1'] = high - low
+    df_copy['tr2'] = (high - close.shift(1)).abs()
+    df_copy['tr3'] = (low - close.shift(1)).abs()
+    df_copy['tr'] = df_copy[['tr1', 'tr2', 'tr3']].max(axis=1)
+
+    df_copy['up_move'] = high - high.shift(1)
+    df_copy['down_move'] = low.shift(1) - low
+
+    df_copy['plus_dm'] = np.where((df_copy['up_move'] > df_copy['down_move']) & (df_copy['up_move'] > 0), df_copy['up_move'], 0.0)
+    df_copy['minus_dm'] = np.where((df_copy['down_move'] > df_copy['up_move']) & (df_copy['down_move'] > 0), df_copy['down_move'], 0.0)
+
+    tr_smooth = df_copy['tr'].rolling(period).sum()
+    plus_di = 100 * (df_copy['plus_dm'].rolling(period).sum() / tr_smooth)
+    minus_di = 100 * (df_copy['minus_dm'].rolling(period).sum() / tr_smooth)
+
+    dx = 100 * ((plus_di - minus_di).abs() / (plus_di + minus_di))
+    adx = dx.rolling(period).mean()
+    return adx
 
 def hesapla_supertrend(df, atr_period=10, factor=3.0):
     high = df['high']
@@ -137,11 +168,8 @@ def hesapla_supertrend(df, atr_period=10, factor=3.0):
 def strateji_analiz(v, anlik_fiyat):
     candles = list(v["klines"])
     if not candles or len(candles) < 210:
-        return "HOLD", False, 0.0, 0.0, 0
+        return "HOLD", False, 0.0, 0.0, 0, 0.0
 
-    # -------------------------------------------------------------
-    # 🚨 HATA DÜZELTİLDİ: Binance 12 sütun döndürür, ilk 6'sı seçildi
-    # -------------------------------------------------------------
     df = pd.DataFrame(candles)
     df = df.iloc[:, :6]
     df.columns = ['open_time', 'open', 'high', 'low', 'close', 'volume']
@@ -155,6 +183,7 @@ def strateji_analiz(v, anlik_fiyat):
 
     df['ema200'] = df['close'].ewm(span=config.EMA_TREND_PERIOD, adjust=False).mean()
     df['rsi'] = hesapla_rsi(df['close'], config.RSI_PERIOD)
+    df['adx'] = hesapla_adx(df, config.ADX_PERIOD) # ADX Hesaplandı
     st_series, st_direction = hesapla_supertrend(df, config.SUPERTREND_ATR_PERIOD, config.SUPERTREND_FACTOR)
 
     curr_close = df['close'].iloc[-1]
@@ -162,6 +191,10 @@ def strateji_analiz(v, anlik_fiyat):
     curr_ema = df['ema200'].iloc[-1]
     curr_st = st_series.iloc[-1]
     curr_st_dir = st_direction.iloc[-1]
+    curr_adx = df['adx'].iloc[-1]
+
+    # ADX Filtre Kontrolü
+    is_trending = (curr_adx > config.ADX_THRESHOLD) if config.USE_ADX_FILTER else True
 
     # Hidden Divergence Tespiti
     lb = config.PIVOT_LOOKBACK
@@ -211,12 +244,13 @@ def strateji_analiz(v, anlik_fiyat):
             hidden_bear = True
 
     giris_sinyali = "HOLD"
-    if hidden_bull and curr_close > curr_ema and curr_close > curr_open:
+    # Sinyale ADX şartı eklendi (is_trending)
+    if hidden_bull and curr_close > curr_ema and curr_close > curr_open and is_trending:
         giris_sinyali = "BUY"
-    elif hidden_bear and curr_close < curr_ema and curr_close < curr_open:
+    elif hidden_bear and curr_close < curr_ema and curr_close < curr_open and is_trending:
         giris_sinyali = "SELL"
 
-    return giris_sinyali, curr_close, curr_ema, curr_st, curr_st_dir
+    return giris_sinyali, curr_close, curr_ema, curr_st, curr_st_dir, curr_adx
 
 # --- 🌐 REST API ALTYAPI FONKSİYONLARI ---
 def kontrollu_coin_ekle(coin_adi, eski_pozisyon_mu=False):
@@ -224,7 +258,6 @@ def kontrollu_coin_ekle(coin_adi, eski_pozisyon_mu=False):
     coin_upper = coin_lower.upper()
     if coin_lower in SYMBOLS: return True
     try:
-        # 🟢 PROXY'SİZ (Public Fiyat Bilgisi)
         f_url = "https://fapi.binance.com/fapi/v1/exchangeInfo"
         headers = {"User-Agent": "Mozilla/5.0"}
         response = requests.get(f_url, headers=headers, timeout=10)
@@ -234,7 +267,6 @@ def kontrollu_coin_ekle(coin_adi, eski_pozisyon_mu=False):
         if not market_info or market_info.get('status') != 'TRADING': return False
         time.sleep(0.20)
         
-        # 🔐 PROXY'Lİ (Kaldıraç ve Marjin Ayarı)
         if not eski_pozisyon_mu:
             try:
                 order_client.futures_change_leverage(symbol=coin_upper, leverage=config.KALDIRAC)
@@ -260,7 +292,6 @@ def kontrollu_coin_ekle(coin_adi, eski_pozisyon_mu=False):
 
 def tek_coin_api_verisi_guncelle(s):
     try:
-        # 🟢 PROXY'SİZ (Public Mum Verileri - Kota Dostu)
         url = f"https://fapi.binance.com/fapi/v1/klines?symbol={s.upper()}&interval={config.TIMEFRAME}&limit=250"
         headers = {"User-Agent": "Mozilla/5.0"}
         response = requests.get(url, headers=headers, timeout=5)
@@ -281,7 +312,6 @@ def tek_coin_api_verisi_guncelle(s):
 
 def acik_pozisyonlari_binanceden_guncelle():
     try:
-        # 🔐 PROXY'Lİ (Canlı Cüzdan ve Hesap Kontrolü)
         hesap_bilgisi = order_client.futures_account()
         pozisyonlar = hesap_bilgisi.get("positions", [])
         
@@ -307,7 +337,7 @@ def acik_pozisyonlari_binanceden_guncelle():
     except Exception as e:
         print(f"❌ Cüzdan senkronizasyon hatası: {e}")
 
-# --- 🎛️ TELEGRAM YÖNETİMİ (PROXY'SİZ) ---
+# --- 🎛️ TELEGRAM YÖNETİMİ ---
 def telegram_bildir(mesaj, reply_markup=None):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     try:
@@ -325,14 +355,14 @@ def telegram_canli_rapor_uret():
         acik_pozlar = sum(1 for s in SYMBOLS if aktif_pozisyonlar[s]["aktif"])
         durum_str = "🟢 Özel Liste Taranıyor" if config.BOT_CALISIYOR else "🔴 Sistem Durduruldu"
         rapor = (
-            f"⚙️ <b>Hidden Divergence Botu</b>\n"
+            f"⚙️ <b>Hidden Divergence + ADX Botu</b>\n"
             f"• Sistem: {durum_str}\n"
             f"• Takip Edilen Çiftler: {len(SYMBOLS)}\n"
             f"• Periyot: 30m\n"
             f"• Marjin: {config.ISLEM_MARJIN:.1f} USDT\n"
             f"• Kaldıraç: {config.KALDIRAC}x\n"
-            f"• Risk Limiti: {acik_pozlar}/{config.MAX_ACIK_POZISYON} Poz.\n"
-            f"• Çıkış Stratejisi: Supertrend & 200 EMA Kırılımı\n\n"
+            f"• ADX Filtresi: <b>{config.ADX_THRESHOLD} (Aktif)</b>\n"
+            f"• Risk Limiti: {acik_pozlar}/{config.MAX_ACIK_POZISYON} Poz.\n\n"
             f"⚡ <b>Açık İşlemler:</b>\n"
         )
         if acik_pozlar == 0:
@@ -389,7 +419,6 @@ def hizli_acik_pozisyon_takip_dongusu():
             su_an_ts = time.time()
 
             for symbol in acik_semboller:
-                # 🟢 PROXY'SİZ (Fiyat Güncelleme)
                 if not tek_coin_api_verisi_guncelle(symbol):
                     continue
 
@@ -404,7 +433,7 @@ def hizli_acik_pozisyon_takip_dongusu():
                 anlik_fiyat = v.get("anlik_fiyat", 0.0)
                 if anlik_fiyat <= 0: continue
 
-                _, _, ema200, supertrend, supertrend_dir = strateji_analiz(v, anlik_fiyat)
+                _, _, ema200, supertrend, supertrend_dir, adx_val = strateji_analiz(v, anlik_fiyat)
 
                 kapatma_nedeni = None
 
@@ -420,7 +449,6 @@ def hizli_acik_pozisyon_takip_dongusu():
                     elif anlik_fiyat > ema200:
                         kapatma_nedeni = "200 EMA Üstüne Saptı (Stop Loss)"
 
-                # 🔐 PROXY'Lİ (Pozisyon Kapatma Emri)
                 if kapatma_nedeni:
                     with data_lock:
                         if emir_beklemede_durumu[symbol]: continue
@@ -478,7 +506,6 @@ def pure_api_tarama_dongusu():
                 with data_lock:
                     if aktif_pozisyonlar[symbol]["aktif"]: continue
                 
-                # 🟢 PROXY'SİZ (Mum/Grafik Taraması)
                 if not tek_coin_api_verisi_guncelle(symbol):
                     time.sleep(config.API_DELAY)
                     continue
@@ -510,9 +537,8 @@ def pure_api_tarama_dongusu():
                     time.sleep(config.API_DELAY)
                     continue
                 
-                sinyal, curr_close, guncel_ema, guncel_st, supertrend_dir = strateji_analiz(v, anlik_fiyat)
+                sinyal, curr_close, guncel_ema, guncel_st, supertrend_dir, guncel_adx = strateji_analiz(v, anlik_fiyat)
                 
-                # 🔐 PROXY'Lİ (İşlem Açma Emri)
                 if sinyal != "HOLD":
                     with data_lock:
                         guncel_acik_pozisyon_sayisi = sum(1 for s in SYMBOLS if aktif_pozisyonlar[s]["aktif"])
@@ -532,13 +558,13 @@ def pure_api_tarama_dongusu():
                             with data_lock: 
                                 aktif_pozisyonlar[symbol] = {"aktif": True, "yon": "LONG", "adet": qty, "giris_fiyati": anlik_fiyat, "resmi_pnl": 0.0}
                                 son_islem_zamanlari[symbol] = time.time()
-                            telegram_bildir(f"🚀 <b>{symbol.upper()} LONG Açıldı!</b>\nFiyat: {anlik_fiyat}\n200 EMA: {round(guncel_ema, 4)}\nSupertrend: {round(guncel_st, 4)}\nSinyal: Hidden Bullish Divergence")
+                            telegram_bildir(f"🚀 <b>{symbol.upper()} LONG Açıldı!</b>\nFiyat: {anlik_fiyat}\nADX Gücü: {round(guncel_adx, 2)}\n200 EMA: {round(guncel_ema, 4)}\nSupertrend: {round(guncel_st, 4)}\nSinyal: Hidden Bullish Divergence")
                         elif sinyal == "SELL":
                             order_client.futures_create_order(symbol=symbol.upper(), side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=qty)
                             with data_lock: 
                                 aktif_pozisyonlar[symbol] = {"aktif": True, "yon": "SHORT", "adet": qty, "giris_fiyati": anlik_fiyat, "resmi_pnl": 0.0}
                                 son_islem_zamanlari[symbol] = time.time()
-                            telegram_bildir(f"🚀 <b>{symbol.upper()} SHORT Açıldı!</b>\nFiyat: {anlik_fiyat}\n200 EMA: {round(guncel_ema, 4)}\nSupertrend: {round(guncel_st, 4)}\nSinyal: Hidden Bearish Divergence")
+                            telegram_bildir(f"🚀 <b>{symbol.upper()} SHORT Açıldı!</b>\nFiyat: {anlik_fiyat}\nADX Gücü: {round(guncel_adx, 2)}\n200 EMA: {round(guncel_ema, 4)}\nSupertrend: {round(guncel_st, 4)}\nSinyal: Hidden Bearish Divergence")
                     except Exception as e:
                         print(f"❌ Emir hatası: {e}")
                     finally:
@@ -550,9 +576,8 @@ def pure_api_tarama_dongusu():
 
 # --- 🚀 ANA ÇALIŞTIRICI SİSTEM ---
 if __name__ == "__main__":
-    print("🎬 Proxy Tasarruflu Bot Başlatılıyor...")
+    print("🎬 ADX Filtreli Bot Başlatılıyor...")
     try:
-        # 🔐 PROXY'Lİ (Cüzdan Bilgisi Kontrolü)
         hesap_bilgisi = order_client.futures_account()
         mevcut_pozisyonlar = hesap_bilgisi.get("positions", [])
         for p in mevcut_pozisyonlar:
@@ -572,7 +597,7 @@ if __name__ == "__main__":
 
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
         threading.Thread(target=telegram_gelen_mesaj_dinleyici, daemon=True).start()
-        telegram_bildir(f"🤖 <b>Proxy Optimized Bot Aktif!</b>\nFiyatlar public kaynaktan (Proxy'siz) çekiliyor, sadece emirler Proxy ile atılıyor.")
+        telegram_bildir(f"🤖 <b>ADX Filtreli Bot Aktif!</b>\nPiyasa dalgalı/yatayken (ADX < {config.ADX_THRESHOLD}) işlem açılmayacak.")
 
     threading.Thread(target=hizli_acik_pozisyon_takip_dongusu, daemon=True).start()
     pure_api_tarama_dongusu()
