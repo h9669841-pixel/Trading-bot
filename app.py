@@ -52,7 +52,7 @@ class TrendBotConfig:
         self.SQUEEZE_THRESH = 0.03                       # %3 Sıkışma Eşik Değeri
 
         # 🎯 RİSK YÖNETİMİ
-        self.TAKE_PROFIT_USD = 7.0                       # 💵 Kâr Al Hedefi: Net +7$ PNL
+        self.TAKE_PROFIT_USD = 1.0                       # 💵 Kâr Al Hedefi: Net +7$ PNL
         self.STOP_LOSS_PERCENT = 2.0                     # %2 Zarar Durdur Hedefi (Fiyat Değişimi)
 
         self.API_DELAY = 0.5
