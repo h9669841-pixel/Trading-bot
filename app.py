@@ -43,6 +43,7 @@ class TrendBotConfig:
         self.MAX_ACIK_POZISYON = 7
         self.BOT_CALISIYOR = True
         self.COOLDOWN_SURESI = 0
+        self.TOP_COIN_LIMITI = 50                        # 📊 En yüksek hacimli ilk 50 Coin
 
         # === AKÜLASYON & BOLLINGER STRATEJİ PARAMETRELERİ ===
         self.CHANNEL_LEN = 47                            # Akülasyon Bandı Çubuk Sayısı
@@ -54,30 +55,13 @@ class TrendBotConfig:
         # 🎯 RİSK VE BREAKEVEN YÖNETİMİ
         self.TAKE_PROFIT_USD = 1.0                       # 💵 Kâr Al Hedefi: Net +1.0$ PNL
         self.STOP_LOSS_PERCENT = 2.0                     # %2 Zarar Durdur Hedefi (Fiyat Değişimi)
-        self.BREAKEVEN_TRIGGER_USD = 0.45                # 🛡️ Breakeven Aktif Olma Eşiği (+0.15$ PNL / 15 Cent)
-        self.BREAKEVEN_PROFIT_USD = 0.25                 # 🛡️ Breakeven Stop Kâr Hedefi (+0.05$ PNL / 5 Cent)
+        self.BREAKEVEN_TRIGGER_USD = 0.45                # 🛡️ Breakeven Aktif Olma Eşiği (+0.45$ PNL / 45 Cent)
+        self.BREAKEVEN_PROFIT_USD = 0.25                 # 🛡️ Breakeven Stop Kâr Hedefi (+0.25$ PNL / 25 Cent)
 
         self.API_DELAY = 0.5
         self.HIZLI_TAKIP_PERIYODU = 2.0
 
 config = TrendBotConfig()
-
-# 📌 Takip Edilecek Özel Parite Listesi
-OZEL_COIN_LISTESI = [
-    "btcusdt",
-    "ethusdt",
-    "solusdt",
-    "xrpusdt",
-    "xauusdt",
-    "zecusdt",
-    "avaxusdt",
-    "bnbusdt",
-    "dogeusdt",
-    "adausdt",
-    "linkusdt",
-    "arbusdt",
-    "opusdt"
-]
 
 SYMBOLS = []
 piyasa_verisi = {}
@@ -87,6 +71,33 @@ son_islem_zamanlari = {}
 emir_beklemede_durumu = {}
 son_kapatilan_mum_zamanlari = {}
 data_lock = threading.Lock()
+
+# --- 📊 EN YÜKSEK HACİMLİ 50 COIN GETİR (REST API) ---
+def en_yuksek_hacimli_coinleri_getir(limit=50):
+    try:
+        url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, headers=headers, timeout=10)
+        if response.status_code != 200:
+            print("❌ Hacim verisi alınamadı!")
+            return []
+        
+        tickers = response.json()
+        
+        # Sadece aktif USDT paritelerini filtrele ve 24h quoteVolume (USDT Hacmi) değerine göre sırala
+        usdt_tickers = [
+            t for t in tickers 
+            if t['symbol'].endswith('USDT') and not t['symbol'].startswith('USDC')
+        ]
+        
+        sorted_tickers = sorted(usdt_tickers, key=lambda x: float(x.get('quoteVolume', 0)), reverse=True)
+        top_symbols = [t['symbol'].lower() for t in sorted_tickers[:limit]]
+        
+        print(f"🔥 Binance Futures En Yüksek Hacimli İlk {len(top_symbols)} Coin Tespit Edildi.")
+        return top_symbols
+    except Exception as e:
+        print(f"❌ Hacim sıralaması çekilirken hata: {e}")
+        return []
 
 # --- 🛠️ STRATEJİ ANALİZİ ---
 def strateji_analiz(v, anlik_fiyat):
@@ -151,7 +162,7 @@ def kontrollu_coin_ekle(coin_adi, eski_pozisyon_mu=False):
         r = response.json()
         market_info = next((m for m in r.get("symbols", []) if m["symbol"] == coin_upper), None)
         if not market_info or market_info.get('status') != 'TRADING': return False
-        time.sleep(0.20)
+        time.sleep(0.15)
         
         if not eski_pozisyon_mu:
             try:
@@ -256,11 +267,11 @@ def telegram_canli_rapor_uret():
     acik_pozisyonlari_binanceden_guncelle()
     with data_lock:
         acik_pozlar = sum(1 for s in SYMBOLS if aktif_pozisyonlar[s]["aktif"])
-        durum_str = "🟢 Özel Liste Taranıyor" if config.BOT_CALISIYOR else "🔴 Sistem Durduruldu"
+        durum_str = "🟢 Top 50 Hacim Listesi Taranıyor" if config.BOT_CALISIYOR else "🔴 Sistem Durduruldu"
         rapor = (
             f"⚙️ <b>Akülasyon Kırılımı & Squeeze Botu</b>\n"
             f"• Sistem: {durum_str}\n"
-            f"• Takip Edilen Çiftler: {len(SYMBOLS)}\n"
+            f"• Takip Edilen Çiftler: Top {len(SYMBOLS)} Hacimli Coin\n"
             f"• Periyot: 15m\n"
             f"• Hedef (TP): <b>+{config.TAKE_PROFIT_USD}$ Kâr Al</b>\n"
             f"• Breakeven: <b>+{config.BREAKEVEN_TRIGGER_USD}$ 'da Tetiklenir -> +{config.BREAKEVEN_PROFIT_USD}$ Stop</b>\n"
@@ -302,7 +313,7 @@ def telegram_gelen_mesaj_dinleyici():
         except Exception: time.sleep(5)
 
 # =====================================================================
-# 🚀 AÇIK POZİSYON KONTROL, BREAKEVEN (15 cent -> 5 cent), TP VE SL DÖNGÜSÜ
+# 🚀 AÇIK POZİSYON KONTROL, BREAKEVEN (45 cent -> 25 cent), TP VE SL DÖNGÜSÜ
 # =====================================================================
 def hizli_acik_pozisyon_takip_dongusu():
     while True:
@@ -341,9 +352,9 @@ def hizli_acik_pozisyon_takip_dongusu():
                 giris_fiyati = pos["giris_fiyati"]
                 resmi_pnl = pos.get("resmi_pnl", 0.0)
 
-                # 🛡️ BREAKEVEN TETİKLEME KONTROLÜ (+0.15$ / 15 Cent PNL görünce aktif et)
+                # 🛡️ BREAKEVEN TETİKLEME KONTROLÜ (+0.45$ / 45 Cent PNL görünce aktif et)
                 if resmi_pnl >= config.BREAKEVEN_TRIGGER_USD and not pos.get("be_aktif", False):
-                    # +0.05$ / 5 Cent PNL bırakacak fiyat farkını hesapla
+                    # +0.25$ / 25 Cent PNL bırakacak fiyat farkını hesapla
                     hedef_fiyat_farki = (config.BREAKEVEN_PROFIT_USD / pos["adet"])
                     
                     if pos["yon"] == "LONG":
@@ -358,24 +369,24 @@ def hizli_acik_pozisyon_takip_dongusu():
                     pos["be_aktif"] = True
                     pos["be_stop_fiyati"] = be_stop_price
 
-                    print(f"🛡️ {symbol.upper()} için Breakeven Aktif! (+0.15$ PNL görüldü. Stop: +0.05$ PNL / Fiyat: {be_stop_price})")
+                    print(f"🛡️ {symbol.upper()} için Breakeven Aktif! (+0.45$ PNL görüldü. Stop: +0.25$ PNL / Fiyat: {be_stop_price})")
                     telegram_bildir(
                         f"🛡️ <b>{symbol.upper()} Breakeven Aktif!</b>\n"
                         f"• Anlık PNL: +{round(resmi_pnl, 3)}$\n"
-                        f"• Stop Seviyesi: +0.05$ Kâr ({round(be_stop_price, 4)}) çekildi."
+                        f"• Stop Seviyesi: +0.25$ Kâr ({round(be_stop_price, 4)}) çekildi."
                     )
 
                 # 🎯 1. DOLAR BAZLI KÂR AL (TP) KONTROLÜ (Anlık PNL >= 1.0$)
                 if resmi_pnl >= config.TAKE_PROFIT_USD:
                     kapatma_nedeni = f"Net Kâr +{config.TAKE_PROFIT_USD}$ PNL Hedefine Ulaşıldı ({round(resmi_pnl, 2)}$)"
 
-                # 🛡️ 2. BREAKEVEN STOP KONTROLÜ (Aktifse ve fiyat +0.05$ kâr seviyesine gerilerse)
+                # 🛡️ 2. BREAKEVEN STOP KONTROLÜ (Aktifse ve fiyat +0.25$ kâr seviyesine gerilerse)
                 elif pos.get("be_aktif", False):
                     be_stop_price = pos.get("be_stop_fiyati", 0.0)
                     if pos["yon"] == "LONG" and anlik_fiyat <= be_stop_price:
-                        kapatma_nedeni = f"Breakeven (Maliyet +0.05$ Kâr Stopu) Tetiklendi"
+                        kapatma_nedeni = f"Breakeven (Maliyet +0.25$ Kâr Stopu) Tetiklendi"
                     elif pos["yon"] == "SHORT" and anlik_fiyat >= be_stop_price:
-                        kapatma_nedeni = f"Breakeven (Maliyet +0.05$ Kâr Stopu) Tetiklendi"
+                        kapatma_nedeni = f"Breakeven (Maliyet +0.25$ Kâr Stopu) Tetiklendi"
 
                 # 🎯 3. YÜZDESEL ZARAR DURDUR (SL) KONTROLÜ (Breakeven henüz aktif değilse çalışır)
                 if not kapatma_nedeni and not pos.get("be_aktif", False):
@@ -568,18 +579,22 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"❌ İlk pozisyon tarama hatası: {e}")
 
+    # 📊 24 saatlik hacme göre ilk 50 coin çekiliyor
+    top_50_coinler = en_yuksek_hacimli_coinleri_getir(limit=config.TOP_COIN_LIMITI)
+    
     eklenen_sayac = 0
-    for c in OZEL_COIN_LISTESI:
+    for c in top_50_coinler:
         if kontrollu_coin_ekle(c, eski_pozisyon_mu=False): 
             eklenen_sayac += 1
-    print(f"✅ Belirlediğiniz {eklenen_sayac} adet özel parite tarama listesine eklendi.")
+    print(f"✅ En yüksek hacimli {eklenen_sayac} adet parite tarama listesine eklendi.")
 
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
         threading.Thread(target=telegram_gelen_mesaj_dinleyici, daemon=True).start()
         telegram_bildir(
             f"🤖 <b>Akülasyon Kırılımı & Squeeze Botu Aktif!</b>\n"
+            f"• Tarama: Top {eklenen_sayac} Hacimli Coin\n"
             f"• Parametreler: 47 Çubuk Kanal | 1.6x Hacim\n"
-            f"• Risk Mantığı: +1.0$ TP | Breakeven (15¢ -> 5¢) | %2 SL"
+            f"• Risk Mantığı: +1.0$ TP | Breakeven (45¢ -> 25¢) | %2 SL"
         )
 
     threading.Thread(target=hizli_acik_pozisyon_takip_dongusu, daemon=True).start()
