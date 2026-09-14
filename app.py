@@ -55,8 +55,8 @@ class TrendBotConfig:
         # 🎯 RİSK VE BREAKEVEN YÖNETİMİ
         self.TAKE_PROFIT_USD = 1.0                       # 💵 Kâr Al Hedefi: Net +1.0$ PNL
         self.STOP_LOSS_PERCENT = 2.0                     # %2 Zarar Durdur Hedefi (Fiyat Değişimi)
-        self.BREAKEVEN_TRIGGER_USD = 0.45                # 🛡️ Breakeven Aktif Olma Eşiği (+0.45$ PNL / 45 Cent)
-        self.BREAKEVEN_PROFIT_USD = 0.25                 # 🛡️ Breakeven Stop Kâr Hedefi (+0.25$ PNL / 25 Cent)
+        self.BREAKEVEN_TRIGGER_USD = 0.45                # 🛡️ Breakeven Aktif Olma Eşiği (+0.45$ PNL)
+        self.BREAKEVEN_PROFIT_USD = 0.25                 # 🛡️ Breakeven Stop Kâr Hedefi (+0.25$ PNL)
 
         self.API_DELAY = 0.5
         self.HIZLI_TAKIP_PERIYODU = 2.0
@@ -215,15 +215,24 @@ def tek_coin_api_verisi_guncelle(s):
     except Exception:
         return False
 
+# 🔄 BİNANCE HESAP VE CÜZDAN SENKRONİZASYONU (KAPANAN POZLARI TEMİZLER)
 def acik_pozisyonlari_binanceden_guncelle():
     try:
         hesap_bilgisi = order_client.futures_account()
         pozisyonlar = hesap_bilgisi.get("positions", [])
         
+        gelen_acik_semboller = set()
+        for p in pozisyonlar:
+            amt = float(p.get("positionAmt", 0))
+            if amt != 0:
+                sym = p.get("symbol", "").lower()
+                gelen_acik_semboller.add(sym)
+
         with data_lock:
+            # 1. Binance'te pozisyonu artık 0 görünen coinlerin durumunu pasife çek
             for s in SYMBOLS:
                 if not emir_beklemede_durumu.get(s, False):
-                    if not aktif_pozisyonlar[s]["aktif"]:
+                    if s not in gelen_acik_semboller:
                         aktif_pozisyonlar[s] = {
                             "aktif": False, 
                             "yon": None, 
@@ -233,7 +242,8 @@ def acik_pozisyonlari_binanceden_guncelle():
                             "be_aktif": False,
                             "be_stop_fiyati": 0.0
                         }
-            
+
+            # 2. Binance'te miktarı 0 olmayan aktif pozisyonları güncelle
             for p in pozisyonlar:
                 sym = p.get("symbol", "").lower()
                 if sym in aktif_pozisyonlar:
@@ -352,9 +362,8 @@ def hizli_acik_pozisyon_takip_dongusu():
                 giris_fiyati = pos["giris_fiyati"]
                 resmi_pnl = pos.get("resmi_pnl", 0.0)
 
-                # 🛡️ BREAKEVEN TETİKLEME KONTROLÜ (+0.45$ / 45 Cent PNL görünce aktif et)
+                # 🛡️ BREAKEVEN TETİKLEME KONTROLÜ (+0.45$ PNL görünce aktif et)
                 if resmi_pnl >= config.BREAKEVEN_TRIGGER_USD and not pos.get("be_aktif", False):
-                    # +0.25$ / 25 Cent PNL bırakacak fiyat farkını hesapla
                     hedef_fiyat_farki = (config.BREAKEVEN_PROFIT_USD / pos["adet"])
                     
                     if pos["yon"] == "LONG":
