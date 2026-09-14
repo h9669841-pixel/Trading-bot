@@ -37,7 +37,7 @@ class TrendBotConfig:
         self.ISLEM_MARJIN = 3.0                          # Min Notional filter için 3 USDT yapıldı
         self.KALDIRAC = 20                              # 50x yerine 20x risk/komisyon dengesi
         
-        self.MAX_ACIK_POZISYON = 7
+        self.MAX_ACIK_POZISYON = 5
         self.BOT_CALISIYOR = True
         self.COOLDOWN_SURESI = 0
         self.TOP_COIN_LIMITI = 50                        # En yüksek hacimli ilk 50 Coin
