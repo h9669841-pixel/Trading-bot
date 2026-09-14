@@ -36,7 +36,7 @@ else:
 
 class TrendBotConfig:
     def __init__(self):
-        self.TIMEFRAME = Client.KLINE_INTERVAL_15MINUTE  # 30m
+        self.TIMEFRAME = Client.KLINE_INTERVAL_15MINUTE  # 15m
         self.ISLEM_MARJIN = 2.0                          # 2 USDT
         self.KALDIRAC = 50                              # 50x
         
@@ -51,9 +51,11 @@ class TrendBotConfig:
         self.BB_MULT = 2.0                               # Bollinger Çarpanı
         self.SQUEEZE_THRESH = 0.03                       # %3 Sıkışma Eşik Değeri
 
-        # 🎯 RİSK YÖNETİMİ
-        self.TAKE_PROFIT_USD = 1.0                       # 💵 Kâr Al Hedefi: Net +7$ PNL
+        # 🎯 RİSK VE BREAKEVEN YÖNETİMİ
+        self.TAKE_PROFIT_USD = 1.0                       # 💵 Kâr Al Hedefi: Net +1.0$ PNL
         self.STOP_LOSS_PERCENT = 2.0                     # %2 Zarar Durdur Hedefi (Fiyat Değişimi)
+        self.BREAKEVEN_TRIGGER_USD = 0.15                # 🛡️ Breakeven Aktif Olma Eşiği (+0.15$ PNL / 15 Cent)
+        self.BREAKEVEN_PROFIT_USD = 0.05                 # 🛡️ Breakeven Stop Kâr Hedefi (+0.05$ PNL / 5 Cent)
 
         self.API_DELAY = 0.5
         self.HIZLI_TAKIP_PERIYODU = 2.0
@@ -86,7 +88,7 @@ emir_beklemede_durumu = {}
 son_kapatilan_mum_zamanlari = {}
 data_lock = threading.Lock()
 
-# --- 🛠️ YENİ STRATEJİ ANALİZİ ---
+# --- 🛠️ STRATEJİ ANALİZİ ---
 def strateji_analiz(v, anlik_fiyat):
     candles = list(v["klines"])
     if not candles or len(candles) < config.CHANNEL_LEN + 10:
@@ -102,18 +104,14 @@ def strateji_analiz(v, anlik_fiyat):
     df['open'] = df['open'].astype(float)
     df['volume'] = df['volume'].astype(float)
     
-    # Anlık fiyatı son muma güncelle
     df.iloc[-1, df.columns.get_loc('close')] = anlik_fiyat
 
-    # 1. Hacim Ortalaması ve Yüksek Hacim Kontrolü
     vol_sma = df['volume'].rolling(window=20).mean()
     is_high_volume = df['volume'].iloc[-1] >= (vol_sma.iloc[-1] * config.BREAKOUT_VOL_MULT)
 
-    # 2. Akülasyon Bandı Hesaplaması
     range_high = df['high'].iloc[:-1].tail(config.CHANNEL_LEN).max()
     range_low  = df['low'].iloc[:-1].tail(config.CHANNEL_LEN).min()
 
-    # 3. Bollinger Bantları ve Sıkışma (Squeeze) Hesaplaması
     bb_middle = df['close'].rolling(window=config.BB_LEN).mean()
     bb_std = df['close'].rolling(window=config.BB_LEN).std(ddof=0)
     bb_upper = bb_middle + (bb_std * config.BB_MULT)
@@ -126,7 +124,6 @@ def strateji_analiz(v, anlik_fiyat):
     bb_width = (curr_upper - curr_lower) / curr_middle if curr_middle != 0 else 0
     is_squeezed = bb_width <= config.SQUEEZE_THRESH
 
-    # 4. Kırılım Koşulları
     prev_close = df['close'].iloc[-2]
     curr_close = df['close'].iloc[-1]
 
@@ -171,7 +168,15 @@ def kontrollu_coin_ekle(coin_adi, eski_pozisyon_mu=False):
             if coin_lower not in SYMBOLS:
                 SYMBOLS.append(coin_lower)
             piyasa_verisi[coin_lower] = {"anlik_fiyat": 0.0, "klines": [], "guncel_mum_zamani": 0}
-            aktif_pozisyonlar[coin_lower] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0, "resmi_pnl": 0.0}
+            aktif_pozisyonlar[coin_lower] = {
+                "aktif": False, 
+                "yon": None, 
+                "adet": 0.0, 
+                "giris_fiyati": 0.0, 
+                "resmi_pnl": 0.0,
+                "be_aktif": False,
+                "be_stop_fiyati": 0.0
+            }
             son_islem_zamanlari[coin_lower] = 0.0
             emir_beklemede_durumu[coin_lower] = False
             son_kapatilan_mum_zamanlari[coin_lower] = 0
@@ -207,7 +212,16 @@ def acik_pozisyonlari_binanceden_guncelle():
         with data_lock:
             for s in SYMBOLS:
                 if not emir_beklemede_durumu.get(s, False):
-                    aktif_pozisyonlar[s] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0, "resmi_pnl": 0.0}
+                    if not aktif_pozisyonlar[s]["aktif"]:
+                        aktif_pozisyonlar[s] = {
+                            "aktif": False, 
+                            "yon": None, 
+                            "adet": 0.0, 
+                            "giris_fiyati": 0.0, 
+                            "resmi_pnl": 0.0,
+                            "be_aktif": False,
+                            "be_stop_fiyati": 0.0
+                        }
             
             for p in pozisyonlar:
                 sym = p.get("symbol", "").lower()
@@ -248,9 +262,8 @@ def telegram_canli_rapor_uret():
             f"• Sistem: {durum_str}\n"
             f"• Takip Edilen Çiftler: {len(SYMBOLS)}\n"
             f"• Periyot: 15m\n"
-            f"• Kanal Boyu: {config.CHANNEL_LEN}\n"
-            f"• Hacim Çarpanı: {config.BREAKOUT_VOL_MULT}x\n"
             f"• Hedef (TP): <b>+{config.TAKE_PROFIT_USD}$ Kâr Al</b>\n"
+            f"• Breakeven: <b>+{config.BREAKEVEN_TRIGGER_USD}$ 'da Tetiklenir -> +{config.BREAKEVEN_PROFIT_USD}$ Stop</b>\n"
             f"• Stop Loss (SL): <b>%{config.STOP_LOSS_PERCENT} Zarar Durdur</b>\n"
             f"• Risk Limiti: {acik_pozlar}/{config.MAX_ACIK_POZISYON} Poz.\n\n"
             f"⚡ <b>Açık İşlemler:</b>\n"
@@ -261,7 +274,8 @@ def telegram_canli_rapor_uret():
             for s in SYMBOLS:
                 if aktif_pozisyonlar[s]["aktif"]:
                     p = aktif_pozisyonlar[s]
-                    rapor += f"• {s.upper()} | {p['yon']} | PNL: <b>{round(p['resmi_pnl'], 4)}$</b>\n"
+                    be_str = " (🛡️ BE Aktif)" if p.get("be_aktif") else ""
+                    rapor += f"• {s.upper()} | {p['yon']} | PNL: <b>{round(p['resmi_pnl'], 4)}$</b>{be_str}\n"
         return rapor
 
 def telegram_gelen_mesaj_dinleyici():
@@ -288,7 +302,7 @@ def telegram_gelen_mesaj_dinleyici():
         except Exception: time.sleep(5)
 
 # =====================================================================
-# 🚀 AÇIK POZİSYON KONTROL, NET +7$ PNL İLE TP VE %2 SL TAKİP DÖNGÜSÜ
+# 🚀 AÇIK POZİSYON KONTROL, BREAKEVEN (15 cent -> 5 cent), TP VE SL DÖNGÜSÜ
 # =====================================================================
 def hizli_acik_pozisyon_takip_dongusu():
     while True:
@@ -327,20 +341,53 @@ def hizli_acik_pozisyon_takip_dongusu():
                 giris_fiyati = pos["giris_fiyati"]
                 resmi_pnl = pos.get("resmi_pnl", 0.0)
 
-                # 🎯 1. DOLAR BAZLI KÂR AL (TP) KONTROLÜ (Anlık PNL >= 7$)
+                # 🛡️ BREAKEVEN TETİKLEME KONTROLÜ (+0.15$ / 15 Cent PNL görünce aktif et)
+                if resmi_pnl >= config.BREAKEVEN_TRIGGER_USD and not pos.get("be_aktif", False):
+                    # +0.05$ / 5 Cent PNL bırakacak fiyat farkını hesapla
+                    hedef_fiyat_farki = (config.BREAKEVEN_PROFIT_USD / pos["adet"])
+                    
+                    if pos["yon"] == "LONG":
+                        be_stop_price = giris_fiyati + hedef_fiyat_farki
+                    else: # SHORT
+                        be_stop_price = giris_fiyati - hedef_fiyat_farki
+
+                    with data_lock:
+                        aktif_pozisyonlar[symbol]["be_aktif"] = True
+                        aktif_pozisyonlar[symbol]["be_stop_fiyati"] = be_stop_price
+
+                    pos["be_aktif"] = True
+                    pos["be_stop_fiyati"] = be_stop_price
+
+                    print(f"🛡️ {symbol.upper()} için Breakeven Aktif! (+0.15$ PNL görüldü. Stop: +0.05$ PNL / Fiyat: {be_stop_price})")
+                    telegram_bildir(
+                        f"🛡️ <b>{symbol.upper()} Breakeven Aktif!</b>\n"
+                        f"• Anlık PNL: +{round(resmi_pnl, 3)}$\n"
+                        f"• Stop Seviyesi: +0.05$ Kâr ({round(be_stop_price, 4)}) çekildi."
+                    )
+
+                # 🎯 1. DOLAR BAZLI KÂR AL (TP) KONTROLÜ (Anlık PNL >= 1.0$)
                 if resmi_pnl >= config.TAKE_PROFIT_USD:
                     kapatma_nedeni = f"Net Kâr +{config.TAKE_PROFIT_USD}$ PNL Hedefine Ulaşıldı ({round(resmi_pnl, 2)}$)"
 
-                # 🎯 2. YÜZDESEL ZARAR DURDUR (SL) KONTROLÜ
-                elif pos["yon"] == "LONG":
-                    fiyat_degisim_yuzdesi = ((anlik_fiyat - giris_fiyati) / giris_fiyati) * 100
-                    if fiyat_degisim_yuzdesi <= -config.STOP_LOSS_PERCENT:
-                        kapatma_nedeni = f"%{config.STOP_LOSS_PERCENT} Zarar Durdur (SL) Tetiklendi"
+                # 🛡️ 2. BREAKEVEN STOP KONTROLÜ (Aktifse ve fiyat +0.05$ kâr seviyesine gerilerse)
+                elif pos.get("be_aktif", False):
+                    be_stop_price = pos.get("be_stop_fiyati", 0.0)
+                    if pos["yon"] == "LONG" and anlik_fiyat <= be_stop_price:
+                        kapatma_nedeni = f"Breakeven (Maliyet +0.05$ Kâr Stopu) Tetiklendi"
+                    elif pos["yon"] == "SHORT" and anlik_fiyat >= be_stop_price:
+                        kapatma_nedeni = f"Breakeven (Maliyet +0.05$ Kâr Stopu) Tetiklendi"
 
-                elif pos["yon"] == "SHORT":
-                    fiyat_degisim_yuzdesi = ((giris_fiyati - anlik_fiyat) / giris_fiyati) * 100
-                    if fiyat_degisim_yuzdesi <= -config.STOP_LOSS_PERCENT:
-                        kapatma_nedeni = f"%{config.STOP_LOSS_PERCENT} Zarar Durdur (SL) Tetiklendi"
+                # 🎯 3. YÜZDESEL ZARAR DURDUR (SL) KONTROLÜ (Breakeven henüz aktif değilse çalışır)
+                if not kapatma_nedeni and not pos.get("be_aktif", False):
+                    if pos["yon"] == "LONG":
+                        fiyat_degisim_yuzdesi = ((anlik_fiyat - giris_fiyati) / giris_fiyati) * 100
+                        if fiyat_degisim_yuzdesi <= -config.STOP_LOSS_PERCENT:
+                            kapatma_nedeni = f"%{config.STOP_LOSS_PERCENT} Zarar Durdur (SL) Tetiklendi"
+
+                    elif pos["yon"] == "SHORT":
+                        fiyat_degisim_yuzdesi = ((giris_fiyati - anlik_fiyat) / giris_fiyati) * 100
+                        if fiyat_degisim_yuzdesi <= -config.STOP_LOSS_PERCENT:
+                            kapatma_nedeni = f"%{config.STOP_LOSS_PERCENT} Zarar Durdur (SL) Tetiklendi"
 
                 if kapatma_nedeni:
                     with data_lock:
@@ -365,13 +412,21 @@ def hizli_acik_pozisyon_takip_dongusu():
                             if "guncel_mum_zamani" in piyasa_verisi[symbol]:
                                 son_kapatilan_mum_zamanlari[symbol] = piyasa_verisi[symbol]["guncel_mum_zamani"]
                             
-                            aktif_pozisyonlar[symbol] = {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0, "resmi_pnl": 0.0}
+                            aktif_pozisyonlar[symbol] = {
+                                "aktif": False, 
+                                "yon": None, 
+                                "adet": 0.0, 
+                                "giris_fiyati": 0.0, 
+                                "resmi_pnl": 0.0,
+                                "be_aktif": False,
+                                "be_stop_fiyati": 0.0
+                            }
                         
                         telegram_bildir(
                             f"🔴 <b>{symbol.upper()} {pos['yon']} Kapatıldı!</b>\n"
                             f"• Neden: <b>{kapatma_nedeni}</b>\n"
                             f"• Son PNL: {round(pos['resmi_pnl'], 3)}$\n"
-                            f"• Fiyat: {anlik_fiyat}"
+                            f"• Kapanış Fiyatı: {anlik_fiyat}"
                         )
                     except Exception as e:
                         print(f"❌ Kapatma emri hatası ({symbol}): {e}")
@@ -452,7 +507,15 @@ def pure_api_tarama_dongusu():
                         if sinyal == "BUY":
                             order_client.futures_create_order(symbol=symbol.upper(), side=SIDE_BUY, type=ORDER_TYPE_MARKET, quantity=qty)
                             with data_lock: 
-                                aktif_pozisyonlar[symbol] = {"aktif": True, "yon": "LONG", "adet": qty, "giris_fiyati": anlik_fiyat, "resmi_pnl": 0.0}
+                                aktif_pozisyonlar[symbol] = {
+                                    "aktif": True, 
+                                    "yon": "LONG", 
+                                    "adet": qty, 
+                                    "giris_fiyati": anlik_fiyat, 
+                                    "resmi_pnl": 0.0,
+                                    "be_aktif": False,
+                                    "be_stop_fiyati": 0.0
+                                }
                                 son_islem_zamanlari[symbol] = time.time()
                             telegram_bildir(
                                 f"🚀 <b>{symbol.upper()} LONG Açıldı!</b>\n"
@@ -464,7 +527,15 @@ def pure_api_tarama_dongusu():
                         elif sinyal == "SELL":
                             order_client.futures_create_order(symbol=symbol.upper(), side=SIDE_SELL, type=ORDER_TYPE_MARKET, quantity=qty)
                             with data_lock: 
-                                aktif_pozisyonlar[symbol] = {"aktif": True, "yon": "SHORT", "adet": qty, "giris_fiyati": anlik_fiyat, "resmi_pnl": 0.0}
+                                aktif_pozisyonlar[symbol] = {
+                                    "aktif": True, 
+                                    "yon": "SHORT", 
+                                    "adet": qty, 
+                                    "giris_fiyati": anlik_fiyat, 
+                                    "resmi_pnl": 0.0,
+                                    "be_aktif": False,
+                                    "be_stop_fiyati": 0.0
+                                }
                                 son_islem_zamanlari[symbol] = time.time()
                             telegram_bildir(
                                 f"🚀 <b>{symbol.upper()} SHORT Açıldı!</b>\n"
@@ -508,7 +579,7 @@ if __name__ == "__main__":
         telegram_bildir(
             f"🤖 <b>Akülasyon Kırılımı & Squeeze Botu Aktif!</b>\n"
             f"• Parametreler: 47 Çubuk Kanal | 1.6x Hacim\n"
-            f"• Risk Mantığı: +7$ PNL / %2 SL"
+            f"• Risk Mantığı: +1.0$ TP | Breakeven (15¢ -> 5¢) | %2 SL"
         )
 
     threading.Thread(target=hizli_acik_pozisyon_takip_dongusu, daemon=True).start()
