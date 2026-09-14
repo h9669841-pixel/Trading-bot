@@ -54,8 +54,8 @@ class TrendBotConfig:
         # 🎯 RİSK VE BREAKEVEN YÖNETİMİ
         self.TAKE_PROFIT_USD = 1.0                       # 💵 Kâr Al Hedefi: Net +1.0$ PNL
         self.STOP_LOSS_PERCENT = 2.0                     # %2 Zarar Durdur Hedefi (Fiyat Değişimi)
-        self.BREAKEVEN_TRIGGER_USD = 0.15                # 🛡️ Breakeven Aktif Olma Eşiği (+0.15$ PNL / 15 Cent)
-        self.BREAKEVEN_PROFIT_USD = 0.05                 # 🛡️ Breakeven Stop Kâr Hedefi (+0.05$ PNL / 5 Cent)
+        self.BREAKEVEN_TRIGGER_USD = 0.45                # 🛡️ Breakeven Aktif Olma Eşiği (+0.15$ PNL / 15 Cent)
+        self.BREAKEVEN_PROFIT_USD = 0.25                 # 🛡️ Breakeven Stop Kâr Hedefi (+0.05$ PNL / 5 Cent)
 
         self.API_DELAY = 0.5
         self.HIZLI_TAKIP_PERIYODU = 2.0
