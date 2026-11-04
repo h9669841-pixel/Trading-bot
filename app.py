@@ -21,7 +21,7 @@ class XRPBotConfig:
     def __init__(self):
         self.TIMEFRAME = "1h"                           # 1 Saatlik grafik periyodu (Optimize edildiği periyot)
         self.ISLEM_MARJIN = 100.0                        # Sanal işlem başına ayrılacak USDT (Margin)
-        self.KALDIRAC = 10                              # Kaldıraç oranı
+        self.KALDIRAC = 5                              # Kaldıraç oranı
         
         self.BOT_CALISIYOR = True
         self.TARGET_SYMBOL = "xrpusdt"                   # Sadece XRP odaklı takip
