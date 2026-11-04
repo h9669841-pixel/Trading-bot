@@ -21,7 +21,7 @@ class XRPBotConfig:
     def __init__(self):
         self.TIMEFRAME = "1h"                           # 1 Saatlik grafik periyodu
         self.ISLEM_MARJIN = 100.0                        # Sanal işlem başına ayrılacak USDT (Margin)
-        self.KALDIRAC = 9                              # Kaldıraç oranı
+        self.KALDIRAC = 10                              # Kaldıraç oranı
         
         self.BOT_CALISIYOR = True
         self.TARGET_SYMBOL = "xrpusdt"                   # Sadece XRP odaklı takip
@@ -60,37 +60,43 @@ aktif_pozisyon = {
 FUTURES_HASSASIYETI = 2
 data_lock = threading.Lock()
 
-# --- 📊 XRP GEÇMİŞ VERİLERİNİ ÇEKME (Fallback Korumalı) ---
+# --- 📊 XRP GEÇMİŞ VERİLERİNİ ÇEKME (Genişletilmiş Fallback Korumalı) ---
 def xrp_verilerini_hazirla():
     global FUTURES_HASSASIYETI
     symbol_upper = config.TARGET_SYMBOL.upper()
     
+    # Binance ve alternatif genel veri sağlayıcı uç noktaları
     api_endpoints = [
-        "https://fapi.binance.com",
-        "https://fstream.binance.com",
-        "https://api.binance.com"
+        "https://api.binance.com/api/v3/klines",
+        "https://data-api.binance.vision/api/v3/klines",
+        "https://fapi.binance.com/fapi/v1/klines",
+        "https://api1.binance.com/api/v3/klines",
+        "https://api3.binance.com/api/v3/klines"
     ]
     
     k_res = None
-    for base_url in api_endpoints:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
+    for klines_url in api_endpoints:
         try:
-            endpoint = f"{base_url}/fapi/v1/klines" if "fapi" in base_url or "fstream" in base_url else f"{base_url}/api/v3/klines"
-            klines_url = f"{endpoint}?symbol={symbol_upper}&interval={config.TIMEFRAME}&limit=250"
+            full_url = f"{klines_url}?symbol={symbol_upper}&interval={config.TIMEFRAME}&limit=250"
+            print(f"🔄 Bağlantı deneniyor: {klines_url}")
             
-            headers = {"User-Agent": "Mozilla/5.0"}
-            response = requests.get(klines_url, headers=headers, timeout=10)
+            response = requests.get(full_url, headers=headers, timeout=10)
             
             if response.status_code == 200:
                 k_res = response.json()
                 if k_res and len(k_res) > 0:
-                    print(f"🔥 Başarılı Bağlantı Noktası: {base_url}")
+                    print(f"🔥 Başarılı Veri Kaynağı: {klines_url}")
                     break
         except Exception as e:
-            print(f"⚠️ Endpoint deneme hatası ({base_url}): {e}")
+            print(f"⚠️ Bağlantı hatası ({klines_url}): {e}")
             continue
 
     if not k_res:
-        print("❌ Hiçbir Binance API uç noktasına ulaşılamadı!")
+        print("❌ Tüm Binance uç noktaları engellendi veya zaman aşımına uğradı!")
         return False
 
     try:
@@ -98,7 +104,7 @@ def xrp_verilerini_hazirla():
             piyasa_verisi["klines"] = k_res
             piyasa_verisi["anlik_fiyat"] = float(k_res[-1][4]) if k_res else 0.0
             
-        print(f"🔥 XRP Verileri Yüklendi. Anlık Fiyat: {piyasa_verisi['anlik_fiyat']}")
+        print(f"🔥 XRP Verileri Başarıyla Yüklendi. Anlık Fiyat: {piyasa_verisi['anlik_fiyat']}")
         return True
     except Exception as e:
         print(f"❌ XRP veri işleme hatası: {e}")
@@ -179,7 +185,8 @@ def websocket_baslat():
         websocket_baslat()
 
     def run():
-        stream_url = f"wss://fstream.binance.com/stream?streams={config.TARGET_SYMBOL}@kline_{config.TIMEFRAME}"
+        # WebSocket için de genel vision/stream uç noktası kullanılır
+        stream_url = f"wss://stream.binance.com:9443/ws/{config.TARGET_SYMBOL}@kline_{config.TIMEFRAME}"
         ws = websocket.WebSocketApp(stream_url, on_message=on_message, on_error=on_error, on_close=on_close)
         ws.run_forever()
 
@@ -381,7 +388,6 @@ if __name__ == "__main__":
     print("🎬 XRP Optimize Edilmiş Paper Trading Botu Başlatılıyor...")
     
     if xrp_verilerini_hazirla():
-        # 🟢 Bot ilk açıldığında Telegram'a ve konsola başlangıç mesajı gönderir
         konsol_ve_telegram_bildir(
             "🚀 <b>XRP Sanal Al-Sat Botu Başlatıldı!</b>\n"
             f"• Parite: XRPUSDT (1h)\n"
@@ -393,8 +399,6 @@ if __name__ == "__main__":
         if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
             threading.Thread(target=telegram_gelen_mesaj_dinleyici, daemon=True).start()
 
-        # ⏱️ Her 5 dakikada bir SADECE Railway konsoluna rapor yazdıran iş parçacığı
         threading.Thread(target=periyodik_konsol_rapor_dongusu, daemon=True).start()
-
         threading.Thread(target=hizli_pozisyon_takip_dongusu, daemon=True).start()
         xrp_tarama_dongusu()
