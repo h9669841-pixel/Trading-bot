@@ -3,6 +3,7 @@ import json
 import time
 import requests
 import threading
+import websocket
 import math
 import pandas as pd
 from datetime import datetime
@@ -38,7 +39,7 @@ class XRPBotConfig:
         self.STOP_LOSS_PERCENT = 1.5                     # %1.5 Zarar Durdur
         self.TAKE_PROFIT_PERCENT = 5.0                   # %5.0 Kâr Al
 
-        self.POLLING_PERIYODU = 10.0                     # Her 10 saniyede bir fiyatı yenile (Polling)
+        self.POLLING_PERIYODU = 10.0                     # Her 10 saniyede bir fiyatı yenile
 
 config = XRPBotConfig()
 
@@ -59,7 +60,7 @@ aktif_pozisyon = {
 FUTURES_HASSASIYETI = 2
 data_lock = threading.Lock()
 
-# --- 📊 XRP GEÇMİŞ VE ANLIK VERİLERİNİ ÇEKME (Polling Tabanlı) ---
+# --- 📊 XRP GEÇMİŞ VE ANLIK VERİLERİNİ ÇEKME ---
 def veri_guncelle_ve_klines_al():
     global FUTURES_HASSASIYETI
     symbol_upper = config.TARGET_SYMBOL.upper()
@@ -73,14 +74,13 @@ def veri_guncelle_ve_klines_al():
     
     k_res = None
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
 
     for klines_url in api_endpoints:
         try:
             full_url = f"{klines_url}?symbol={symbol_upper}&interval={config.TIMEFRAME}&limit=250"
             response = requests.get(full_url, headers=headers, timeout=10)
-            
             if response.status_code == 200:
                 k_res = response.json()
                 if k_res and len(k_res) > 0:
@@ -99,7 +99,6 @@ def veri_guncelle_ve_klines_al():
     except Exception:
         return False
 
-# --- 🔄 POLLING DÖNGÜSÜ (WebSocket Yerine Düzenli Sorgu) ---
 def polling_veri_akis_dongusu():
     print("🔄 Polling Tabanlı Veri Akış Döngüsü Başlatıldı.")
     while True:
@@ -147,11 +146,13 @@ def strateji_analiz(v):
         return "SELL"
     return "HOLD"
 
-# --- 🎛️ BİLDİRİM VE KONSOL FONKSİYONLARI ---
-def telegram_bildir(mesaj):
+# --- 🎛️ BİLDİRİM VE İNLİNE BUTON FONKSİYONLARI ---
+def telegram_bildir(mesaj, reply_markup=None):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     try:
         data = {"chat_id": TELEGRAM_CHAT_ID, "text": mesaj, "parse_mode": "HTML"}
+        if reply_markup:
+            data["reply_markup"] = reply_markup
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json=data, timeout=5)
     except Exception as e:
         print(f"❌ Telegram gönderim hatası: {e}")
@@ -161,8 +162,20 @@ def konsol_ve_telegram_bildir(mesaj):
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {temiz_mesaj}")
     telegram_bildir(mesaj)
 
-def ana_menu_olustur():
-    return {"keyboard": [[{"text": "📊 Bot Durumu"}, {"text": "💰 Cüzdan Bakiyesi"}], [{"text": "▶️ Botu Başlat"}, {"text": "⏸️ Botu Durdur"}]], "resize_keyboard": True}
+def inline_menu_olustur():
+    """Mesaj altında görünen tıklanabilir Inline Butonlar"""
+    return {
+        "inline_keyboard": [
+            [
+                {"text": "📊 Bot Durumu", "callback_data": "cmd_durum"},
+                {"text": "💰 Cüzdan Bakiyesi", "callback_data": "cmd_bakiye"}
+            ],
+            [
+                {"text": "▶️ Botu Başlat", "callback_data": "cmd_baslat"},
+                {"text": "⏸️ Botu Durdur", "callback_data": "cmd_durdur"}
+            ]
+        ]
+    }
 
 def durum_raporu_metni():
     with data_lock:
@@ -185,6 +198,14 @@ def durum_raporu_metni():
             rapor += f"• XRPUSDT | {p['yon']} | Fiyat: {p['giris_fiyati']} | PNL: <b>{round(p['resmi_pnl'], 3)}$</b>\n"
         return rapor
 
+def callback_yanitla(callback_query_id, text=""):
+    """Inline butona tıklandığında yüklenmeyi durdurur ve bildirim gösterir"""
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery"
+        requests.post(url, json={"callback_query_id": callback_query_id, "text": text}, timeout=5)
+    except Exception:
+        pass
+
 def telegram_gelen_mesaj_dinleyici():
     offset = None
     while True:
@@ -195,29 +216,44 @@ def telegram_gelen_mesaj_dinleyici():
             if response.get("ok") and response.get("result"):
                 for update in response["result"]:
                     offset = update["update_id"] + 1
+                    
+                    # 1. Normal Mesajlar (/start vb.)
                     message = update.get("message")
-                    if not message or str(message.get("chat", {}).get("id")) != str(TELEGRAM_CHAT_ID): continue
-                    text = message.get("text", "")
-                    if text == "/start": 
-                        telegram_bildir("🤖 <b>XRP Sanal Bot Paneli Aktif!</b>")
-                    elif text == "📊 Bot Durumu": 
-                        telegram_bildir(durum_raporu_metni())
-                    elif text == "💰 Cüzdan Bakiyesi":
-                        kar_zarar = sanal_cuzdan['nakit_usdt'] - sanal_cuzdan['baslangic_sermaye']
-                        p_str = f"+{round(kar_zarar, 2)}$" if kar_zarar >= 0 else f"{round(kar_zarar, 2)}$"
-                        telegram_bildir(f"💰 <b>Sanal Cüzdan Durumu</b>\n\n• Nakit: <b>{round(sanal_cuzdan['nakit_usdt'], 2)}$</b>\n• Toplam K/Z: <b>{p_str}</b>")
-                    elif text == "▶️ Botu Başlat":
-                        config.BOT_CALISIYOR = True
-                        telegram_bildir("🚀 Bot tarama döngüsü <b>aktif.</b>")
-                    elif text == "⏸️ Botu Durdur":
-                        config.BOT_CALISIYOR = False
-                        telegram_bildir("⏸️ Bot tarama döngüsü <b>durduruldu.</b>")
-        except Exception: time.sleep(5)
+                    if message and str(message.get("chat", {}).get("id")) == str(TELEGRAM_CHAT_ID):
+                        text = message.get("text", "")
+                        if text == "/start": 
+                            telegram_bildir("🤖 <b>XRP Sanal Bot Paneli Aktif!</b>", reply_markup=inline_menu_olustur())
+
+                    # 2. Inline Buton Tıklamaları (Callback Query)
+                    callback_query = update.get("callback_query")
+                    if callback_query and str(callback_query.get("message", {}).get("chat", {}).get("id")) == str(TELEGRAM_CHAT_ID):
+                        query_id = callback_query.get("id")
+                        data = callback_query.get("data", "")
+
+                        if data == "cmd_durum":
+                            callback_yanitla(query_id, "Bot durumu getiriliyor...")
+                            telegram_bildir(durum_raporu_metni(), reply_markup=inline_menu_olustur())
+                        elif data == "cmd_bakiye":
+                            kar_zarar = sanal_cuzdan['nakit_usdt'] - sanal_cuzdan['baslangic_sermaye']
+                            p_str = f"+{round(kar_zarar, 2)}$" if kar_zarar >= 0 else f"{round(kar_zarar, 2)}$"
+                            callback_yanitla(query_id, "Cüzdan bilgisi güncelleniyor...")
+                            telegram_bildir(f"💰 <b>Sanal Cüzdan Durumu</b>\n\n• Nakit: <b>{round(sanal_cuzdan['nakit_usdt'], 2)}$</b>\n• Toplam K/Z: <b>{p_str}</b>", reply_markup=inline_menu_olustur())
+                        elif data == "cmd_baslat":
+                            config.BOT_CALISIYOR = True
+                            callback_yanitla(query_id, "Bot başlatıldı!")
+                            telegram_bildir("🚀 Bot tarama döngüsü <b>aktif.</b>", reply_markup=inline_menu_olustur())
+                        elif data == "cmd_durdur":
+                            config.BOT_CALISIYOR = False
+                            callback_yanitla(query_id, "Bot durduruldu!")
+                            telegram_bildir("⏸️ Bot tarama döngüsü <b>durduruldu.</b>", reply_markup=inline_menu_olustur())
+
+        except Exception: 
+            time.sleep(5)
 
 # --- ⏰ HER 5 DAKİKADA BİR SADECE RAILWAY KONSOLUNA RAPOR ---
 def periyodik_konsol_rapor_dongusu():
     while True:
-        time.sleep(300) # 5 Dakika
+        time.sleep(300)
         if config.BOT_CALISIYOR:
             with data_lock:
                 toplam_portfoy = sanal_cuzdan["nakit_usdt"]
@@ -337,16 +373,16 @@ def xrp_tarama_dongusu():
 
 # --- 🚀 ANA ÇALIŞTIRICI ---
 if __name__ == "__main__":
-    print("🎬 XRP Polling Tabanlı Paper Trading Botu Başlatılıyor...")
+    print("🎬 XRP Inline Butonlu Paper Trading Botu Başlatılıyor...")
     
     if veri_guncelle_ve_klines_al():
-        konsol_ve_telegram_bildir(
-            "🚀 <b>XRP Sanal Al-Sat Botu Başlatıldı! (Polling Modu)</b>\n"
+        telegram_bildir(
+            "🚀 <b>XRP Sanal Al-Sat Botu Başlatıldı! (Inline Buton Modu)</b>\n"
             f"• Parite: XRPUSDT (1h)\n"
-            f"• Başlangıç Sermayesi: {sanal_cuzdan['nakit_usdt']}$"
+            f"• Başlangıç Sermayesi: {sanal_cuzdan['nakit_usdt']}$",
+            reply_markup=inline_menu_olustur()
         )
 
-        # 🔄 Arka planda periyodik fiyat güncelleyen polling iş parçacığı
         threading.Thread(target=polling_veri_akis_dongusu, daemon=True).start()
 
         if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
