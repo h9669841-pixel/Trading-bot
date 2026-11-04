@@ -3,7 +3,6 @@ import json
 import time
 import requests
 import threading
-import websocket
 import math
 import pandas as pd
 from datetime import datetime
@@ -39,7 +38,7 @@ class XRPBotConfig:
         self.STOP_LOSS_PERCENT = 1.5                     # %1.5 Zarar Durdur
         self.TAKE_PROFIT_PERCENT = 5.0                   # %5.0 Kâr Al
 
-        self.HIZLI_TAKIP_PERIYODU = 1.0
+        self.POLLING_PERIYODU = 10.0                     # Her 10 saniyede bir fiyatı yenile (Polling)
 
 config = XRPBotConfig()
 
@@ -60,18 +59,16 @@ aktif_pozisyon = {
 FUTURES_HASSASIYETI = 2
 data_lock = threading.Lock()
 
-# --- 📊 XRP GEÇMİŞ VERİLERİNİ ÇEKME (Genişletilmiş Fallback Korumalı) ---
-def xrp_verilerini_hazirla():
+# --- 📊 XRP GEÇMİŞ VE ANLIK VERİLERİNİ ÇEKME (Polling Tabanlı) ---
+def veri_guncelle_ve_klines_al():
     global FUTURES_HASSASIYETI
     symbol_upper = config.TARGET_SYMBOL.upper()
     
-    # Binance ve alternatif genel veri sağlayıcı uç noktaları
     api_endpoints = [
         "https://api.binance.com/api/v3/klines",
         "https://data-api.binance.vision/api/v3/klines",
         "https://fapi.binance.com/fapi/v1/klines",
-        "https://api1.binance.com/api/v3/klines",
-        "https://api3.binance.com/api/v3/klines"
+        "https://api1.binance.com/api/v3/klines"
     ]
     
     k_res = None
@@ -82,33 +79,35 @@ def xrp_verilerini_hazirla():
     for klines_url in api_endpoints:
         try:
             full_url = f"{klines_url}?symbol={symbol_upper}&interval={config.TIMEFRAME}&limit=250"
-            print(f"🔄 Bağlantı deneniyor: {klines_url}")
-            
             response = requests.get(full_url, headers=headers, timeout=10)
             
             if response.status_code == 200:
                 k_res = response.json()
                 if k_res and len(k_res) > 0:
-                    print(f"🔥 Başarılı Veri Kaynağı: {klines_url}")
                     break
-        except Exception as e:
-            print(f"⚠️ Bağlantı hatası ({klines_url}): {e}")
+        except Exception:
             continue
 
     if not k_res:
-        print("❌ Tüm Binance uç noktaları engellendi veya zaman aşımına uğradı!")
         return False
 
     try:
         with data_lock:
             piyasa_verisi["klines"] = k_res
             piyasa_verisi["anlik_fiyat"] = float(k_res[-1][4]) if k_res else 0.0
-            
-        print(f"🔥 XRP Verileri Başarıyla Yüklendi. Anlık Fiyat: {piyasa_verisi['anlik_fiyat']}")
         return True
-    except Exception as e:
-        print(f"❌ XRP veri işleme hatası: {e}")
+    except Exception:
         return False
+
+# --- 🔄 POLLING DÖNGÜSÜ (WebSocket Yerine Düzenli Sorgu) ---
+def polling_veri_akis_dongusu():
+    print("🔄 Polling Tabanlı Veri Akış Döngüsü Başlatıldı.")
+    while True:
+        try:
+            veri_guncelle_ve_klines_al()
+        except Exception as e:
+            print(f"⚠️ Polling veri güncelleme hatası: {e}")
+        time.sleep(config.POLLING_PERIYODU)
 
 # --- 🛠️ STRATEJİ ANALİZİ ---
 def strateji_analiz(v):
@@ -148,54 +147,8 @@ def strateji_analiz(v):
         return "SELL"
     return "HOLD"
 
-# --- 📡 WEBSOCKET DİNLEYİCİ MOTORU ---
-def websocket_baslat():
-    def on_message(ws, message):
-        try:
-            msg = json.loads(message)
-            if "data" not in msg: return
-            
-            data = msg["data"]
-            kline = data["k"]
-            anlik_fiyat = float(kline["c"])
-            
-            with data_lock:
-                piyasa_verisi["anlik_fiyat"] = anlik_fiyat
-                formatted_kline = [
-                    kline["t"], kline["o"], kline["h"], kline["l"], 
-                    kline["c"], kline["v"], kline["T"], kline["q"], 
-                    kline["n"], kline["V"], kline["Q"], "0"
-                ]
-                klines = piyasa_verisi["klines"]
-                if klines:
-                    if klines[-1][0] == kline["t"]:
-                        klines[-1] = formatted_kline
-                    else:
-                        klines.append(formatted_kline)
-                        if len(klines) > 300: klines.pop(0)
-        except Exception:
-            pass
-
-    def on_error(ws, error):
-        print(f"⚠️ WebSocket Hatası: {error}")
-
-    def on_close(ws, close_status_code, close_msg):
-        print("🔌 WebSocket Bağlantısı Koptu. Yeniden bağlanılıyor...")
-        time.sleep(5)
-        websocket_baslat()
-
-    def run():
-        # WebSocket için de genel vision/stream uç noktası kullanılır
-        stream_url = f"wss://stream.binance.com:9443/ws/{config.TARGET_SYMBOL}@kline_{config.TIMEFRAME}"
-        ws = websocket.WebSocketApp(stream_url, on_message=on_message, on_error=on_error, on_close=on_close)
-        ws.run_forever()
-
-    threading.Thread(target=run, daemon=True).start()
-    print(f"⚡ XRP WebSocket Akışı Başlatıldı ({config.TIMEFRAME})")
-
 # --- 🎛️ BİLDİRİM VE KONSOL FONKSİYONLARI ---
 def telegram_bildir(mesaj):
-    """Sadece Telegram'a mesaj gönderir."""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     try:
         data = {"chat_id": TELEGRAM_CHAT_ID, "text": mesaj, "parse_mode": "HTML"}
@@ -204,7 +157,6 @@ def telegram_bildir(mesaj):
         print(f"❌ Telegram gönderim hatası: {e}")
 
 def konsol_ve_telegram_bildir(mesaj):
-    """Hem Railway konsoluna print eder hem de Telegram'a bildirir."""
     temiz_mesaj = mesaj.replace('<b>','').replace('</b>','')
     print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {temiz_mesaj}")
     telegram_bildir(mesaj)
@@ -214,7 +166,7 @@ def ana_menu_olustur():
 
 def durum_raporu_metni():
     with data_lock:
-        durum_str = "🟢 XRP Paper Trading Aktif" if config.BOT_CALISIYOR else "🔴 Sistem Durduruldu"
+        durum_str = "🟢 XRP Polling Trading Aktif" if config.BOT_CALISIYOR else "🔴 Sistem Durduruldu"
         toplam_portfoy = sanal_cuzdan["nakit_usdt"]
         if aktif_pozisyon["aktif"]:
             toplam_portfoy += aktif_pozisyon["resmi_pnl"]
@@ -265,7 +217,7 @@ def telegram_gelen_mesaj_dinleyici():
 # --- ⏰ HER 5 DAKİKADA BİR SADECE RAILWAY KONSOLUNA RAPOR ---
 def periyodik_konsol_rapor_dongusu():
     while True:
-        time.sleep(300) # 5 Dakika (300 saniye)
+        time.sleep(300) # 5 Dakika
         if config.BOT_CALISIYOR:
             with data_lock:
                 toplam_portfoy = sanal_cuzdan["nakit_usdt"]
@@ -335,7 +287,7 @@ def hizli_pozisyon_takip_dongusu():
                     f"• Yeni Nakit: {round(sanal_cuzdan['nakit_usdt'], 2)}$"
                 )
 
-            time.sleep(config.HIZLI_TAKIP_PERIYODU)
+            time.sleep(1.0)
         except Exception as e:
             time.sleep(2.0)
 
@@ -385,16 +337,17 @@ def xrp_tarama_dongusu():
 
 # --- 🚀 ANA ÇALIŞTIRICI ---
 if __name__ == "__main__":
-    print("🎬 XRP Optimize Edilmiş Paper Trading Botu Başlatılıyor...")
+    print("🎬 XRP Polling Tabanlı Paper Trading Botu Başlatılıyor...")
     
-    if xrp_verilerini_hazirla():
+    if veri_guncelle_ve_klines_al():
         konsol_ve_telegram_bildir(
-            "🚀 <b>XRP Sanal Al-Sat Botu Başlatıldı!</b>\n"
+            "🚀 <b>XRP Sanal Al-Sat Botu Başlatıldı! (Polling Modu)</b>\n"
             f"• Parite: XRPUSDT (1h)\n"
             f"• Başlangıç Sermayesi: {sanal_cuzdan['nakit_usdt']}$"
         )
 
-        websocket_baslat()
+        # 🔄 Arka planda periyodik fiyat güncelleyen polling iş parçacığı
+        threading.Thread(target=polling_veri_akis_dongusu, daemon=True).start()
 
         if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
             threading.Thread(target=telegram_gelen_mesaj_dinleyici, daemon=True).start()
