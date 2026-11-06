@@ -3,7 +3,6 @@ import json
 import time
 import requests
 import threading
-import websocket
 import math
 import pandas as pd
 from datetime import datetime
@@ -17,99 +16,103 @@ proxy_formatted = None
 if PROXY_URL:
     proxy_formatted = PROXY_URL if PROXY_URL.startswith("socks5://") else PROXY_URL.replace("socks5://", "socks5h://")
 
-class XRPBotConfig:
+class MultiBotConfig:
     def __init__(self):
         self.TIMEFRAME = "1h"                           # 1 Saatlik grafik periyodu
-        self.ISLEM_MARJIN = 100.0                        # Sanal işlem başına ayrılacak USDT (Margin)
+        self.ISLEM_MARJIN = 100.0                        # Her coin için işlem başına ayrılacak USDT (Margin)
         self.KALDIRAC = 10                              # Kaldıraç oranı
-        
         self.BOT_CALISIYOR = True
-        self.TARGET_SYMBOL = "xrpusdt"                   # Sadece XRP odaklı takip
+        self.POLLING_PERIYODU = 10.0                     # Fiyat güncelleme aralığı
 
-        # === XRP OPTİMİZE STRATEJİ PARAMETRELERİ ===
-        self.BB_LEN = 18                                 # Bollinger Uzunluğu
-        self.BB_MULT = 1.6                               # Bollinger Çarpanı
-        self.USE_SQUEEZE = True
-        self.SQUEEZE_THRESH = 0.50                       # Sıkışma Eşiği (Bandwidth Max)
-        self.USE_VOLUME = True
-        self.VOL_LEN = 17                                # Hacim MA Uzunluğu
-        self.VOL_MULT = 1.4                              # Hacim Çarpanı
+        # 🪙 Takip Edilecek Coinler ve Pine Script'teki Optimize Profilleri
+        self.PROFILES = {
+            "solusdt": {
+                "name": "SOL",
+                "bb_len": 15,
+                "bb_mult": 1.6,
+                "use_squeeze": True,
+                "squeeze_thresh": 0.08,
+                "use_volume": True,
+                "vol_len": 17,
+                "vol_mult": 1.6,
+                "stop_loss": 1.5,
+                "take_profit": 4.0
+            },
+            "xrpusdt": {
+                "name": "XRP",
+                "bb_len": 18,
+                "bb_mult": 1.6,
+                "use_squeeze": True,
+                "squeeze_thresh": 0.50,
+                "use_volume": True,
+                "vol_len": 17,
+                "vol_mult": 1.4,
+                "stop_loss": 1.5,
+                "take_profit": 5.0
+            }
+        }
 
-        # 🎯 RİSK YÖNETİMİ (Stop-Loss & Take-Profit)
-        self.STOP_LOSS_PERCENT = 1.5                     # %1.5 Zarar Durdur
-        self.TAKE_PROFIT_PERCENT = 5.0                   # %5.0 Kâr Al
-
-        self.POLLING_PERIYODU = 10.0                     # Her 10 saniyede bir fiyatı yenile
-
-config = XRPBotConfig()
+config = MultiBotConfig()
 
 # 💰 SANAL CÜZDAN YÖNETİMİ (Paper Trading)
 sanal_cuzdan = {
-    "nakit_usdt": 10000.0,  # Başlangıç sanal sermayesi ($10,000)
+    "nakit_usdt": 10000.0,  # Toplam başlangıç sanal sermayesi ($10,000)
     "baslangic_sermaye": 10000.0
 }
 
-piyasa_verisi = {
-    "klines": [],
-    "anlik_fiyat": 0.0
+# Her coin için veri ve pozisyon havuzu
+piyasa_verileri = {
+    "solusdt": {"klines": [], "anlik_fiyat": 0.0, "hassasiyet": 2},
+    "xrpusdt": {"klines": [], "anlik_fiyat": 0.0, "hassasiyet": 2}
 }
-aktif_pozisyon = {
-    "aktif": False, "yon": None, "adet": 0.0, 
-    "giris_fiyati": 0.0, "resmi_pnl": 0.0
+
+aktif_pozisyonlar = {
+    "solusdt": {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0, "resmi_pnl": 0.0},
+    "xrpusdt": {"aktif": False, "yon": None, "adet": 0.0, "giris_fiyati": 0.0, "resmi_pnl": 0.0}
 }
-FUTURES_HASSASIYETI = 2
+
 data_lock = threading.Lock()
 
-# --- 📊 XRP GEÇMİŞ VE ANLIK VERİLERİNİ ÇEKME ---
+# --- 📊 GEÇMİŞ VE ANLIK VERİLERİ ÇEKME (SOL & XRP) ---
 def veri_guncelle_ve_klines_al():
-    global FUTURES_HASSASIYETI
-    symbol_upper = config.TARGET_SYMBOL.upper()
-    
+    headers = {"User-Agent": "Mozilla/5.0"}
     api_endpoints = [
         "https://api.binance.com/api/v3/klines",
         "https://data-api.binance.vision/api/v3/klines",
-        "https://fapi.binance.com/fapi/v1/klines",
-        "https://api1.binance.com/api/v3/klines"
+        "https://fapi.binance.com/fapi/v1/klines"
     ]
     
-    k_res = None
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    }
-
-    for klines_url in api_endpoints:
-        try:
-            full_url = f"{klines_url}?symbol={symbol_upper}&interval={config.TIMEFRAME}&limit=250"
-            response = requests.get(full_url, headers=headers, timeout=10)
-            if response.status_code == 200:
-                k_res = response.json()
-                if k_res and len(k_res) > 0:
-                    break
-        except Exception:
-            continue
-
-    if not k_res:
-        return False
-
-    try:
-        with data_lock:
-            piyasa_verisi["klines"] = k_res
-            piyasa_verisi["anlik_fiyat"] = float(k_res[-1][4]) if k_res else 0.0
-        return True
-    except Exception:
-        return False
+    for symbol in config.PROFILES.keys():
+        symbol_upper = symbol.upper()
+        k_res = None
+        for base_url in api_endpoints:
+            try:
+                full_url = f"{base_url}?symbol={symbol_upper}&interval={config.TIMEFRAME}&limit=250"
+                response = requests.get(full_url, headers=headers, timeout=10)
+                if response.status_code == 200:
+                    data = response.json()
+                    if data and len(data) > 0:
+                        k_res = data
+                        break
+            except Exception:
+                continue
+        
+        if k_res:
+            with data_lock:
+                piyasa_verileri[symbol]["klines"] = k_res
+                piyasa_verisi[symbol]["anlik_fiyat"] = float(k_res[-1][4])
 
 def polling_veri_akis_dongusu():
-    print("🔄 Polling Tabanlı Veri Akış Döngüsü Başlatıldı.")
+    print("🔄 Çoklu Coin Polling Veri Akış Döngüsü Başlatıldı.")
     while True:
         try:
             veri_guncelle_ve_klines_al()
         except Exception as e:
-            print(f"⚠️ Polling veri güncelleme hatası: {e}")
+            print(f"⚠️ Polling hata: {e}")
         time.sleep(config.POLLING_PERIYODU)
 
-# --- 🛠️ STRATEJİ ANALİZİ ---
-def strateji_analiz(v):
+# --- 🛠️ STRATEJİ ANALİZİ (Profile Göre Dinamik) ---
+def strateji_analiz(symbol, v, profile):
     candles = list(v["klines"])
     if not candles or len(candles) < 50:
         return "HOLD"
@@ -121,16 +124,16 @@ def strateji_analiz(v):
     for col in ['open', 'high', 'low', 'close', 'volume']:
         df[col] = df[col].astype(float)
 
-    vol_sma = df['volume'].rolling(window=config.VOL_LEN).mean()
-    is_volume_ok = not config.USE_VOLUME or (df['volume'].iloc[-2] > (vol_sma.iloc[-2] * config.VOL_MULT))
+    vol_sma = df['volume'].rolling(window=profile["vol_len"]).mean()
+    is_volume_ok = not profile["use_volume"] or (df['volume'].iloc[-2] > (vol_sma.iloc[-2] * profile["vol_mult"]))
 
-    basis = df['close'].rolling(window=config.BB_LEN).mean()
-    dev = config.BB_MULT * df['close'].rolling(window=config.BB_LEN).std(ddof=0)
+    basis = df['close'].rolling(window=profile["bb_len"]).mean()
+    dev = profile["bb_mult"] * df['close'].rolling(window=profile["bb_len"]).std(ddof=0)
     upper_band = basis + dev
     lower_band = basis - dev
 
     bb_width = (upper_band - lower_band) / basis
-    is_squeezed = not config.USE_SQUEEZE or (bb_width.iloc[-2] <= config.SQUEEZE_THRESH)
+    is_squeezed = not profile["use_squeeze"] or (bb_width.iloc[-2] <= profile["squeeze_thresh"])
 
     prev_close = df['close'].iloc[-3]
     curr_close = df['close'].iloc[-2]
@@ -146,13 +149,12 @@ def strateji_analiz(v):
         return "SELL"
     return "HOLD"
 
-# --- 🎛️ BİLDİRİM VE İNLİNE BUTON FONKSİYONLARI ---
+# --- 🎛️ BİLDİRİM VE KONSOL FONKSİYONLARI ---
 def telegram_bildir(mesaj, reply_markup=None):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     try:
         data = {"chat_id": TELEGRAM_CHAT_ID, "text": mesaj, "parse_mode": "HTML"}
-        if reply_markup:
-            data["reply_markup"] = reply_markup
+        if reply_markup: data["reply_markup"] = reply_markup
         requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json=data, timeout=5)
     except Exception as e:
         print(f"❌ Telegram gönderim hatası: {e}")
@@ -163,7 +165,6 @@ def konsol_ve_telegram_bildir(mesaj):
     telegram_bildir(mesaj)
 
 def inline_menu_olustur():
-    """Mesaj altında görünen tıklanabilir Inline Butonlar"""
     return {
         "inline_keyboard": [
             [
@@ -179,32 +180,30 @@ def inline_menu_olustur():
 
 def durum_raporu_metni():
     with data_lock:
-        durum_str = "🟢 XRP Polling Trading Aktif" if config.BOT_CALISIYOR else "🔴 Sistem Durduruldu"
+        durum_str = "🟢 SOL & XRP Çoklu Bot Aktif" if config.BOT_CALISIYOR else "🔴 Sistem Durduruldu"
         toplam_portfoy = sanal_cuzdan["nakit_usdt"]
-        if aktif_pozisyon["aktif"]:
-            toplam_portfoy += aktif_pozisyon["resmi_pnl"]
+        
+        for sym, pos in aktif_pozisyonlar.items():
+            if pos["aktif"]:
+                toplam_portfoy += pos["resmi_pnl"]
 
         rapor = (
-            f"⚙️ <b>XRP Akülasyon Botu (Durum Raporu)</b>\n"
+            f"⚙️ <b>SOL & XRP Kombine Bot Raporu</b>\n"
             f"• Sistem: {durum_str}\n"
             f"• Nakit Bakiye: <b>{round(sanal_cuzdan['nakit_usdt'], 2)}$</b>\n"
             f"• Toplam Varlık: <b>{round(toplam_portfoy, 2)}$</b>\n\n"
-            f"⚡ <b>Açık İşlem:</b>\n"
+            f"⚡ <b>Açık İşlemler:</b>\n"
         )
-        if not aktif_pozisyon["aktif"]:
+        acik_var = False
+        for sym, pos in aktif_pozisyonlar.items():
+            if pos["aktif"]:
+                acik_var = True
+                coin_adi = config.PROFILES[sym]["name"]
+                rapor += f"• {coin_adi}USDT | {pos['yon']} | Fiyat: {pos['giris_fiyati']} | PNL: <b>{round(pos['resmi_pnl'], 3)}$</b>\n"
+        
+        if not acik_var:
             rapor += "Açık pozisyon bulunmuyor."
-        else:
-            p = aktif_pozisyon
-            rapor += f"• XRPUSDT | {p['yon']} | Fiyat: {p['giris_fiyati']} | PNL: <b>{round(p['resmi_pnl'], 3)}$</b>\n"
         return rapor
-
-def callback_yanitla(callback_query_id, text=""):
-    """Inline butona tıklandığında yüklenmeyi durdurur ve bildirim gösterir"""
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery"
-        requests.post(url, json={"callback_query_id": callback_query_id, "text": text}, timeout=5)
-    except Exception:
-        pass
 
 def telegram_gelen_mesaj_dinleyici():
     offset = None
@@ -216,57 +215,53 @@ def telegram_gelen_mesaj_dinleyici():
             if response.get("ok") and response.get("result"):
                 for update in response["result"]:
                     offset = update["update_id"] + 1
-                    
-                    # 1. Normal Mesajlar (/start vb.)
                     message = update.get("message")
                     if message and str(message.get("chat", {}).get("id")) == str(TELEGRAM_CHAT_ID):
                         text = message.get("text", "")
                         if text == "/start": 
-                            telegram_bildir("🤖 <b>XRP Sanal Bot Paneli Aktif!</b>", reply_markup=inline_menu_olustur())
+                            telegram_bildir("🤖 <b>SOL & XRP Çoklu Bot Paneli Aktif!</b>", reply_markup=inline_menu_olustur())
 
-                    # 2. Inline Buton Tıklamaları (Callback Query)
                     callback_query = update.get("callback_query")
                     if callback_query and str(callback_query.get("message", {}).get("chat", {}).get("id")) == str(TELEGRAM_CHAT_ID):
                         query_id = callback_query.get("id")
                         data = callback_query.get("data", "")
 
                         if data == "cmd_durum":
-                            callback_yanitla(query_id, "Bot durumu getiriliyor...")
                             telegram_bildir(durum_raporu_metni(), reply_markup=inline_menu_olustur())
                         elif data == "cmd_bakiye":
                             kar_zarar = sanal_cuzdan['nakit_usdt'] - sanal_cuzdan['baslangic_sermaye']
                             p_str = f"+{round(kar_zarar, 2)}$" if kar_zarar >= 0 else f"{round(kar_zarar, 2)}$"
-                            callback_yanitla(query_id, "Cüzdan bilgisi güncelleniyor...")
                             telegram_bildir(f"💰 <b>Sanal Cüzdan Durumu</b>\n\n• Nakit: <b>{round(sanal_cuzdan['nakit_usdt'], 2)}$</b>\n• Toplam K/Z: <b>{p_str}</b>", reply_markup=inline_menu_olustur())
                         elif data == "cmd_baslat":
                             config.BOT_CALISIYOR = True
-                            callback_yanitla(query_id, "Bot başlatıldı!")
                             telegram_bildir("🚀 Bot tarama döngüsü <b>aktif.</b>", reply_markup=inline_menu_olustur())
                         elif data == "cmd_durdur":
                             config.BOT_CALISIYOR = False
-                            callback_yanitla(query_id, "Bot durduruldu!")
                             telegram_bildir("⏸️ Bot tarama döngüsü <b>durduruldu.</b>", reply_markup=inline_menu_olustur())
-
         except Exception: 
             time.sleep(5)
 
-# --- ⏰ HER 5 DAKİKADA BİR SADECE RAILWAY KONSOLUNA RAPOR ---
+# --- ⏰ HER 5 DAKİKADA BİR KONSOL RAPORU ---
 def periyodik_konsol_rapor_dongusu():
     while True:
         time.sleep(300)
         if config.BOT_CALISIYOR:
             with data_lock:
                 toplam_portfoy = sanal_cuzdan["nakit_usdt"]
-                if aktif_pozisyon["aktif"]:
-                    toplam_portfoy += aktif_pozisyon["resmi_pnl"]
+                for sym, pos in aktif_pozisyonlar.items():
+                    if pos["aktif"]:
+                        toplam_portfoy += pos["resmi_pnl"]
                 
                 print(f"\n⏱️ [5 Dakikalık Konsol Raporu] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
                 print(f"• Nakit Bakiye: {round(sanal_cuzdan['nakit_usdt'], 2)}$")
                 print(f"• Toplam Varlık: {round(toplam_portfoy, 2)}$")
-                if aktif_pozisyon["aktif"]:
-                    print(f"• Açık Pozisyon: {aktif_pozisyon['yon']} | Fiyat: {aktif_pozisyon['giris_fiyati']} | PNL: {round(aktif_pozisyon['resmi_pnl'], 3)}$")
-                else:
-                    print("• Açık Pozisyon: Bulunmuyor.\n")
+                for sym, pos in aktif_pozisyonlar.items():
+                    coin_adi = config.PROFILES[sym]["name"]
+                    if pos["aktif"]:
+                        print(f"• {coin_adi} Açık Pozisyon: {pos['yon']} | Fiyat: {pos['giris_fiyati']} | PNL: {round(pos['resmi_pnl'], 3)}$")
+                    else:
+                        print(f"• {coin_adi} Açık Pozisyon: Bulunmuyor.")
+                print("-" * 40)
 
 # =====================================================================
 # 🚀 PNL, STOP-LOSS VE TAKE-PROFIT TAKİP DÖNGÜSÜ
@@ -279,93 +274,96 @@ def hizli_pozisyon_takip_dongusu():
                 continue
             
             with data_lock:
-                if not aktif_pozisyon["aktif"]:
-                    time.sleep(1.0)
-                    continue
-                v = dict(piyasa_verisi)
-                pos = dict(aktif_pozisyon)
+                islem_yapilacak_semboller = [s for s, p in aktif_pozisyonlar.items() if p["aktif"]]
 
-            anlik_fiyat = v.get("anlik_fiyat", 0.0)
-            if anlik_fiyat <= 0: continue
-
-            giris_fiyati = pos["giris_fiyati"]
-            yon = pos["yon"]
-            adet = pos["adet"]
-
-            if yon == "LONG":
-                fiyat_farki = anlik_fiyat - giris_fiyati
-                fiyat_degisim_pct = ((anlik_fiyat - giris_fiyati) / giris_fiyati) * 100
-            else:
-                fiyat_farki = giris_fiyati - anlik_fiyat
-                fiyat_degisim_pct = ((giris_fiyati - anlik_fiyat) / giris_fiyati) * 100
-            
-            resmi_pnl = fiyat_farki * adet
-
-            with data_lock:
-                aktif_pozisyon["resmi_pnl"] = resmi_pnl
-
-            kapatma_nedeni = None
-
-            if fiyat_degisim_pct >= config.TAKE_PROFIT_PERCENT:
-                kapatma_nedeni = f"Take-Profit Hedefi (+%{config.TAKE_PROFIT_PERCENT})"
-            elif fiyat_degisim_pct <= -config.STOP_LOSS_PERCENT:
-                kapatma_nedeni = f"Stop-Loss Tetiklendi (-%{config.STOP_LOSS_PERCENT})"
-
-            if kapatma_nedeni:
+            for symbol in islem_yapilacak_semboller:
                 with data_lock:
-                    sanal_cuzdan["nakit_usdt"] += config.ISLEM_MARJIN + resmi_pnl
-                    aktif_pozisyon["aktif"] = False
+                    v = dict(piyasa_verileri[symbol])
+                    pos = dict(aktif_pozisyonlar[symbol])
+                    profile = config.PROFILES[symbol]
+
+                anlik_fiyat = v.get("anlik_fiyat", 0.0)
+                if anlik_fiyat <= 0: continue
+
+                giris_fiyati = pos["giris_fiyati"]
+                yon = pos["yon"]
+                adet = pos["adet"]
+
+                if yon == "LONG":
+                    fiyat_farki = anlik_fiyat - giris_fiyati
+                    fiyat_degisim_pct = ((anlik_fiyat - giris_fiyati) / giris_fiyati) * 100
+                else:
+                    fiyat_farki = giris_fiyati - anlik_fiyat
+                    fiyat_degisim_pct = ((giris_fiyati - anlik_fiyat) / giris_fiyati) * 100
                 
-                konsol_ve_telegram_bildir(
-                    f"🔴 <b>XRP {yon} Sanal Pozisyon Kapatıldı!</b>\n"
-                    f"• Neden: <b>{kapatma_nedeni}</b>\n"
-                    f"• Net PNL: <b>{round(resmi_pnl, 3)}$</b>\n"
-                    f"• Yeni Nakit: {round(sanal_cuzdan['nakit_usdt'], 2)}$"
-                )
+                resmi_pnl = fiyat_farki * adet
+
+                with data_lock:
+                    aktif_pozisyonlar[symbol]["resmi_pnl"] = resmi_pnl
+
+                kapatma_nedeni = None
+                if fiyat_degisim_pct >= profile["take_profit"]:
+                    kapatma_nedeni = f"Take-Profit Hedefi (+%{profile['take_profit']})"
+                elif fiyat_degisim_pct <= -profile["stop_loss"]:
+                    kapatma_nedeni = f"Stop-Loss Tetiklendi (-%{profile['stop_loss']})"
+
+                if kapatma_nedeni:
+                    with data_lock:
+                        sanal_cuzdan["nakit_usdt"] += config.ISLEM_MARJIN + resmi_pnl
+                        aktif_pozisyonlar[symbol]["aktif"] = False
+                    
+                    coin_adi = profile["name"]
+                    konsol_ve_telegram_bildir(
+                        f"🔴 <b>{coin_adi} {yon} Sanal Pozisyon Kapatıldı!</b>\n"
+                        f"• Neden: <b>{kapatma_nedeni}</b>\n"
+                        f"• Net PNL: <b>{round(resmi_pnl, 3)}$</b>\n"
+                        f"• Yeni Nakit: {round(sanal_cuzdan['nakit_usdt'], 2)}$"
+                    )
 
             time.sleep(1.0)
         except Exception as e:
             time.sleep(2.0)
 
 # --- 🎯 GİRİŞ SİNYALİ TARAMA DÖNGÜSÜ ---
-def xrp_tarama_dongusu():
+def multi_coin_tarama_dongusu():
     while True:
         try:
             if not config.BOT_CALISIYOR:
                 time.sleep(2.0)
                 continue
             
-            with data_lock:
-                if aktif_pozisyon["aktif"]:
-                    time.sleep(2.0)
-                    continue
-                v = dict(piyasa_verisi)
-
-            sinyal = strateji_analiz(v)
-            anlik_fiyat = v.get("anlik_fiyat", 0.0)
-
-            if sinyal != "HOLD" and anlik_fiyat > 0:
+            for symbol, profile in config.PROFILES.items():
                 with data_lock:
-                    if sanal_cuzdan["nakit_usdt"] < config.ISLEM_MARJIN:
-                        continue 
-                    
-                    sanal_cuzdan["nakit_usdt"] -= config.ISLEM_MARJIN
-                    qty = (config.ISLEM_MARJIN * config.KALDIRAC) / anlik_fiyat
-                    qty = round(qty, FUTURES_HASSASIYETI) if FUTURES_HASSASIYETI > 0 else int(qty)
-                    
-                    if qty > 0:
-                        yon_str = "LONG" if sinyal == "BUY" else "SHORT"
-                        aktif_pozisyon.update({
-                            "aktif": True, "yon": yon_str,
-                            "adet": qty, "giris_fiyati": anlik_fiyat, "resmi_pnl": 0.0
-                        })
-                        konsol_ve_telegram_bildir(
-                            f"🚀 <b>XRP {sinyal} Sanal Pozisyon Açıldı!</b>\n"
-                            f"• Yön: {yon_str}\n"
-                            f"• Fiyat: {anlik_fiyat}\n"
-                            f"• Adet: {qty}\n"
-                            f"• Marjin: {config.ISLEM_MARJIN}$ ({config.KALDIRAC}x)"
-                        )
+                    if aktif_pozisyonlar[symbol]["aktif"]:
+                        continue
+                    v = dict(piyasa_verileri[symbol])
+
+                sinyal = strateji_analiz(symbol, v, profile)
+                anlik_fiyat = v.get("anlik_fiyat", 0.0)
+
+                if sinyal != "HOLD" and anlik_fiyat > 0:
+                    with data_lock:
+                        if sanal_cuzdan["nakit_usdt"] < config.ISLEM_MARJIN:
+                            continue 
+                        
+                        sanal_cuzdan["nakit_usdt"] -= config.ISLEM_MARJIN
+                        qty = (config.ISLEM_MARJIN * config.KALDIRAC) / anlik_fiyat
+                        qty = round(qty, 2)
+                        
+                        if qty > 0:
+                            yon_str = "LONG" if sinyal == "BUY" else "SHORT"
+                            aktif_pozisyonlar[symbol].update({
+                                "aktif": True, "yon": yon_str,
+                                "adet": qty, "giris_fiyati": anlik_fiyat, "resmi_pnl": 0.0
+                            })
+                            coin_adi = profile["name"]
+                            konsol_ve_telegram_bildir(
+                                f"🚀 <b>{coin_adi} {sinyal} Sanal Pozisyon Açıldı!</b>\n"
+                                f"• Yön: {yon_str}\n"
+                                f"• Fiyat: {anlik_fiyat}\n"
+                                f"• Adet: {qty}\n"
+                                f"• Marjin: {config.ISLEM_MARJIN}$ ({config.KALDIRAC}x)"
+                            )
             
             time.sleep(5.0)
         except Exception as e:
@@ -373,21 +371,22 @@ def xrp_tarama_dongusu():
 
 # --- 🚀 ANA ÇALIŞTIRICI ---
 if __name__ == "__main__":
-    print("🎬 XRP Inline Butonlu Paper Trading Botu Başlatılıyor...")
+    print("🎬 SOL & XRP Kombine Polling Trading Botu Başlatılıyor...")
     
-    if veri_guncelle_ve_klines_al():
-        telegram_bildir(
-            "🚀 <b>XRP Sanal Al-Sat Botu Başlatıldı! (Inline Buton Modu)</b>\n"
-            f"• Parite: XRPUSDT (1h)\n"
-            f"• Başlangıç Sermayesi: {sanal_cuzdan['nakit_usdt']}$",
-            reply_markup=inline_menu_olustur()
-        )
+    veri_guncelle_ve_klines_al()
+    
+    telegram_bildir(
+        "🚀 <b>SOL & XRP Kombine Al-Sat Botu Başlatıldı!</b>\n"
+        f"• Profiller: SOL (1h) & XRP (1h)\n"
+        f"• Başlangıç Sermayesi: {sanal_cuzdan['nakit_usdt']}$",
+        reply_markup=inline_menu_olustur()
+    )
 
-        threading.Thread(target=polling_veri_akis_dongusu, daemon=True).start()
+    threading.Thread(target=polling_veri_akis_dongusu, daemon=True).start()
 
-        if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
-            threading.Thread(target=telegram_gelen_mesaj_dinleyici, daemon=True).start()
+    if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
+        threading.Thread(target=telegram_gelen_mesaj_dinleyici, daemon=True).start()
 
-        threading.Thread(target=periyodik_konsol_rapor_dongusu, daemon=True).start()
-        threading.Thread(target=hizli_pozisyon_takip_dongusu, daemon=True).start()
-        xrp_tarama_dongusu()
+    threading.Thread(target=periyodik_konsol_rapor_dongusu, daemon=True).start()
+    threading.Thread(target=hizli_pozisyon_takip_dongusu, daemon=True).start()
+    multi_coin_tarama_dongusu()
