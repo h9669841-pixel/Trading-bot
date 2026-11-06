@@ -60,7 +60,7 @@ sanal_cuzdan = {
     "baslangic_sermaye": 10000.0
 }
 
-# Her coin için veri ve pozisyon havuzu
+# Her coin için veri ve pozisyon havuzu (Doğru değişken adı: piyasa_verileri)
 piyasa_verileri = {
     "solusdt": {"klines": [], "anlik_fiyat": 0.0, "hassasiyet": 2},
     "xrpusdt": {"klines": [], "anlik_fiyat": 0.0, "hassasiyet": 2}
@@ -100,7 +100,7 @@ def veri_guncelle_ve_klines_al():
         if k_res:
             with data_lock:
                 piyasa_verileri[symbol]["klines"] = k_res
-                piyasa_verisi[symbol]["anlik_fiyat"] = float(k_res[-1][4])
+                piyasa_verileri[symbol]["anlik_fiyat"] = float(k_res[-1][4])
 
 def polling_veri_akis_dongusu():
     print("🔄 Çoklu Coin Polling Veri Akış Döngüsü Başlatıldı.")
@@ -111,7 +111,7 @@ def polling_veri_akis_dongusu():
             print(f"⚠️ Polling hata: {e}")
         time.sleep(config.POLLING_PERIYODU)
 
-# --- 🛠️ STRATEJİ ANALİZİ (Profile Göre Dinamik) ---
+# --- 🛠️ STRATEJİ ANALİZİ ---
 def strateji_analiz(symbol, v, profile):
     candles = list(v["klines"])
     if not candles or len(candles) < 50:
