@@ -19,7 +19,7 @@ if PROXY_URL:
 class MultiBotConfig:
     def __init__(self):
         self.TIMEFRAME = "1h"                           # 1 Saatlik grafik periyodu
-        self.ISLEM_MARJIN = 100.0                        # Her coin için işlem başına ayrılacak USDT (Margin)
+        self.ISLEM_MARJIN = 1000.0                        # Her coin için işlem başına ayrılacak USDT (Margin)
         self.KALDIRAC = 10                              # Kaldıraç oranı
         self.BOT_CALISIYOR = True
         self.POLLING_PERIYODU = 10.0                     # Fiyat güncelleme aralığı
