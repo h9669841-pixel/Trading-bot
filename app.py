@@ -16,6 +16,8 @@ proxy_formatted = None
 if PROXY_URL:
     proxy_formatted = PROXY_URL if PROXY_URL.startswith("socks5://") else PROXY_URL.replace("socks5://", "socks5h://")
 
+PROXIES = {"http": proxy_formatted, "https": proxy_formatted} if proxy_formatted else None
+
 class MultiBotConfig:
     def __init__(self):
         self.TIMEFRAME = "1h"
@@ -25,7 +27,7 @@ class MultiBotConfig:
         self.POLLING_PERIYODU = 10.0
 
         # 🪙 Optimize profiller (1Y 1H backtest - score dengeli)
-        # SOL: \~+$13,800 | XRP: \~+$11,500 | Birleşik \~+$25,300
+        # SOL: ~+$13,800 | XRP: ~+$11,500 | Birleşik ~+$25,300
         self.PROFILES = {
             "solusdt": {
                 "name": "SOL",
@@ -87,6 +89,22 @@ aktif_pozisyonlar = {
 
 data_lock = threading.Lock()
 
+def bot_aktif_mi():
+    with data_lock:
+        return config.BOT_CALISIYOR
+
+def bot_durumu_ayarla(durum: bool):
+    with data_lock:
+        config.BOT_CALISIYOR = durum
+
+def toplam_varlik_hesapla():
+    """Kilitli marjin ve anlık PNL dahil toplam sanal portföy değeri."""
+    toplam = sanal_cuzdan["nakit_usdt"]
+    for pos in aktif_pozisyonlar.values():
+        if pos["aktif"]:
+            toplam += config.ISLEM_MARJIN + pos["resmi_pnl"]
+    return toplam
+
 # --- 📊 VERİ ÇEKME ---
 def veri_guncelle_ve_klines_al():
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -102,7 +120,7 @@ def veri_guncelle_ve_klines_al():
         for base_url in api_endpoints:
             try:
                 full_url = f"{base_url}?symbol={symbol_upper}&interval={config.TIMEFRAME}&limit=250"
-                response = requests.get(full_url, headers=headers, timeout=10)
+                response = requests.get(full_url, headers=headers, proxies=PROXIES, timeout=10)
                 if response.status_code == 200:
                     data = response.json()
                     if data and len(data) > 0:
@@ -171,9 +189,30 @@ def telegram_bildir(mesaj, reply_markup=None):
         data = {"chat_id": TELEGRAM_CHAT_ID, "text": mesaj, "parse_mode": "HTML"}
         if reply_markup:
             data["reply_markup"] = reply_markup
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json=data, timeout=5)
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json=data,
+            proxies=PROXIES,
+            timeout=5
+        )
     except Exception as e:
         print(f"❌ Telegram gönderim hatası: {e}")
+
+def callback_yanitla(query_id, text=None):
+    if not TELEGRAM_TOKEN or not query_id:
+        return
+    try:
+        payload = {"callback_query_id": query_id}
+        if text:
+            payload["text"] = text
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/answerCallbackQuery",
+            json=payload,
+            proxies=PROXIES,
+            timeout=5
+        )
+    except Exception:
+        pass
 
 def konsol_ve_telegram_bildir(mesaj):
     temiz_mesaj = mesaj.replace('<b>', '').replace('</b>', '')
@@ -197,11 +236,7 @@ def inline_menu_olustur():
 def durum_raporu_metni():
     with data_lock:
         durum_str = "🟢 SOL & XRP Çoklu Bot Aktif" if config.BOT_CALISIYOR else "🔴 Sistem Durduruldu"
-        toplam_portfoy = sanal_cuzdan["nakit_usdt"]
-
-        for sym, pos in aktif_pozisyonlar.items():
-            if pos["aktif"]:
-                toplam_portfoy += pos["resmi_pnl"]
+        toplam_portfoy = toplam_varlik_hesapla()
 
         rapor = (
             f"⚙️ <b>SOL & XRP Optimize Bot Raporu</b>\n"
@@ -227,7 +262,7 @@ def telegram_gelen_mesaj_dinleyici():
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
             params = {"timeout": 10, "offset": offset}
-            response = requests.get(url, params=params, timeout=15).json()
+            response = requests.get(url, params=params, proxies=PROXIES, timeout=15).json()
             if response.get("ok") and response.get("result"):
                 for update in response["result"]:
                     offset = update["update_id"] + 1
@@ -242,24 +277,30 @@ def telegram_gelen_mesaj_dinleyici():
 
                     callback_query = update.get("callback_query")
                     if callback_query and str(callback_query.get("message", {}).get("chat", {}).get("id")) == str(TELEGRAM_CHAT_ID):
+                        query_id = callback_query.get("id")
                         data = callback_query.get("data", "")
+                        callback_yanitla(query_id)
 
                         if data == "cmd_durum":
                             telegram_bildir(durum_raporu_metni(), reply_markup=inline_menu_olustur())
                         elif data == "cmd_bakiye":
-                            kar_zarar = sanal_cuzdan['nakit_usdt'] - sanal_cuzdan['baslangic_sermaye']
-                            p_str = f"+{round(kar_zarar, 2)}\( " if kar_zarar >= 0 else f"{round(kar_zarar, 2)} \)"
+                            with data_lock:
+                                nakit = round(sanal_cuzdan["nakit_usdt"], 2)
+                                toplam_varlik = round(toplam_varlik_hesapla(), 2)
+                                kar_zarar = toplam_varlik_hesapla() - sanal_cuzdan["baslangic_sermaye"]
+                            p_str = f"+{round(kar_zarar, 2)}$" if kar_zarar >= 0 else f"{round(kar_zarar, 2)}$"
                             telegram_bildir(
                                 f"💰 <b>Sanal Cüzdan Durumu</b>\n\n"
-                                f"• Nakit: <b>{round(sanal_cuzdan['nakit_usdt'], 2)}$</b>\n"
+                                f"• Nakit: <b>{nakit}$</b>\n"
+                                f"• Toplam Varlık: <b>{toplam_varlik}$</b>\n"
                                 f"• Toplam K/Z: <b>{p_str}</b>",
                                 reply_markup=inline_menu_olustur()
                             )
                         elif data == "cmd_baslat":
-                            config.BOT_CALISIYOR = True
+                            bot_durumu_ayarla(True)
                             telegram_bildir("🚀 Bot tarama döngüsü <b>aktif.</b>", reply_markup=inline_menu_olustur())
                         elif data == "cmd_durdur":
-                            config.BOT_CALISIYOR = False
+                            bot_durumu_ayarla(False)
                             telegram_bildir("⏸️ Bot tarama döngüsü <b>durduruldu.</b>", reply_markup=inline_menu_olustur())
         except Exception:
             time.sleep(5)
@@ -268,29 +309,32 @@ def telegram_gelen_mesaj_dinleyici():
 def periyodik_konsol_rapor_dongusu():
     while True:
         time.sleep(300)
-        if config.BOT_CALISIYOR:
+        if bot_aktif_mi():
             with data_lock:
-                toplam_portfoy = sanal_cuzdan["nakit_usdt"]
-                for sym, pos in aktif_pozisyonlar.items():
-                    if pos["aktif"]:
-                        toplam_portfoy += pos["resmi_pnl"]
-
-                print(f"\n⏱️ [5 Dakikalık Konsol Raporu] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-                print(f"• Nakit Bakiye: {round(sanal_cuzdan['nakit_usdt'], 2)}$")
-                print(f"• Toplam Varlık: {round(toplam_portfoy, 2)}$")
+                toplam_portfoy = toplam_varlik_hesapla()
+                nakit = round(sanal_cuzdan["nakit_usdt"], 2)
+                poz_ozet = []
                 for sym, pos in aktif_pozisyonlar.items():
                     coin_adi = config.PROFILES[sym]["name"]
                     if pos["aktif"]:
-                        print(f"• {coin_adi} Açık: {pos['yon']} | Giriş: {pos['giris_fiyati']} | PNL: {round(pos['resmi_pnl'], 3)}$")
+                        poz_ozet.append(
+                            f"• {coin_adi} Açık: {pos['yon']} | Giriş: {pos['giris_fiyati']} | PNL: {round(pos['resmi_pnl'], 3)}$"
+                        )
                     else:
-                        print(f"• {coin_adi} Açık: Yok")
-                print("-" * 40)
+                        poz_ozet.append(f"• {coin_adi} Açık: Yok")
+
+            print(f"\n⏱️ [5 Dakikalık Konsol Raporu] {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"• Nakit Bakiye: {nakit}$")
+            print(f"• Toplam Varlık: {round(toplam_portfoy, 2)}$")
+            for satir in poz_ozet:
+                print(satir)
+            print("-" * 40)
 
 # --- 🚀 SL / TP TAKİP ---
 def hizli_pozisyon_takip_dongusu():
     while True:
         try:
-            if not config.BOT_CALISIYOR:
+            if not bot_aktif_mi():
                 time.sleep(1.0)
                 continue
 
@@ -334,14 +378,16 @@ def hizli_pozisyon_takip_dongusu():
                     with data_lock:
                         sanal_cuzdan["nakit_usdt"] += config.ISLEM_MARJIN + resmi_pnl
                         aktif_pozisyonlar[symbol]["aktif"] = False
+                        aktif_pozisyonlar[symbol]["resmi_pnl"] = 0.0
                         aktif_pozisyonlar[symbol]["son_kapanis_mum_ts"] = mevcut_mum_ts
+                        yeni_nakit = round(sanal_cuzdan["nakit_usdt"], 2)
 
                     coin_adi = profile["name"]
                     konsol_ve_telegram_bildir(
                         f"🔴 <b>{coin_adi} {yon} Kapatıldı!</b>\n"
                         f"• Neden: <b>{kapatma_nedeni}</b>\n"
                         f"• Net PNL: <b>{round(resmi_pnl, 3)}$</b>\n"
-                        f"• Yeni Nakit: {round(sanal_cuzdan['nakit_usdt'], 2)}$"
+                        f"• Yeni Nakit: {yeni_nakit}$"
                     )
 
             time.sleep(1.0)
@@ -352,7 +398,7 @@ def hizli_pozisyon_takip_dongusu():
 def multi_coin_tarama_dongusu():
     while True:
         try:
-            if not config.BOT_CALISIYOR:
+            if not bot_aktif_mi():
                 time.sleep(2.0)
                 continue
 
